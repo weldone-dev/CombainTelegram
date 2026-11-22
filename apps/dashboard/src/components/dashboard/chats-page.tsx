@@ -3,9 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
+import {
+  notificationsReady,
+  showMessageNotification,
+} from "../../lib/notifications";
 import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
   ChatView,
+  ForwardResult,
   MessageHistoryView,
   MessageView,
   RealtimeDeletedEvent,
@@ -29,6 +34,7 @@ export function ChatsPage() {
     reloadAccounts,
     openAddAccount,
     realtimeOnline,
+    showNotice,
   } = useAppData();
 
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
@@ -48,6 +54,12 @@ export function ChatsPage() {
 
   const [typing, setTyping] = useState<Record<string, TypingEntry[]>>({});
   const selectedChatRef = useRef<ChatView | null>(null);
+  const chatsRef = useRef<ChatView[]>([]);
+  chatsRef.current = chats;
+  const selectedAccountIdRef = useRef<string | null>(null);
+  selectedAccountIdRef.current = selectedAccountId;
+  const selectedChatIdRef = useRef<number | null>(null);
+  selectedChatIdRef.current = selectedChatId;
 
   // Remember the last opened account and honor ?account=<id> links from the
   // accounts page.
@@ -188,14 +200,20 @@ export function ChatsPage() {
   }, [selectedAccountId, selectedChatId, nextOffsetId]);
 
   const sendMessage = useCallback(
-    async (text: string) => {
+    async (text: string, replyToId?: number) => {
       if (selectedAccountId === null || selectedChatId === null) return;
       const trimmed = text.trim();
       if (!trimmed) return;
       try {
         const message = await apiFetch<MessageView>(
           `/accounts/${selectedAccountId}/chats/${selectedChatId}/messages`,
-          { method: "POST", body: { text: trimmed } },
+          {
+            method: "POST",
+            body:
+              replyToId !== undefined
+                ? { text: trimmed, replyToId }
+                : { text: trimmed },
+          },
         );
         setMessages((previous) =>
           previous.some((item) => item.id === message.id)
@@ -210,8 +228,57 @@ export function ChatsPage() {
           ),
         );
       } catch (error) {
-        setMessagesError(errorMessage(error));
+        const textError = errorMessage(error);
+        setMessagesError(textError);
+        throw new Error(textError);
       }
+    },
+    [selectedAccountId, selectedChatId],
+  );
+
+  const forwardMessages = useCallback(
+    async (toChatId: number, messageIds: number[]) => {
+      if (selectedAccountId === null || selectedChatId === null) return;
+      try {
+        const result = await apiFetch<ForwardResult>(
+          `/accounts/${selectedAccountId}/chats/${toChatId}/forward`,
+          {
+            method: "POST",
+            body: { fromChatId: selectedChatId, messageIds },
+          },
+        );
+        showNotice(
+          result.forwarded === 1
+            ? "Сообщение переслано"
+            : `Переслано сообщений: ${result.forwarded}`,
+        );
+      } catch (error) {
+        throw new Error(errorMessage(error));
+      }
+    },
+    [selectedAccountId, selectedChatId, showNotice],
+  );
+
+  const deleteMessages = useCallback(
+    async (messageIds: number[]) => {
+      if (selectedAccountId === null || selectedChatId === null) return;
+      const accountId = selectedAccountId;
+      const chatId = selectedChatId;
+      let firstError: string | null = null;
+      for (const messageId of messageIds) {
+        try {
+          await apiFetch(
+            `/accounts/${accountId}/chats/${chatId}/messages/${messageId}`,
+            { method: "DELETE" },
+          );
+          setMessages((previous) =>
+            previous.filter((message) => message.id !== messageId),
+          );
+        } catch (error) {
+          firstError ??= errorMessage(error);
+        }
+      }
+      if (firstError) throw new Error(firstError);
     },
     [selectedAccountId, selectedChatId],
   );
@@ -316,8 +383,27 @@ export function ChatsPage() {
     return subscribeRealtime(({ event, payload }) => {
       if (event === "message.new") {
         const data = payload as RealtimeMessageEvent;
-        if (data.accountId !== selectedAccountId) return;
         const message = data.message;
+
+        // Desktop notification: only for incoming messages and only while the
+        // window is hidden or unfocused. The bell toggle is read from storage
+        // so changes made in the header apply immediately.
+        const hidden =
+          document.visibilityState !== "visible" || !document.hasFocus();
+        if (!message.outgoing && hidden && notificationsReady()) {
+          const chatTitle =
+            data.accountId === selectedAccountIdRef.current
+              ? chatsRef.current.find((chat) => chat.id === data.chatId)?.title
+              : undefined;
+          showMessageNotification(
+            chatTitle ?? `Чат ${data.chatId}`,
+            message.senderName,
+            message.text || (message.mediaType ? `[${message.mediaType}]` : ""),
+            data.chatId,
+          );
+        }
+
+        if (data.accountId !== selectedAccountId) return;
         setMessages((previous) => {
           if (data.chatId !== selectedChatId) return previous;
           if (previous.some((item) => item.id === message.id)) return previous;
@@ -475,6 +561,7 @@ export function ChatsPage() {
       <ChatWindow
         account={selectedAccount}
         chat={selectedChat}
+        chats={chats}
         messages={messages}
         loading={messagesLoading}
         error={messagesError}
@@ -482,9 +569,11 @@ export function ChatsPage() {
         loadingMore={loadingMore}
         typing={chatTyping}
         onLoadMore={() => void loadMore()}
-        onSend={(text) => void sendMessage(text)}
+        onSend={(text, replyToId) => sendMessage(text, replyToId)}
         onEdit={(messageId, text) => void editMessage(messageId, text)}
         onDelete={(messageId) => void deleteMessage(messageId)}
+        onDeleteMany={deleteMessages}
+        onForward={forwardMessages}
         onTyping={() => void sendTyping()}
         onRead={(maxId) => {
           if (selectedAccountId && selectedChatId !== null) {
