@@ -803,6 +803,7 @@ export function ChatsPage() {
             void markRead(selectedAccountId, selectedChatId, maxId);
           }
         }}
+        onOpenChat={handleSelectChat}
       />
     </div>
   );

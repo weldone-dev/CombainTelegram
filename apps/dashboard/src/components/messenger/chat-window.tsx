@@ -25,6 +25,7 @@ import type {
   TypingEntry,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
+import { ChatInfoPanel } from "./chat-info-panel";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
 
@@ -54,6 +55,7 @@ export function ChatWindow({
   onForward,
   onTyping,
   onRead,
+  onOpenChat,
 }: {
   account: AccountView | null;
   chat: ChatView | null;
@@ -79,6 +81,8 @@ export function ChatWindow({
   onTyping: () => void;
   /** Called with the newest visible id once the user is at the bottom. */
   onRead: (maxId: number) => void;
+  /** Opens another chat from the info panel's "Похожие" list. */
+  onOpenChat?: (chatId: number) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [attachment, setAttachment] = useState<File | null>(null);
@@ -94,6 +98,7 @@ export function ChatWindow({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [infoOpen, setInfoOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -117,6 +122,18 @@ export function ChatWindow({
 
   const visible = [...messages].reverse();
   const activeTyping = typing.filter((entry) => entry.until > Date.now());
+
+  // The info panel belongs to one chat: switching chats closes it.
+  // `chat` updates for unread counts too, so compare ids before resetting.
+  const infoChatRef = useRef<number | null>(chat?.id ?? null);
+  useEffect(() => {
+    const id = chat?.id ?? null;
+    if (infoChatRef.current === id) return;
+    infoChatRef.current = id;
+    setInfoOpen(false);
+  }, [chat]);
+
+  const closeInfo = useCallback(() => setInfoOpen(false), []);
 
   // Restore the per-account/per-chat draft and reset transient composer state
   // whenever the open chat changes. localStorage is only touched here.
@@ -312,6 +329,8 @@ export function ChatWindow({
   const submit = async () => {
     const text = draft.trim();
     if ((!text && !attachment) || !account || !chat) return;
+    // Read-only channels/groups never send, even if a stale event fires.
+    if (chat.canSendMessages === false) return;
     const key = draftStorageKey(account.id, chat.id);
     const replyTargetId = replyTo?.id;
     try {
@@ -439,25 +458,37 @@ export function ChatWindow({
   const byId = new Map(messages.map((message) => [message.id, message]));
   const forwardTargets = chats.filter((item) => item.id !== chat.id);
   const selectedIds = [...selected];
+  const canWrite = chat.canSendMessages !== false;
 
   return (
-    <section className="flex min-w-[420px] flex-1 flex-col bg-zinc-950">
+    <section className="relative flex min-w-[420px] flex-1 flex-col bg-zinc-950">
       <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-3">
-        <Avatar
-          key={chat.id}
-          src={chatAvatarUrl(account.id, chat.id)}
-          label={chat.title}
-          className="h-9 w-9 text-xs"
-        />
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold text-zinc-100">
-            {chat.title}
-          </h2>
-          <p className="truncate text-xs text-zinc-500">
-            {chat.username ? `@${chat.username}` : `чат ${chat.id}`}
-            {chat.unreadCount > 0 ? ` · ${chat.unreadCount} непрочитанных` : ""}
-          </p>
-        </div>
+        <button
+          type="button"
+          onClick={() => setInfoOpen(true)}
+          title="Информация о чате"
+          aria-label={`Информация о чате ${chat.title}`}
+          aria-expanded={infoOpen}
+          className="-m-1 flex min-w-0 items-center gap-3 rounded-lg p-1 text-left transition-colors hover:bg-zinc-900"
+        >
+          <Avatar
+            key={chat.id}
+            src={chatAvatarUrl(account.id, chat.id)}
+            label={chat.title}
+            className="h-9 w-9 text-xs"
+          />
+          <span className="block min-w-0">
+            <span className="block truncate text-sm font-semibold text-zinc-100">
+              {chat.title}
+            </span>
+            <span className="block truncate text-xs text-zinc-500">
+              {chat.username ? `@${chat.username}` : `чат ${chat.id}`}
+              {chat.unreadCount > 0
+                ? ` · ${chat.unreadCount} непрочитанных`
+                : ""}
+            </span>
+          </span>
+        </button>
         <div className="ml-auto flex shrink-0 items-center gap-3">
           {activeTyping.length > 0 && (
             <span className="text-xs text-sky-400">
@@ -663,18 +694,20 @@ export function ChatWindow({
                           message.outgoing ? "justify-end" : "justify-start"
                         }`}
                       >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setReplyTo(message);
-                            inputRef.current?.focus();
-                          }}
-                          title="Ответить"
-                          aria-label="Ответить"
-                          className="underline underline-offset-2 hover:text-white"
-                        >
-                          Ответить
-                        </button>
+                        {canWrite && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReplyTo(message);
+                              inputRef.current?.focus();
+                            }}
+                            title="Ответить"
+                            aria-label="Ответить"
+                            className="underline underline-offset-2 hover:text-white"
+                          >
+                            Ответить
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setForwardIds([message.id])}
@@ -784,7 +817,7 @@ export function ChatWindow({
         </div>
       )}
 
-      {replyTo && (
+      {canWrite && replyTo && (
         <div className="flex items-start gap-2 border-t border-zinc-800 bg-zinc-900/60 px-5 py-2">
           <div className="min-w-0 flex-1 border-l-2 border-sky-500 pl-2">
             <p className="truncate text-[11px] font-medium text-sky-400">
@@ -806,93 +839,105 @@ export function ChatWindow({
         </div>
       )}
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-        className="border-t border-zinc-800 px-5 py-3"
-      >
-        {attachment && (
-          <div className="mb-2 flex items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900/70 p-2">
-            {attachmentPreview ? (
-              // biome-ignore lint/performance/noImgElement: local object URL preview of the picked file; next/image cannot optimise blob URLs.
-              <img
-                src={attachmentPreview}
-                alt={attachment.name}
-                className="h-14 w-14 rounded object-cover"
-              />
-            ) : (
-              <span
-                aria-hidden="true"
-                className="flex h-14 w-14 items-center justify-center rounded bg-zinc-800 text-xl"
+      {!canWrite && (
+        <div className="border-t border-zinc-800 px-5 py-3">
+          <output className="block rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-center text-xs text-zinc-400">
+            {chat.type === "channel"
+              ? "В этом канале нельзя отправлять сообщения"
+              : "Отправка сообщений ограничена"}
+          </output>
+        </div>
+      )}
+
+      {canWrite && (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
+          }}
+          className="border-t border-zinc-800 px-5 py-3"
+        >
+          {attachment && (
+            <div className="mb-2 flex items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900/70 p-2">
+              {attachmentPreview ? (
+                // biome-ignore lint/performance/noImgElement: local object URL preview of the picked file; next/image cannot optimise blob URLs.
+                <img
+                  src={attachmentPreview}
+                  alt={attachment.name}
+                  className="h-14 w-14 rounded object-cover"
+                />
+              ) : (
+                <span
+                  aria-hidden="true"
+                  className="flex h-14 w-14 items-center justify-center rounded bg-zinc-800 text-xl"
+                >
+                  📄
+                </span>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm text-zinc-100">
+                  {attachment.name}
+                </p>
+                <p className="text-xs text-zinc-500">
+                  {formatFileSize(attachment.size)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={clearAttachment}
+                title="Убрать файл"
+                aria-label="Убрать файл"
+                className="shrink-0 rounded-md px-2 py-1 text-sm text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
               >
-                📄
-              </span>
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm text-zinc-100">
-                {attachment.name}
-              </p>
-              <p className="text-xs text-zinc-500">
-                {formatFileSize(attachment.size)}
-              </p>
+                ✕
+              </button>
             </div>
+          )}
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={(event) => {
+                chooseAttachment(event.target.files?.[0] ?? null);
+                event.target.value = "";
+              }}
+            />
             <button
               type="button"
-              onClick={clearAttachment}
-              title="Убрать файл"
-              aria-label="Убрать файл"
-              className="shrink-0 rounded-md px-2 py-1 text-sm text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              onClick={() => fileInputRef.current?.click()}
+              title="Прикрепить фото или файл"
+              aria-label="Прикрепить фото или файл"
+              className="rounded-full border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
             >
-              ✕
+              📎
+            </button>
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(event) => handleDraftChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void submit();
+                }
+                if (event.key === "Escape") setReplyTo(null);
+              }}
+              placeholder={
+                attachment ? "Подпись к файлу…" : `Сообщение в ${chat.title}`
+              }
+              className="flex-1 rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
+            />
+            <button
+              type="submit"
+              disabled={!draft.trim() && !attachment}
+              className="rounded-full bg-sky-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-400 disabled:opacity-40"
+            >
+              Отправить
             </button>
           </div>
-        )}
-        <div className="flex items-center gap-2">
-          <input
-            ref={fileInputRef}
-            type="file"
-            className="hidden"
-            onChange={(event) => {
-              chooseAttachment(event.target.files?.[0] ?? null);
-              event.target.value = "";
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            title="Прикрепить фото или файл"
-            aria-label="Прикрепить фото или файл"
-            className="rounded-full border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
-          >
-            📎
-          </button>
-          <input
-            ref={inputRef}
-            value={draft}
-            onChange={(event) => handleDraftChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void submit();
-              }
-              if (event.key === "Escape") setReplyTo(null);
-            }}
-            placeholder={
-              attachment ? "Подпись к файлу…" : `Сообщение в ${chat.title}`
-            }
-            className="flex-1 rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
-          />
-          <button
-            type="submit"
-            disabled={!draft.trim() && !attachment}
-            className="rounded-full bg-sky-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-400 disabled:opacity-40"
-          >
-            Отправить
-          </button>
-        </div>
-      </form>
+        </form>
+      )}
 
       {forwardIds && (
         <ForwardModal
@@ -904,6 +949,17 @@ export function ChatWindow({
             if (selecting) exitSelection();
           }}
           onClose={() => setForwardIds(null)}
+        />
+      )}
+
+      {infoOpen && (
+        <ChatInfoPanel
+          key={chat.id}
+          accountId={account.id}
+          chat={chat}
+          chats={chats}
+          onOpenChat={onOpenChat}
+          onClose={closeInfo}
         />
       )}
     </section>

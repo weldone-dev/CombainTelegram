@@ -53,6 +53,30 @@ export function formatFileSize(bytes: number | null): string {
   return `${rounded} ${units[unit]}`;
 }
 
+/** Russian label of a chat kind: Канал / Группа / Личный чат / Бот. */
+export function chatKindLabel(chat: {
+  type?: string | null;
+  isChannel?: boolean | null;
+  isGroup?: boolean | null;
+  username?: string | null;
+}): string {
+  if (chat.isChannel || chat.type === "channel") return "Канал";
+  if (chat.isGroup || chat.type === "chat" || chat.type === "group") {
+    return "Группа";
+  }
+  if (chat.type === "user") {
+    return chat.username?.toLowerCase().endsWith("bot") ? "Бот" : "Личный чат";
+  }
+  return "Чат";
+}
+
+/** "1 234 участника" — thousands separator plus the right plural form. */
+export function formatMemberCount(count: number | null): string {
+  if (count === null || !Number.isFinite(count) || count < 0) return "";
+  const value = Math.trunc(count);
+  return `${value.toLocaleString("ru-RU")} ${plural(value, "участник", "участника", "участников")}`;
+}
+
 function plural(count: number, one: string, few: string, many: string): string {
   const mod10 = count % 10;
   const mod100 = count % 100;
