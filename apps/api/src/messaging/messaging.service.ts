@@ -79,6 +79,18 @@ import type { ChatInfoKind } from './params.js';
 
 export type { ChatInfoView, ChatPeerView } from './chat-info.js';
 
+/**
+ * mtcute 0.32 throws `MtUnsupportedError` when Telegram answers with
+ * `upload.fileCdnRedirect`: large files/photos may live on a CDN DC that the
+ * library cannot follow yet. Callers fall back to a smaller size or an
+ * initials avatar instead of surfacing a 502.
+ */
+export function isCdnRedirectError(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.includes('CDN redirect')
+  );
+}
+
 export interface ChatInfoPollView {
   question: string;
   options: string[];
@@ -682,6 +694,27 @@ export class MessagingService {
       this.setAvatar(key, data);
       return { data, mime: 'image/jpeg' };
     } catch (error) {
+      // Some official/avatar photos are served through a CDN redirect that
+      // mtcute cannot follow. Try the big variant once, then fall back to the
+      // generated initials avatar instead of a 502.
+      if (isCdnRedirectError(error)) {
+        const big = (photo as { big?: unknown }).big;
+        if (big && big !== photo.small) {
+          try {
+            const data = Buffer.from(
+              await client.downloadAsBuffer(
+                big as Parameters<typeof client.downloadAsBuffer>[0],
+              ),
+            );
+            this.setAvatar(key, data);
+            return { data, mime: 'image/jpeg' };
+          } catch {
+            // fall through to "no avatar"
+          }
+        }
+        this.setAvatar(key, null);
+        return null;
+      }
       raiseTelegramError(error);
     }
   }
@@ -1138,53 +1171,66 @@ export class MessagingService {
     // Telegram documents may be gigabytes; reject before buffering anything.
     assertMediaDownloadSize(descriptor.size);
 
+    let data: Buffer;
     try {
-      const data = Buffer.from(await client.downloadAsBuffer(media));
-      // Never echo the sender's MIME verbatim: `image/svg+xml` would be
-      // executable on this origin. Invalid values become octet-stream, and
-      // only raster images are served `inline`; voice notes are played from
-      // the API origin by an `<audio>` element, so they stay inline too.
-      const mimeType = normalizeMimeType(
-        descriptor.mimeType ??
-          (descriptor.kind === 'photo'
-            ? 'image/jpeg'
-            : descriptor.kind === 'voice'
-              ? 'audio/ogg'
-              : null),
-      );
-      const defaultFileName = sanitizeFileName(
-        descriptor.fileName,
-        descriptor.kind === 'photo'
-          ? 'photo.jpg'
-          : descriptor.kind === 'voice'
-            ? 'voice.ogg'
-            : 'document',
-      );
-      const fileName = sanitizeFileName(
-        requestedName ?? defaultFileName,
-        defaultFileName,
-      );
-      const inline =
-        isInlineSafeMime(mimeType) || descriptor.kind === 'voice';
-
-      this.rememberDownload(cacheKey, {
-        data,
-        mimeType,
-        fileName: defaultFileName,
-        inline,
-        at: Date.now(),
-      });
-
-      return {
-        data,
-        mimeType,
-        fileName,
-        disposition: contentDisposition(fileName, inline),
-        length: data.byteLength,
-      };
+      data = Buffer.from(await client.downloadAsBuffer(media));
     } catch (error) {
-      raiseTelegramError(error);
+      // mtcute 0.32 cannot follow Telegram's CDN redirects for some files.
+      // Photos fall back to their largest available thumbnail instead of
+      // failing the whole download; avatars are handled separately.
+      if (!isCdnRedirectError(error) || media.type !== 'photo') {
+        raiseTelegramError(error);
+      }
+      const thumb = pickThumbnail(media as Parameters<typeof pickThumbnail>[0]);
+      if (!thumb) raiseTelegramError(error);
+      data = Buffer.from(
+        await client.downloadAsBuffer(
+          thumb as Parameters<typeof client.downloadAsBuffer>[0],
+        ),
+      );
     }
+
+    // Never echo the sender's MIME verbatim: `image/svg+xml` would be
+    // executable on this origin. Invalid values become octet-stream, and
+    // only raster images are served `inline`; voice notes are played from
+    // the API origin by an `<audio>` element, so they stay inline too.
+    const mimeType = normalizeMimeType(
+      descriptor.mimeType ??
+        (descriptor.kind === 'photo'
+          ? 'image/jpeg'
+          : descriptor.kind === 'voice'
+            ? 'audio/ogg'
+            : null),
+    );
+    const defaultFileName = sanitizeFileName(
+      descriptor.fileName,
+      descriptor.kind === 'photo'
+        ? 'photo.jpg'
+        : descriptor.kind === 'voice'
+          ? 'voice.ogg'
+          : 'document',
+    );
+    const fileName = sanitizeFileName(
+      requestedName ?? defaultFileName,
+      defaultFileName,
+    );
+    const inline = isInlineSafeMime(mimeType) || descriptor.kind === 'voice';
+
+    this.rememberDownload(cacheKey, {
+      data,
+      mimeType,
+      fileName: defaultFileName,
+      inline,
+      at: Date.now(),
+    });
+
+    return {
+      data,
+      mimeType,
+      fileName,
+      disposition: contentDisposition(fileName, inline),
+      length: data.byteLength,
+    };
   }
 
   /**
