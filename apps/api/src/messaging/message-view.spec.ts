@@ -2,6 +2,7 @@ import {
   toChatView,
   toChatViewFromPeer,
   toFolderView,
+  toMessageMediaView,
   toMessageView,
 } from './message-view.js';
 import type { DialogLike, MessageLike } from './message-view.js';
@@ -44,6 +45,7 @@ describe('message DTO mapping', () => {
       senderName: 'Alice',
       replyToId: null,
       mediaType: null,
+      media: null,
     });
   });
 
@@ -63,6 +65,74 @@ describe('message DTO mapping', () => {
       edited: true,
       replyToId: 7,
       mediaType: 'photo',
+      media: {
+        kind: 'photo',
+        mimeType: null,
+        fileName: null,
+        size: null,
+        downloadable: true,
+      },
+    });
+  });
+
+  it('maps document media with file name, MIME type and size', () => {
+    const media = {
+      type: 'document',
+      fileName: 'report.pdf',
+      mimeType: 'application/pdf',
+      fileSize: 1234,
+    };
+
+    expect(toMessageMediaView(media)).toEqual({
+      kind: 'document',
+      mimeType: 'application/pdf',
+      fileName: 'report.pdf',
+      size: 1234,
+      downloadable: true,
+    });
+    expect(toMessageView(fakeMessage({ media }))).toMatchObject({
+      mediaType: 'document',
+      media: { kind: 'document' },
+    });
+  });
+
+  it('maps unsupported media as other and keeps it non-downloadable', () => {
+    expect(
+      toMessageMediaView({
+        type: 'video',
+        fileName: 'clip.mp4',
+        mimeType: 'video/mp4',
+        fileSize: 99,
+      }),
+    ).toEqual({
+      kind: 'other',
+      mimeType: 'video/mp4',
+      fileName: 'clip.mp4',
+      size: 99,
+      downloadable: false,
+    });
+  });
+
+  it('survives media getters that throw', () => {
+    const media = {
+      type: 'document',
+      get fileName(): string {
+        throw new Error('no filename');
+      },
+      get mimeType(): string {
+        throw new Error('no mime');
+      },
+      get fileSize(): number {
+        throw new Error('no size');
+      },
+    };
+
+    expect(toMessageMediaView(media)).toEqual({
+      kind: 'document',
+      mimeType: null,
+      fileName: null,
+      size: null,
+      downloadable: true,
     });
   });
 

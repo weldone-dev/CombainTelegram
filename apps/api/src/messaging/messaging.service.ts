@@ -1,19 +1,30 @@
 import { Injectable } from '@nestjs/common';
-import type {
-  Message,
-  Peer,
-  SendableTypingStatus,
-  TelegramClient,
-  tl,
+import {
+  InputMedia,
+  type Message,
+  type Peer,
+  type SendableTypingStatus,
+  type TelegramClient,
+  type tl,
 } from '@mtcute/node';
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
-import { apiError } from '../common/api-error.js';
+import { apiError, notFound } from '../common/api-error.js';
+import {
+  MEDIA_CACHE_MAX_ENTRIES,
+  MEDIA_CACHE_TTL_MS,
+  assertMediaUpload,
+  contentDisposition,
+  isImageMime,
+  mediaKindForMime,
+  sanitizeFileName,
+} from './media.js';
 import {
   toChatView,
   toChatViewFromPeer,
   toFolderView,
+  toMessageMediaView,
   toMessageView,
 } from './message-view.js';
 import type { ChatView, FolderView, MessageView } from './message-view.js';
@@ -27,6 +38,7 @@ import {
   parseMessageText,
   parseOffsetId,
   parseOptionalBoolean,
+  parseOptionalCaption,
   parseOptionalMessageId,
   parseOptionalSessionId,
   parseSearchQuery,
@@ -56,6 +68,24 @@ export interface ReadView {
 
 export interface ForwardView {
   forwarded: number;
+}
+
+export interface MediaUploadInput {
+  buffer: Buffer;
+  fileName?: string | null;
+  mimeType?: string | null;
+  size?: number;
+  caption?: unknown;
+  replyToId?: unknown;
+  sessionId?: unknown;
+}
+
+export interface MediaDownloadView {
+  data: Buffer;
+  mimeType: string;
+  fileName: string;
+  disposition: string;
+  length: number;
 }
 
 export interface ChatSearchView {
@@ -107,16 +137,22 @@ export const ALLOWED_TYPING_STATUSES: AllowedTypingStatus[] = [
   'cancel',
 ];
 
-function parseTypingStatus(value: unknown): AllowedTypingStatus {  if (value === undefined || value === null || value === '') return 'typing';
+function parseTypingStatus(value: unknown): AllowedTypingStatus {
+  if (value === undefined || value === null || value === '') return 'typing';
   if (
     typeof value === 'string' &&
     (ALLOWED_TYPING_STATUSES as string[]).includes(value)
   ) {
     return value as AllowedTypingStatus;
   }
-  throw apiError('VALIDATION_ERROR', 'status is not a supported typing status', 400, {
-    details: { allowed: ALLOWED_TYPING_STATUSES },
-  });
+  throw apiError(
+    'VALIDATION_ERROR',
+    'status is not a supported typing status',
+    400,
+    {
+      details: { allowed: ALLOWED_TYPING_STATUSES },
+    },
+  );
 }
 
 /**
@@ -134,6 +170,17 @@ export class MessagingService {
   private readonly avatars = new Map<
     string,
     { data: Buffer | null; at: number }
+  >();
+
+  private readonly downloads = new Map<
+    string,
+    {
+      data: Buffer;
+      mimeType: string;
+      fileName: string;
+      inline: boolean;
+      at: number;
+    }
   >();
 
   constructor(private readonly accounts: AccountsService) {}
@@ -342,6 +389,180 @@ export class MessagingService {
         replyToId !== undefined ? { replyTo: replyToId } : {},
       );
       return toMessageView(message);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Upload one photo or document and send it with an optional caption.
+   * Images go through `InputMedia.photo`, everything else is sent as a
+   * document. The buffer comes from the multipart interceptor (memory).
+   */
+  async sendMedia(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    input: MediaUploadInput,
+  ): Promise<MessageView> {
+    const chatId = parseChatId(rawChatId);
+    const caption = parseOptionalCaption(input.caption);
+    const replyToId = parseOptionalMessageId(input.replyToId);
+    const sessionId = parseOptionalSessionId(input.sessionId);
+    const size = input.size ?? input.buffer.byteLength;
+    assertMediaUpload(size);
+
+    const fileName = sanitizeFileName(
+      input.fileName,
+      isImageMime(input.mimeType) ? 'photo.jpg' : 'file',
+    );
+    const mimeType =
+      input.mimeType && input.mimeType.trim()
+        ? input.mimeType.trim()
+        : 'application/octet-stream';
+    const kind = mediaKindForMime(mimeType);
+
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const media =
+        kind === 'photo'
+          ? InputMedia.photo(input.buffer, {
+              fileName,
+              fileMime: mimeType,
+              fileSize: size,
+              ...(caption !== undefined ? { caption } : {}),
+            })
+          : InputMedia.document(input.buffer, {
+              fileName,
+              fileMime: mimeType,
+              fileSize: size,
+              ...(caption !== undefined ? { caption } : {}),
+            });
+      const message: Message = await client.sendMedia(
+        chatId,
+        media,
+        replyToId !== undefined ? { replyTo: replyToId } : {},
+      );
+      return toMessageView(message);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Download the media attached to one message. Photos and generic documents
+   * are supported; the last few results are cached in memory for 5 minutes.
+   */
+  async downloadMedia(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    sessionIdParam?: unknown,
+    filenameParam?: unknown,
+  ): Promise<MediaDownloadView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const cacheKey = `${accountId}:${chatId}:${messageId}`;
+
+    let cached = this.downloads.get(cacheKey);
+    if (cached && Date.now() - cached.at < MEDIA_CACHE_TTL_MS) {
+      this.downloads.delete(cacheKey);
+      this.downloads.set(cacheKey, cached);
+    } else {
+      cached = undefined;
+    }
+
+    const requestedName =
+      typeof filenameParam === 'string' && filenameParam.trim()
+        ? filenameParam.trim()
+        : null;
+
+    if (cached) {
+      const fileName = sanitizeFileName(
+        requestedName ?? cached.fileName,
+        cached.fileName,
+      );
+      return {
+        data: cached.data,
+        mimeType: cached.mimeType,
+        fileName,
+        disposition: contentDisposition(fileName, cached.inline),
+        length: cached.data.byteLength,
+      };
+    }
+
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    let message: Message | null = null;
+    try {
+      [message] = await client.getMessages(chatId, [messageId]);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+
+    const media = message?.media ?? null;
+    const descriptor = toMessageMediaView(media);
+    if (
+      !message ||
+      !media ||
+      !descriptor?.downloadable ||
+      (media.type !== 'photo' && media.type !== 'document')
+    ) {
+      throw notFound(
+        'MEDIA_NOT_FOUND',
+        'This message has no downloadable photo or document',
+      );
+    }
+
+    try {
+      const data = Buffer.from(await client.downloadAsBuffer(media));
+      const mimeType =
+        descriptor.mimeType ??
+        (descriptor.kind === 'photo'
+          ? 'image/jpeg'
+          : 'application/octet-stream');
+      const defaultFileName = sanitizeFileName(
+        descriptor.fileName,
+        descriptor.kind === 'photo' ? 'photo.jpg' : 'document',
+      );
+      const fileName = sanitizeFileName(
+        requestedName ?? defaultFileName,
+        defaultFileName,
+      );
+      const inline = isImageMime(mimeType);
+
+      this.downloads.delete(cacheKey);
+      this.downloads.set(cacheKey, {
+        data,
+        mimeType,
+        fileName: defaultFileName,
+        inline,
+        at: Date.now(),
+      });
+      while (this.downloads.size > MEDIA_CACHE_MAX_ENTRIES) {
+        const oldest = this.downloads.keys().next().value;
+        if (oldest === undefined) break;
+        this.downloads.delete(oldest);
+      }
+
+      return {
+        data,
+        mimeType,
+        fileName,
+        disposition: contentDisposition(fileName, inline),
+        length: data.byteLength,
+      };
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -732,11 +953,8 @@ export class MessagingService {
       const result: tl.messages.RawDialogFilters = await client.getFolders();
       const folders = result.filters
         .filter(
-          (
-            filter,
-          ): filter is tl.RawDialogFilter | tl.RawDialogFilterChatlist =>
-            filter._ === 'dialogFilter' ||
-            filter._ === 'dialogFilterChatlist',
+          (filter): filter is tl.RawDialogFilter | tl.RawDialogFilterChatlist =>
+            filter._ === 'dialogFilter' || filter._ === 'dialogFilterChatlist',
         )
         .map((filter) => toFolderView(filter));
       return { folders };

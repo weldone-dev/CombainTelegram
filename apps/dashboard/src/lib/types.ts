@@ -42,6 +42,14 @@ export interface AccountView {
   sessions: SessionView[];
 }
 
+export interface MessageMediaView {
+  kind: "photo" | "document" | "other";
+  mimeType: string | null;
+  fileName: string | null;
+  size: number | null;
+  downloadable: boolean;
+}
+
 export interface MessageView {
   id: number;
   chatId: number;
@@ -53,6 +61,7 @@ export interface MessageView {
   senderName: string;
   replyToId: number | null;
   mediaType: string | null;
+  media?: MessageMediaView | null;
 }
 
 export interface ChatView {
