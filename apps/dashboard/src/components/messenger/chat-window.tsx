@@ -18,6 +18,7 @@ import {
   writeDraft,
 } from "../../lib/drafts";
 import { formatFileSize, formatTime } from "../../lib/format";
+import { MAX_MEDIA_UPLOAD_BYTES } from "../../lib/messaging-api";
 import type {
   AccountView,
   ChatView,
@@ -98,6 +99,7 @@ export function ChatWindow({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -106,6 +108,9 @@ export function ChatWindow({
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stickRef = useRef(true);
+  const sendingRef = useRef(false);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const activeChatRef = useRef<number | null>(null);
   const pendingUnreadRef = useRef(0);
   const readUpToRef = useRef(0);
@@ -163,7 +168,7 @@ export function ChatWindow({
 
   const chooseAttachment = (file: File | null) => {
     if (!file) return;
-    if (file.size > 50 * 1024 * 1024) {
+    if (file.size > MAX_MEDIA_UPLOAD_BYTES) {
       setStatus("Файл больше 50 МБ");
       return;
     }
@@ -205,14 +210,15 @@ export function ChatWindow({
    */
   const markReadUpTo = useCallback(
     (maxId: number) => {
-      if (!chat || messages.length === 0) return;
+      const current = messagesRef.current;
+      if (chatId === null || current.length === 0) return;
       if (maxId <= readUpToRef.current) return;
       readUpToRef.current = maxId;
       onRead(maxId);
-      const newestId = messages[0].id;
+      const newestId = current[0].id;
       if (maxId >= newestId) setUnreadAnchor(0);
     },
-    [chat, messages, onRead],
+    [chatId, onRead],
   );
 
   useEffect(() => {
@@ -250,7 +256,7 @@ export function ChatWindow({
   // read, debounced to one request per settling of the scroll.
   useEffect(() => {
     const container = scrollRef.current;
-    if (!container || !chat) return;
+    if (!container || chatId === null || messages.length === 0) return;
     const items = container.querySelectorAll<HTMLElement>("[data-message-id]");
     if (items.length === 0) return;
 
@@ -286,7 +292,7 @@ export function ChatWindow({
       observer.disconnect();
       if (timer) clearTimeout(timer);
     };
-  }, [chat, markReadUpTo]);
+  }, [chatId, markReadUpTo, messages.length]);
 
   const handleScroll = () => {
     const container = scrollRef.current;
@@ -331,6 +337,11 @@ export function ChatWindow({
     if ((!text && !attachment) || !account || !chat) return;
     // Read-only channels/groups never send, even if a stale event fires.
     if (chat.canSendMessages === false) return;
+    // Enter and a click can land in the same tick: guard with a ref so the
+    // same draft is never submitted twice.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    setSending(true);
     const key = draftStorageKey(account.id, chat.id);
     const replyTargetId = replyTo?.id;
     try {
@@ -352,6 +363,9 @@ export function ChatWindow({
       setStatus(
         caught instanceof Error ? caught.message : "Не удалось отправить",
       );
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   };
 
@@ -930,10 +944,10 @@ export function ChatWindow({
             />
             <button
               type="submit"
-              disabled={!draft.trim() && !attachment}
+              disabled={sending || (!draft.trim() && !attachment)}
               className="rounded-full bg-sky-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-400 disabled:opacity-40"
             >
-              Отправить
+              {sending ? "Отправка…" : "Отправить"}
             </button>
           </div>
         </form>

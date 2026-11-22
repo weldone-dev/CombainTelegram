@@ -9,7 +9,8 @@ export type ChatMenuAction =
   | "read"
   | "unread"
   | "clear"
-  | "delete";
+  | "delete"
+  | "delete-all";
 
 const ITEM_CLASS =
   "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-40";
@@ -106,17 +107,27 @@ export function ChatActionsMenu({
         className={ITEM_CLASS}
       >
         <span aria-hidden="true">🧹</span>
-        Очистить историю
+        Очистить историю у себя
       </button>
       <button
         type="button"
         role="menuitem"
         disabled={busy}
         onClick={() => onAction("delete")}
+        className={ITEM_CLASS}
+      >
+        <span aria-hidden="true">🗑</span>
+        Удалить у себя
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        disabled={busy}
+        onClick={() => onAction("delete-all")}
         className={`${ITEM_CLASS} text-red-300 hover:bg-red-950/50`}
       >
         <span aria-hidden="true">🗑</span>
-        Удалить чат
+        Удалить у всех
       </button>
     </div>
   );

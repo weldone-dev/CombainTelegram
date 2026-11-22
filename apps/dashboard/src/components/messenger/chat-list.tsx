@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { errorMessage } from "../../lib/api";
 import { chatAvatarUrl } from "../../lib/avatar";
 import { formatDay } from "../../lib/format";
+import { MAX_CHAT_LIMIT } from "../../lib/messaging-api";
 import type {
   ChatFolderSelection,
   ChatPatch,
@@ -64,7 +65,8 @@ export function ChatList({
   onUpdateChat: (chatId: number, patch: ChatPatch) => Promise<void>;
   onMarkRead: (chatId: number) => Promise<void>;
   onClearHistory: (chatId: number) => Promise<void>;
-  onDeleteChat: (chatId: number) => Promise<void>;
+  /** `everyone=false` deletes only this account's copy; `true` revokes it for all. */
+  onDeleteChat: (chatId: number, everyone: boolean) => Promise<void>;
   onReadAll: () => Promise<void>;
   /** Adds the chat to the list when missing and selects it. */
   onOpenChat: (chat: ChatView) => void;
@@ -104,14 +106,24 @@ export function ChatList({
     if (
       action === "clear" &&
       !window.confirm(
-        `Очистить историю чата «${chat.title}»? Сообщения будут удалены у всех участников.`,
+        `Очистить историю чата «${chat.title}»? Сообщения будут удалены только у вас, у других участников они останутся.`,
       )
     ) {
       return;
     }
     if (
       action === "delete" &&
-      !window.confirm(`Удалить чат «${chat.title}»? Действие необратимо.`)
+      !window.confirm(
+        `Удалить чат «${chat.title}» у себя? История и диалог исчезнут только на вашем аккаунте.`,
+      )
+    ) {
+      return;
+    }
+    if (
+      action === "delete-all" &&
+      !window.confirm(
+        `Удалить чат «${chat.title}» у всех? История будет удалена у всех участников, действие необратимо.`,
+      )
     ) {
       return;
     }
@@ -135,7 +147,10 @@ export function ChatList({
           await onClearHistory(chat.id);
           break;
         case "delete":
-          await onDeleteChat(chat.id);
+          await onDeleteChat(chat.id, false);
+          break;
+        case "delete-all":
+          await onDeleteChat(chat.id, true);
           break;
       }
       setMenuId(null);
@@ -259,8 +274,8 @@ export function ChatList({
             <input
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
-              placeholder="Фильтр по названию или @username"
-              aria-label="Фильтр загруженных чатов"
+              placeholder={`Фильтр загруженных чатов (до ${MAX_CHAT_LIMIT})`}
+              aria-label="Фильтр загруженных чатов по названию или @username"
               className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 pr-7 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
             />
             {filter && (
