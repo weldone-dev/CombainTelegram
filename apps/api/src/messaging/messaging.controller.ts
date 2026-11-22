@@ -43,6 +43,7 @@ import type {
 import type {
   ChatView,
   MessagePollView,
+  MessageThreadView,
   MessageView,
 } from './message-view.js';
 import { MAX_MEDIA_BYTES } from './media.js';
@@ -288,6 +289,47 @@ export class MessagingController {
       newerThanId,
       sessionId,
     });
+  }
+
+  @Get(':chatId/messages/:messageId/thread')
+  @ApiOperation({
+    summary:
+      'Comments of a channel post (newest first; nextOffsetId pages older)',
+  })
+  getMessageThread(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Query('limit') limit?: string,
+    @Query('offsetId') offsetId?: string,
+    @Query('sessionId') sessionId?: string,
+  ): Promise<MessageThreadView> {
+    return this.messaging.getMessageThread(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      { limit, offsetId, sessionId },
+    );
+  }
+
+  @Post(':chatId/messages/:messageId/comment')
+  @ApiOperation({ summary: 'Comment on a channel post' })
+  sendComment(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: { text?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessageView> {
+    return this.messaging.sendComment(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      body,
+    );
   }
 
   @Post(':chatId/messages')

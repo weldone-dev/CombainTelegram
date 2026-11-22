@@ -86,6 +86,21 @@ export interface MessageTranscriptionView {
   pending: boolean;
 }
 
+export interface MessageThreadInfo {
+  comments: number;
+  hasComments: boolean;
+  discussionChatId: number | null;
+}
+
+/** `GET .../messages/:messageId/thread` — comments newest first. */
+export interface MessageThreadView {
+  chatId: number;
+  messageId: number;
+  discussionChatId: number | null;
+  comments: MessageView[];
+  nextOffsetId: number | null;
+}
+
 export interface MessageView {
   id: number;
   chatId: number;
@@ -101,6 +116,7 @@ export interface MessageView {
   reactions?: MessageReactionView[] | null;
   poll?: MessagePollView | null;
   isVoice?: boolean;
+  thread?: MessageThreadInfo | null;
 }
 
 export interface ChatView {

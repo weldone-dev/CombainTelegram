@@ -9,6 +9,7 @@ import type {
   FolderView,
   GlobalSearchView,
   MessagePollView,
+  MessageThreadView,
   MessageTranscriptionView,
   MessageTranslationView,
   MessageView,
@@ -184,5 +185,36 @@ export function transcribeMessage(
   return apiFetch<MessageTranscriptionView>(
     `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/transcribe`,
     { method: "POST", body: {} },
+  );
+}
+
+/** Comments of a channel post, newest first; `offsetId` loads older ones. */
+export function listMessageThread(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  options: { limit?: number; offsetId?: number } = {},
+): Promise<MessageThreadView> {
+  const params = new URLSearchParams();
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offsetId !== undefined)
+    params.set("offsetId", String(options.offsetId));
+  const query = params.toString();
+  return apiFetch<MessageThreadView>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/thread${query ? `?${query}` : ""}`,
+    {},
+  );
+}
+
+/** Post a comment into a channel post's discussion group. */
+export function sendMessageComment(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  text: string,
+): Promise<MessageView> {
+  return apiFetch<MessageView>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/comment`,
+    { method: "POST", body: { text } },
   );
 }

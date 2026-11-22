@@ -25,16 +25,19 @@ import {
   transcribeMessage,
   translateMessage,
 } from "../../lib/messaging-api";
+import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
   AccountView,
   ChatView,
   MessagePollView,
   MessageReactionView,
   MessageView,
+  RealtimeMessageEvent,
   TypingEntry,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
 import { ChatInfoPanel } from "./chat-info-panel";
+import { CommentThreadDrawer } from "./comment-thread-drawer";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
 
@@ -166,6 +169,10 @@ export function ChatWindow({
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [threadFor, setThreadFor] = useState<MessageView | null>(null);
+  const [threadCounts, setThreadCounts] = useState<Map<number, number>>(
+    () => new Map(),
+  );
   const [translateLang, setTranslateLang] = useState("ru");
   const [reactionPending, setReactionPending] = useState<Set<number>>(
     () => new Set(),
@@ -231,6 +238,34 @@ export function ChatWindow({
 
   const closeInfo = useCallback(() => setInfoOpen(false), []);
 
+  const threadCount = (message: MessageView) =>
+    threadCounts.get(message.id) ?? message.thread?.comments ?? 0;
+
+  const openThreadChatId = threadFor?.thread?.discussionChatId ?? null;
+
+  // Keep the counter under an open thread in sync with new comments arriving
+  // through the discussion chat, without refetching the whole thread.
+  useEffect(() => {
+    if (threadFor === null || openThreadChatId === null || !accountId) return;
+    const messageId = threadFor.id;
+    const base = threadFor.thread?.comments ?? 0;
+    return subscribeRealtime(({ event, payload }) => {
+      if (event !== "message.new") return;
+      const data = payload as RealtimeMessageEvent;
+      if (data.accountId !== accountId || data.chatId !== openThreadChatId) {
+        return;
+      }
+      if (data.message.id === messageId) return;
+      // The composer already bumps the counter for our own comments.
+      if (data.message.outgoing) return;
+      setThreadCounts((previous) => {
+        const next = new Map(previous);
+        next.set(messageId, (next.get(messageId) ?? base) + 1);
+        return next;
+      });
+    });
+  }, [accountId, threadFor, openThreadChatId]);
+
   // Restore the per-account/per-chat draft and reset transient composer state
   // whenever the open chat changes. localStorage is only touched here.
   useEffect(() => {
@@ -257,6 +292,8 @@ export function ChatWindow({
     setTranslating(new Set());
     setTranscripts(new Map());
     setTranscribing(new Set());
+    setThreadFor(null);
+    setThreadCounts(new Map());
   }, [draftKey]);
 
   // The translate target is a user preference, restored after mount so the
@@ -909,321 +946,350 @@ export function ChatWindow({
                   message.outgoing ? "justify-end" : "justify-start"
                 } ${selecting ? "cursor-pointer" : ""}`}
               >
-                <div className="flex max-w-[75%] items-start gap-2">
-                  {selecting && !message.outgoing && (
-                    <SelectionMark checked={isSelected} />
-                  )}
-                  <div
-                    className={`min-w-0 rounded-2xl px-3.5 py-2 transition-shadow ${
-                      message.outgoing
-                        ? "bg-sky-600 text-white"
-                        : "bg-zinc-800 text-zinc-100"
-                    } ${
-                      isSelected
-                        ? "ring-2 ring-sky-300"
-                        : highlightId === message.id
-                          ? "ring-2 ring-sky-400"
-                          : ""
-                    }`}
-                  >
-                    {!message.outgoing && (
-                      <p className="mb-0.5 text-xs font-medium text-sky-400">
-                        {message.senderName}
-                      </p>
+                <div
+                  className={`flex max-w-[75%] flex-col gap-1 ${
+                    message.outgoing ? "items-end" : "items-start"
+                  }`}
+                >
+                  <div className="flex w-full items-start gap-2">
+                    {selecting && !message.outgoing && (
+                      <SelectionMark checked={isSelected} />
                     )}
-
-                    {message.replyToId !== null && (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          if (selecting) return;
-                          event.stopPropagation();
-                          if (message.replyToId !== null) {
-                            jumpToMessage(message.replyToId);
-                          }
-                        }}
-                        title="Перейти к сообщению"
-                        className="mb-1 flex w-full items-baseline gap-1.5 overflow-hidden rounded border-l-2 border-sky-400/70 bg-black/20 px-2 py-1 text-left text-[11px] opacity-80 transition-opacity hover:opacity-100"
-                      >
-                        <span className="shrink-0 font-medium">
-                          {quoted ? quoted.senderName : `#${message.replyToId}`}
-                        </span>
-                        <span className="truncate">
-                          {quoted
-                            ? messagePreview(quoted)
-                            : "сообщение не загружено"}
-                        </span>
-                      </button>
-                    )}
-
-                    {editingId === message.id ? (
-                      <div className="space-y-2">
-                        <input
-                          value={editDraft}
-                          onChange={(event) => setEditDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") submitEdit();
-                            if (event.key === "Escape") setEditingId(null);
-                          }}
-                          className="w-full rounded-md border border-zinc-500 bg-zinc-900 px-2 py-1 text-sm text-zinc-100 outline-none focus:border-sky-400"
-                        />
-                        <div className="flex gap-2 text-xs">
-                          <button
-                            type="button"
-                            onClick={submitEdit}
-                            className="rounded bg-sky-500 px-2 py-1 font-medium text-white hover:bg-sky-400"
-                          >
-                            Сохранить
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setEditingId(null)}
-                            className="rounded bg-zinc-600 px-2 py-1 text-zinc-100 hover:bg-zinc-500"
-                          >
-                            Отмена
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <>
-                        {poll ? (
-                          <PollBlock
-                            poll={poll}
-                            canVote={!selecting}
-                            busy={voteBusy}
-                            onVote={(index) => void vote(message, index)}
-                          />
-                        ) : (
-                          <MessageMedia
-                            message={message}
-                            accountId={account.id}
-                            selecting={selecting}
-                          />
-                        )}
-                        {message.text.trim() &&
-                          (!poll ||
-                            message.text.trim() !== poll.question.trim()) && (
-                            <MessageText
-                              text={message.text}
-                              links={!selecting}
-                            />
-                          )}
-                        {!poll &&
-                          !message.text &&
-                          message.mediaType &&
-                          message.media?.kind !== "photo" &&
-                          message.media?.kind !== "document" &&
-                          message.media?.kind !== "voice" && (
-                            <p className="text-sm opacity-80">
-                              [{message.mediaType}]
-                            </p>
-                          )}
-                        {message.isVoice && transcript && (
-                          <p className="mt-1 rounded bg-black/20 px-2 py-1 text-xs">
-                            {transcript.pending
-                              ? "Расшифровка…"
-                              : transcript.text || "Пустая расшифровка"}
-                          </p>
-                        )}
-                        {translation && (
-                          <p className="mt-1 rounded border-l-2 border-sky-300/60 bg-black/20 px-2 py-1 text-xs">
-                            <span className="mr-1 uppercase opacity-60">
-                              {translation.to}
-                            </span>
-                            {translation.text}
-                          </p>
-                        )}
-                      </>
-                    )}
-
-                    {!selecting && editingId !== message.id && (
-                      <div className="mt-1 space-y-1">
-                        {(reactions.length > 0 || canWrite) && (
-                          <div className="flex flex-wrap items-center gap-1">
-                            {reactions.map((reaction) => (
-                              <button
-                                key={reaction.emoji}
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void react(message, reaction.emoji);
-                                }}
-                                disabled={reactionBusy}
-                                aria-pressed={reaction.chosen}
-                                title={
-                                  reaction.chosen
-                                    ? "Убрать реакцию"
-                                    : "Поставить реакцию"
-                                }
-                                className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors disabled:opacity-50 ${
-                                  reaction.chosen
-                                    ? "border-sky-300 bg-sky-500/30 text-white"
-                                    : "border-white/20 bg-black/20 hover:bg-black/30"
-                                }`}
-                              >
-                                <span aria-hidden="true">
-                                  {reaction.emoji.startsWith("custom:")
-                                    ? "✦"
-                                    : reaction.emoji}
-                                </span>
-                                <span>{reaction.count}</span>
-                              </button>
-                            ))}
-                            {canWrite && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setEmojiPickerFor(
-                                    emojiPickerFor === message.id
-                                      ? null
-                                      : message.id,
-                                  )
-                                }
-                                title="Добавить реакцию"
-                                aria-label="Добавить реакцию"
-                                aria-expanded={emojiPickerFor === message.id}
-                                className="rounded-full border border-white/20 bg-black/20 px-2 py-0.5 text-[11px] transition-colors hover:bg-black/30"
-                              >
-                                +
-                              </button>
-                            )}
-                          </div>
-                        )}
-                        {emojiPickerFor === message.id && canWrite && (
-                          <div className="flex flex-wrap gap-1 rounded-lg bg-black/30 p-1">
-                            {REACTION_EMOJI.map((emoji) => (
-                              <button
-                                key={emoji}
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void react(message, emoji);
-                                }}
-                                disabled={reactionBusy}
-                                title={`Реакция ${emoji}`}
-                                aria-label={`Реакция ${emoji}`}
-                                className="rounded px-1 text-base transition-colors hover:bg-white/10 disabled:opacity-50"
-                              >
-                                {emoji}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="mt-1 flex items-center justify-end gap-2 text-[11px] opacity-80">
-                      {message.mediaType && message.text && (
-                        <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px]">
-                          {message.mediaType}
-                        </span>
+                    <div
+                      className={`min-w-0 rounded-2xl px-3.5 py-2 transition-shadow ${
+                        message.outgoing
+                          ? "bg-sky-600 text-white"
+                          : "bg-zinc-800 text-zinc-100"
+                      } ${
+                        isSelected
+                          ? "ring-2 ring-sky-300"
+                          : highlightId === message.id
+                            ? "ring-2 ring-sky-400"
+                            : ""
+                      }`}
+                    >
+                      {!message.outgoing && (
+                        <p className="mb-0.5 text-xs font-medium text-sky-400">
+                          {message.senderName}
+                        </p>
                       )}
-                      {message.edited && <span>изменено</span>}
-                      <span>{formatTime(message.date)}</span>
-                    </div>
 
-                    {!selecting && editingId !== message.id && (
-                      <div
-                        className={`mt-1 flex flex-wrap items-center gap-2 text-[11px] opacity-0 transition-opacity group-hover:opacity-100 ${
-                          message.outgoing ? "justify-end" : "justify-start"
-                        }`}
-                      >
-                        {canWrite && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setReplyTo(message);
-                              inputRef.current?.focus();
+                      {message.replyToId !== null && (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            if (selecting) return;
+                            event.stopPropagation();
+                            if (message.replyToId !== null) {
+                              jumpToMessage(message.replyToId);
+                            }
+                          }}
+                          title="Перейти к сообщению"
+                          className="mb-1 flex w-full items-baseline gap-1.5 overflow-hidden rounded border-l-2 border-sky-400/70 bg-black/20 px-2 py-1 text-left text-[11px] opacity-80 transition-opacity hover:opacity-100"
+                        >
+                          <span className="shrink-0 font-medium">
+                            {quoted
+                              ? quoted.senderName
+                              : `#${message.replyToId}`}
+                          </span>
+                          <span className="truncate">
+                            {quoted
+                              ? messagePreview(quoted)
+                              : "сообщение не загружено"}
+                          </span>
+                        </button>
+                      )}
+
+                      {editingId === message.id ? (
+                        <div className="space-y-2">
+                          <input
+                            value={editDraft}
+                            onChange={(event) =>
+                              setEditDraft(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") submitEdit();
+                              if (event.key === "Escape") setEditingId(null);
                             }}
-                            title="Ответить"
-                            aria-label="Ответить"
-                            className="underline underline-offset-2 hover:text-white"
-                          >
-                            Ответить
-                          </button>
-                        )}
-                        {message.text.trim() && (
-                          <button
-                            type="button"
-                            onClick={() => void toggleTranslation(message)}
-                            disabled={translating.has(message.id)}
-                            title="Перевести сообщение"
-                            aria-label="Перевести сообщение"
-                            className="underline underline-offset-2 hover:text-white disabled:opacity-50"
-                          >
-                            {translating.has(message.id)
-                              ? "Перевод…"
-                              : translation
-                                ? "Скрыть перевод"
-                                : "Перевести"}
-                          </button>
-                        )}
-                        {message.isVoice && (
-                          <button
-                            type="button"
-                            onClick={() => void transcribe(message.id)}
-                            disabled={transcribing.has(message.id)}
-                            title="Расшифровать голосовое"
-                            aria-label="Расшифровать голосовое"
-                            className="underline underline-offset-2 hover:text-white disabled:opacity-50"
-                          >
-                            {transcript?.pending || transcribing.has(message.id)
-                              ? "Расшифровка…"
-                              : "Расшифровать"}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => setForwardIds([message.id])}
-                          title="Переслать"
-                          aria-label="Переслать"
-                          className="underline underline-offset-2 hover:text-white"
-                        >
-                          Переслать
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void copyMessage(message)}
-                          title="Копировать"
-                          aria-label="Копировать"
-                          className="underline underline-offset-2 hover:text-white"
-                        >
-                          {copiedKey === `message:${message.id}`
-                            ? "Скопировано"
-                            : "Копировать"}
-                        </button>
-                        {message.outgoing && (
-                          <>
+                            className="w-full rounded-md border border-zinc-500 bg-zinc-900 px-2 py-1 text-sm text-zinc-100 outline-none focus:border-sky-400"
+                          />
+                          <div className="flex gap-2 text-xs">
                             <button
                               type="button"
-                              onClick={() => startEdit(message)}
-                              title="Изменить"
-                              aria-label="Изменить"
-                              className="underline underline-offset-2 hover:text-white"
+                              onClick={submitEdit}
+                              className="rounded bg-sky-500 px-2 py-1 font-medium text-white hover:bg-sky-400"
                             >
-                              Изменить
+                              Сохранить
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingId(null)}
+                              className="rounded bg-zinc-600 px-2 py-1 text-zinc-100 hover:bg-zinc-500"
+                            >
+                              Отмена
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          {poll ? (
+                            <PollBlock
+                              poll={poll}
+                              canVote={!selecting}
+                              busy={voteBusy}
+                              onVote={(index) => void vote(message, index)}
+                            />
+                          ) : (
+                            <MessageMedia
+                              message={message}
+                              accountId={account.id}
+                              selecting={selecting}
+                            />
+                          )}
+                          {message.text.trim() &&
+                            (!poll ||
+                              message.text.trim() !== poll.question.trim()) && (
+                              <MessageText
+                                text={message.text}
+                                links={!selecting}
+                              />
+                            )}
+                          {!poll &&
+                            !message.text &&
+                            message.mediaType &&
+                            message.media?.kind !== "photo" &&
+                            message.media?.kind !== "document" &&
+                            message.media?.kind !== "voice" && (
+                              <p className="text-sm opacity-80">
+                                [{message.mediaType}]
+                              </p>
+                            )}
+                          {message.isVoice && transcript && (
+                            <p className="mt-1 rounded bg-black/20 px-2 py-1 text-xs">
+                              {transcript.pending
+                                ? "Расшифровка…"
+                                : transcript.text || "Пустая расшифровка"}
+                            </p>
+                          )}
+                          {translation && (
+                            <p className="mt-1 rounded border-l-2 border-sky-300/60 bg-black/20 px-2 py-1 text-xs">
+                              <span className="mr-1 uppercase opacity-60">
+                                {translation.to}
+                              </span>
+                              {translation.text}
+                            </p>
+                          )}
+                        </>
+                      )}
+
+                      {!selecting && editingId !== message.id && (
+                        <div className="mt-1 space-y-1">
+                          {(reactions.length > 0 || canWrite) && (
+                            <div className="flex flex-wrap items-center gap-1">
+                              {reactions.map((reaction) => (
+                                <button
+                                  key={reaction.emoji}
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void react(message, reaction.emoji);
+                                  }}
+                                  disabled={reactionBusy}
+                                  aria-pressed={reaction.chosen}
+                                  title={
+                                    reaction.chosen
+                                      ? "Убрать реакцию"
+                                      : "Поставить реакцию"
+                                  }
+                                  className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors disabled:opacity-50 ${
+                                    reaction.chosen
+                                      ? "border-sky-300 bg-sky-500/30 text-white"
+                                      : "border-white/20 bg-black/20 hover:bg-black/30"
+                                  }`}
+                                >
+                                  <span aria-hidden="true">
+                                    {reaction.emoji.startsWith("custom:")
+                                      ? "✦"
+                                      : reaction.emoji}
+                                  </span>
+                                  <span>{reaction.count}</span>
+                                </button>
+                              ))}
+                              {canWrite && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEmojiPickerFor(
+                                      emojiPickerFor === message.id
+                                        ? null
+                                        : message.id,
+                                    )
+                                  }
+                                  title="Добавить реакцию"
+                                  aria-label="Добавить реакцию"
+                                  aria-expanded={emojiPickerFor === message.id}
+                                  className="rounded-full border border-white/20 bg-black/20 px-2 py-0.5 text-[11px] transition-colors hover:bg-black/30"
+                                >
+                                  +
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {emojiPickerFor === message.id && canWrite && (
+                            <div className="flex flex-wrap gap-1 rounded-lg bg-black/30 p-1">
+                              {REACTION_EMOJI.map((emoji) => (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void react(message, emoji);
+                                  }}
+                                  disabled={reactionBusy}
+                                  title={`Реакция ${emoji}`}
+                                  aria-label={`Реакция ${emoji}`}
+                                  className="rounded px-1 text-base transition-colors hover:bg-white/10 disabled:opacity-50"
+                                >
+                                  {emoji}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="mt-1 flex items-center justify-end gap-2 text-[11px] opacity-80">
+                        {message.mediaType && message.text && (
+                          <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px]">
+                            {message.mediaType}
+                          </span>
+                        )}
+                        {message.edited && <span>изменено</span>}
+                        <span>{formatTime(message.date)}</span>
+                      </div>
+
+                      {!selecting && editingId !== message.id && (
+                        <div
+                          className={`mt-1 flex flex-wrap items-center gap-2 text-[11px] opacity-0 transition-opacity group-hover:opacity-100 ${
+                            message.outgoing ? "justify-end" : "justify-start"
+                          }`}
+                        >
+                          {canWrite && (
                             <button
                               type="button"
                               onClick={() => {
-                                if (window.confirm("Удалить это сообщение?")) {
-                                  onDelete(message.id);
-                                }
+                                setReplyTo(message);
+                                inputRef.current?.focus();
                               }}
-                              title="Удалить"
-                              aria-label="Удалить"
-                              className="text-red-200 underline underline-offset-2 hover:text-red-100"
+                              title="Ответить"
+                              aria-label="Ответить"
+                              className="underline underline-offset-2 hover:text-white"
                             >
-                              Удалить
+                              Ответить
                             </button>
-                          </>
-                        )}
-                      </div>
+                          )}
+                          {message.text.trim() && (
+                            <button
+                              type="button"
+                              onClick={() => void toggleTranslation(message)}
+                              disabled={translating.has(message.id)}
+                              title="Перевести сообщение"
+                              aria-label="Перевести сообщение"
+                              className="underline underline-offset-2 hover:text-white disabled:opacity-50"
+                            >
+                              {translating.has(message.id)
+                                ? "Перевод…"
+                                : translation
+                                  ? "Скрыть перевод"
+                                  : "Перевести"}
+                            </button>
+                          )}
+                          {message.isVoice && (
+                            <button
+                              type="button"
+                              onClick={() => void transcribe(message.id)}
+                              disabled={transcribing.has(message.id)}
+                              title="Расшифровать голосовое"
+                              aria-label="Расшифровать голосовое"
+                              className="underline underline-offset-2 hover:text-white disabled:opacity-50"
+                            >
+                              {transcript?.pending ||
+                              transcribing.has(message.id)
+                                ? "Расшифровка…"
+                                : "Расшифровать"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setForwardIds([message.id])}
+                            title="Переслать"
+                            aria-label="Переслать"
+                            className="underline underline-offset-2 hover:text-white"
+                          >
+                            Переслать
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void copyMessage(message)}
+                            title="Копировать"
+                            aria-label="Копировать"
+                            className="underline underline-offset-2 hover:text-white"
+                          >
+                            {copiedKey === `message:${message.id}`
+                              ? "Скопировано"
+                              : "Копировать"}
+                          </button>
+                          {message.outgoing && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => startEdit(message)}
+                                title="Изменить"
+                                aria-label="Изменить"
+                                className="underline underline-offset-2 hover:text-white"
+                              >
+                                Изменить
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (
+                                    window.confirm("Удалить это сообщение?")
+                                  ) {
+                                    onDelete(message.id);
+                                  }
+                                }}
+                                title="Удалить"
+                                aria-label="Удалить"
+                                className="text-red-200 underline underline-offset-2 hover:text-red-100"
+                              >
+                                Удалить
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {selecting && message.outgoing && (
+                      <SelectionMark checked={isSelected} />
                     )}
                   </div>
-                  {selecting && message.outgoing && (
-                    <SelectionMark checked={isSelected} />
-                  )}
+                  {!selecting &&
+                    message.thread?.hasComments &&
+                    threadCount(message) > 0 && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setThreadFor(message);
+                        }}
+                        title="Открыть комментарии"
+                        className="flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900/70 px-2.5 py-0.5 text-[11px] text-sky-400 transition-colors hover:border-sky-500 hover:text-sky-300"
+                      >
+                        <span aria-hidden="true">💬</span>
+                        Комментарии ({threadCount(message)})
+                      </button>
+                    )}
                 </div>
               </article>
             </Fragment>
@@ -1283,14 +1349,19 @@ export function ChatWindow({
 
       {canWrite && replyTo && (
         <div className="flex items-start gap-2 border-t border-zinc-800 bg-zinc-900/60 px-5 py-2">
-          <div className="min-w-0 flex-1 border-l-2 border-sky-500 pl-2">
+          <button
+            type="button"
+            onClick={() => jumpToMessage(replyTo.id)}
+            title="Перейти к сообщению"
+            className="min-w-0 flex-1 border-l-2 border-sky-500 pl-2 text-left transition-opacity hover:opacity-80"
+          >
             <p className="truncate text-[11px] font-medium text-sky-400">
               Ответ на {replyTo.senderName}
             </p>
             <p className="truncate text-xs text-zinc-400">
               {messagePreview(replyTo)}
             </p>
-          </div>
+          </button>
           <button
             type="button"
             onClick={() => setReplyTo(null)}
@@ -1413,6 +1484,26 @@ export function ChatWindow({
             if (selecting) exitSelection();
           }}
           onClose={() => setForwardIds(null)}
+        />
+      )}
+
+      {threadFor && (
+        <CommentThreadDrawer
+          key={`thread:${threadFor.id}`}
+          accountId={account.id}
+          chatId={chat.id}
+          messageId={threadFor.id}
+          title={chat.title}
+          onClose={() => setThreadFor(null)}
+          onCommentSent={() => {
+            const id = threadFor.id;
+            setThreadCounts((previous) => {
+              const next = new Map(previous);
+              const base = next.get(id) ?? threadFor.thread?.comments ?? 0;
+              next.set(id, base + 1);
+              return next;
+            });
+          }}
         />
       )}
 

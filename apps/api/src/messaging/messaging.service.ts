@@ -49,6 +49,7 @@ import type {
   FolderView,
   MessageMediaView,
   MessagePollView,
+  MessageThreadView,
   MessageView,
 } from './message-view.js';
 import {
@@ -193,6 +194,9 @@ const AVATAR_CACHE_MAX_ENTRIES = 100;
 
 /** `limit` cap for the chat info tabs. */
 const CHAT_INFO_LIMIT = 50;
+
+/** `limit` cap for the comment thread drawer. */
+const THREAD_LIMIT = 100;
 
 /**
  * Dialogs scanned per folder when a peer id cannot be resolved by its access
@@ -732,6 +736,122 @@ export class MessagingService {
         messages: result.map((message) => toMessageView(message)),
         nextOffsetId: result.next?.id ?? null,
       };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Comment thread of a channel post.
+   *
+   * mtcute 0.32 has no `threadId` option on `getHistory`; the linked
+   * discussion thread is read with `searchMessages({ threadId })` instead.
+   * Comments come back **newest first** and `nextOffsetId` (mtcute's
+   * `result.next`) is the id to pass as `offsetId` for the next, older page.
+   * A post without a linked discussion group is not an error: the response
+   * carries `discussionChatId: null` and an empty list.
+   */
+  async getMessageThread(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    query: { limit?: unknown; offsetId?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessageThreadView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const limit = parseLimit(query.limit, THREAD_LIMIT);
+    const offsetId = parseOffsetId(query.offsetId);
+    const sessionId = parseOptionalSessionId(query.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    let discussion: Message | null = null;
+    try {
+      discussion = await client.getDiscussionMessage({
+        chatId,
+        message: messageId,
+      });
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+    if (!discussion) {
+      return {
+        chatId,
+        messageId,
+        discussionChatId: null,
+        comments: [],
+        nextOffsetId: null,
+      };
+    }
+
+    try {
+      const result = await client.searchMessages({
+        chatId: discussion.chat.id,
+        threadId: discussion.id,
+        limit,
+        ...(offsetId !== undefined ? { offset: offsetId } : {}),
+      });
+      return {
+        chatId,
+        messageId,
+        discussionChatId: discussion.chat.id,
+        // The thread root is not a comment; drop it if Telegram includes it.
+        comments: result
+          .filter((message) => message.id !== discussion.id)
+          .map((message) => toMessageView(message)),
+        nextOffsetId: result.next ?? null,
+      };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Send a comment into the post's linked discussion group. The discussion
+   * root message is the reply target, which is how Telegram links comments to
+   * a channel post.
+   */
+  async sendComment(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    body: { text?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessageView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const text = parseMessageText(body.text);
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    let discussion: Message | null = null;
+    try {
+      discussion = await client.getDiscussionMessage({
+        chatId,
+        message: messageId,
+      });
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+    if (!discussion) {
+      throw notFound('THREAD_NOT_FOUND', 'This message has no comment thread');
+    }
+
+    try {
+      const message: Message = await client.sendText(
+        discussion.chat.id,
+        text,
+        { replyTo: discussion.id },
+      );
+      return toMessageView(message);
     } catch (error) {
       raiseTelegramError(error);
     }

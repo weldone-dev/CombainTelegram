@@ -16,6 +16,8 @@ interface FakeClient {
   getFullUser: ReturnType<typeof vi.fn>;
   getFullChat: ReturnType<typeof vi.fn>;
   searchMessages: ReturnType<typeof vi.fn>;
+  getDiscussionMessage: ReturnType<typeof vi.fn>;
+  sendText: ReturnType<typeof vi.fn>;
   deleteHistory: ReturnType<typeof vi.fn>;
   leaveChat: ReturnType<typeof vi.fn>;
   downloadAsBuffer: ReturnType<typeof vi.fn>;
@@ -51,6 +53,28 @@ const channelPeer = {
   inputPeer: inputPeerChannel,
 };
 
+const discussionChatId = -1001234567890;
+const discussionRoot = {
+  id: 900,
+  chat: { id: discussionChatId, type: 'chat', displayName: 'AID Notes' },
+};
+const commentMessage = {
+  id: 901,
+  text: 'первый комментарий',
+  date: new Date('2026-11-20T10:00:00.000Z'),
+  isOutgoing: false,
+  sender: {
+    id: 777,
+    type: 'user',
+    displayName: 'Bob',
+    username: 'bob',
+  },
+  chat: { id: discussionChatId, type: 'chat', displayName: 'AID Notes' },
+  replyToMessage: null,
+  media: null,
+  raw: { _: 'message' },
+};
+
 /** Client whose cache lookup (`getPeer`) always misses, like an uncached chat. */
 function createFakeClient(
   overrides: {
@@ -58,6 +82,9 @@ function createFakeClient(
     resolveFails?: boolean;
     peer?: Record<string, unknown>;
     dialogs?: Array<{ peer: Record<string, unknown> }>;
+    discussion?: Record<string, unknown> | null;
+    threadMessages?: Array<Record<string, unknown>>;
+    sentMessage?: Record<string, unknown>;
   } = {},
 ): FakeClient {
   const resolved = overrides.resolved ?? inputPeerUser;
@@ -91,7 +118,14 @@ function createFakeClient(
     bio: 'Автоматизация',
     membersCount: 375,
   }));
-  const searchMessages = vi.fn(async () => []);
+  const searchMessages = vi.fn(async () => overrides.threadMessages ?? []);
+  const getDiscussionMessage = vi.fn(
+    async () =>
+      overrides.discussion === undefined ? null : overrides.discussion,
+  );
+  const sendText = vi.fn(
+    async () => overrides.sentMessage ?? { ...commentMessage },
+  );
   const deleteHistory = vi.fn(async () => undefined);
   const leaveChat = vi.fn(async () => undefined);
   const downloadAsBuffer = vi.fn(async () => new Uint8Array([1, 2, 3]));
@@ -107,6 +141,8 @@ function createFakeClient(
     getFullUser,
     getFullChat,
     searchMessages,
+    getDiscussionMessage,
+    sendText,
     deleteHistory,
     leaveChat,
     downloadAsBuffer,
@@ -122,6 +158,8 @@ function createFakeClient(
     getFullUser,
     getFullChat,
     searchMessages,
+    getDiscussionMessage,
+    sendText,
     deleteHistory,
     leaveChat,
     downloadAsBuffer,
@@ -596,5 +634,114 @@ describe('message-level features', () => {
     expect(downloadAsBuffer).toHaveBeenCalledWith(media);
     expect(result.data).toEqual(Buffer.from([1, 2, 3]));
     expect(result.mimeType).toBe('image/jpeg');
+  });
+});
+
+describe('channel comment threads', () => {
+  it('returns an empty thread when the post has no discussion', async () => {
+    const fake = createFakeClient({ discussion: null });
+    const service = createService(fake.client);
+
+    const thread = await service.getMessageThread(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHANNEL_ID),
+      '42',
+    );
+
+    expect(thread).toEqual({
+      chatId: CHANNEL_ID,
+      messageId: 42,
+      discussionChatId: null,
+      comments: [],
+      nextOffsetId: null,
+    });
+    expect(fake.getDiscussionMessage).toHaveBeenCalledWith({
+      chatId: CHANNEL_ID,
+      message: 42,
+    });
+    expect(fake.searchMessages).not.toHaveBeenCalled();
+  });
+
+  it('maps newest-first comments and pages older by offsetId', async () => {
+    const fake = createFakeClient({
+      discussion: discussionRoot,
+      threadMessages: [commentMessage, { ...commentMessage, id: 900 }],
+    });
+    const service = createService(fake.client);
+
+    const thread = await service.getMessageThread(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHANNEL_ID),
+      '42',
+      { limit: '20', offsetId: '1000' },
+    );
+
+    expect(fake.searchMessages).toHaveBeenCalledWith({
+      chatId: discussionChatId,
+      threadId: discussionRoot.id,
+      limit: 20,
+      offset: 1000,
+    });
+    expect(thread.discussionChatId).toBe(discussionChatId);
+    // The thread root (id 900) is not a comment.
+    expect(thread.comments).toHaveLength(1);
+    expect(thread.comments[0]).toMatchObject({
+      id: 901,
+      chatId: discussionChatId,
+      text: 'первый комментарий',
+      senderName: 'Bob',
+    });
+  });
+
+  it('sends a comment as a reply to the discussion root', async () => {
+    const fake = createFakeClient({ discussion: discussionRoot });
+    const service = createService(fake.client);
+
+    const created = await service.sendComment(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHANNEL_ID),
+      '42',
+      { text: '  привет  ' },
+    );
+
+    expect(fake.sendText).toHaveBeenCalledWith(
+      discussionChatId,
+      'привет',
+      { replyTo: discussionRoot.id },
+    );
+    expect(created).toMatchObject({ id: 901, text: 'первый комментарий' });
+  });
+
+  it('rejects a comment on a post without a discussion', async () => {
+    const fake = createFakeClient({ discussion: null });
+    const service = createService(fake.client);
+
+    await expect(
+      service.sendComment(USER_ID, ACCOUNT_ID, String(CHANNEL_ID), '42', {
+        text: 'привет',
+      }),
+    ).rejects.toMatchObject({
+      status: 404,
+      response: { code: 'THREAD_NOT_FOUND' },
+    });
+    expect(fake.sendText).not.toHaveBeenCalled();
+  });
+
+  it('rejects empty comment text before touching Telegram', async () => {
+    const fake = createFakeClient({ discussion: discussionRoot });
+    const service = createService(fake.client);
+
+    await expect(
+      service.sendComment(USER_ID, ACCOUNT_ID, String(CHANNEL_ID), '42', {
+        text: '   ',
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      response: { code: 'VALIDATION_ERROR' },
+    });
+    expect(fake.getDiscussionMessage).not.toHaveBeenCalled();
   });
 });
