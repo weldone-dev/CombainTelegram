@@ -63,6 +63,7 @@ export interface AvatarImage {
 }
 
 const AVATAR_TTL_MS = 10 * 60 * 1000;
+const AVATAR_CACHE_MAX_ENTRIES = 100;
 
 @Injectable()
 export class AccountsService {
@@ -362,12 +363,16 @@ export class AccountsService {
     userId: string,
     accountId: string,
   ): Promise<AvatarImage | null> {
-    const cached = this.avatars.get(accountId);
+    // Resolve (and ownership-check) the session before the cache lookup so a
+    // cached avatar can never answer for an account the user does not own.
+    const { client } = await this.resolveSession(userId, accountId);
+
+    const cacheKey = `${userId}:${accountId}`;
+    const cached = this.avatars.get(cacheKey);
     if (cached && Date.now() - cached.at < AVATAR_TTL_MS) {
       return cached.data ? { data: cached.data, mime: 'image/jpeg' } : null;
     }
 
-    const { client } = await this.resolveSession(userId, accountId);
     let location: Parameters<typeof client.downloadAsBuffer>[0] | null = null;
     try {
       const me = await client.getMe();
@@ -385,16 +390,34 @@ export class AccountsService {
       raiseTelegramError(error);
     }
     if (!location) {
-      this.avatars.set(accountId, { data: null, at: Date.now() });
+      this.cacheAvatar(cacheKey, null);
       return null;
     }
 
     try {
       const data = Buffer.from(await client.downloadAsBuffer(location));
-      this.avatars.set(accountId, { data, at: Date.now() });
+      this.cacheAvatar(cacheKey, data);
       return { data, mime: 'image/jpeg' };
     } catch (error) {
       raiseTelegramError(error);
+    }
+  }
+
+  /** Bounded avatar cache: expired entries and the oldest extras are dropped. */
+  private cacheAvatar(
+    key: string,
+    data: Buffer | null,
+    now = Date.now(),
+  ): void {
+    this.avatars.delete(key);
+    this.avatars.set(key, { data, at: now });
+    for (const [cachedKey, entry] of this.avatars) {
+      if (now - entry.at >= AVATAR_TTL_MS) this.avatars.delete(cachedKey);
+    }
+    while (this.avatars.size > AVATAR_CACHE_MAX_ENTRIES) {
+      const oldest = this.avatars.keys().next().value;
+      if (oldest === undefined) break;
+      this.avatars.delete(oldest);
     }
   }
 

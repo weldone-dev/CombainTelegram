@@ -1,4 +1,10 @@
-import { sanitizeDetails, serializeJson } from './log-sanitize.js';
+import {
+  MAX_QUERY_LENGTH,
+  redactMessageBody,
+  sanitizeDetails,
+  sanitizeQueryForLog,
+  serializeJson,
+} from './log-sanitize.js';
 import { emitLog, setLogSink } from './log-sink.js';
 
 describe('log metadata sanitizing', () => {
@@ -34,6 +40,28 @@ describe('log metadata sanitizing', () => {
 
     expect(sanitized.long.length).toBeLessThan(5000);
     expect(JSON.stringify(sanitized)).toContain('[truncated]');
+  });
+
+  it('redacts message text and captions to their length', () => {
+    const body = redactMessageBody({
+      text: 'secret plans',
+      caption: 'look at this',
+      replyToId: 7,
+    }) as Record<string, unknown>;
+    expect(body.text).toBe('[redacted, 12 chars]');
+    expect(body.caption).toBe('[redacted, 12 chars]');
+    expect(body.replyToId).toBe(7);
+  });
+
+  it('truncates the search query to 64 chars', () => {
+    const long = 'x'.repeat(200);
+    const query = sanitizeQueryForLog({ q: long, limit: '50' }) as Record<
+      string,
+      unknown
+    >;
+    expect(String(query.q)).toHaveLength(MAX_QUERY_LENGTH + 1);
+    expect(query.limit).toBe('50');
+    expect(sanitizeQueryForLog({ q: 'short' })).toEqual({ q: 'short' });
   });
 
   it('serializes errors and bigint safely', () => {

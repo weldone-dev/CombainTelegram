@@ -121,7 +121,8 @@ export class MessagingController {
 
   @Get(':chatId/avatar')
   @Header('Content-Type', 'image/jpeg')
-  @Header('Cache-Control', 'public, max-age=600')
+  @Header('Cache-Control', 'private, max-age=600')
+  @Header('X-Content-Type-Options', 'nosniff')
   @ApiOperation({ summary: 'Profile photo of a chat (JPEG)' })
   async chatAvatar(
     @CurrentUser() user: UserModel,
@@ -325,6 +326,8 @@ export class MessagingController {
   }
 
   @Get(':chatId/messages/:messageId/media')
+  @Header('Cache-Control', 'private, max-age=600')
+  @Header('X-Content-Type-Options', 'nosniff')
   @ApiOperation({
     summary: 'Download the photo or document attached to a message',
   })

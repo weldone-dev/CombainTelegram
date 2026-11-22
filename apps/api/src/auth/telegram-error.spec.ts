@@ -28,6 +28,16 @@ describe('Telegram error mapping', () => {
     ['SESSION_PASSWORD_NEEDED', 'PASSWORD_REQUIRED', 400],
     ['PASSWORD_HASH_INVALID', 'PASSWORD_INVALID', 400],
     ['SIGN_UP_REQUIRED', 'SIGNUP_REQUIRED', 400],
+    ['CHAT_WRITE_FORBIDDEN', 'CHAT_WRITE_FORBIDDEN', 403],
+    ['CHAT_ADMIN_REQUIRED', 'CHAT_ADMIN_REQUIRED', 403],
+    ['CHANNEL_PRIVATE', 'CHANNEL_PRIVATE', 403],
+    ['CHAT_FORBIDDEN', 'CHAT_FORBIDDEN', 403],
+    ['CHAT_RESTRICTED', 'CHAT_RESTRICTED', 403],
+    ['CHAT_SEND_MEDIA_FORBIDDEN', 'CHAT_SEND_MEDIA_FORBIDDEN', 403],
+    ['USER_BANNED_IN_CHANNEL', 'USER_BANNED_IN_CHANNEL', 403],
+    ['MESSAGE_ID_INVALID', 'MESSAGE_ID_INVALID', 400],
+    ['MESSAGE_EDIT_TIME_EXPIRED', 'MESSAGE_EDIT_TIME_EXPIRED', 400],
+    ['PEER_ID_INVALID', 'PEER_ID_INVALID', 400],
   ])('maps %s to %s', (telegramText, expectedCode, expectedStatus) => {
     const mapped = mapTelegramError(rpc(400, telegramText));
     expect(mapped.code).toBe(expectedCode);
@@ -82,11 +92,13 @@ describe('Telegram error mapping', () => {
     const entries: Array<Record<string, unknown>> = [];
     setLogSink((entry) => entries.push(entry as never));
     try {
-      expect(() => raiseTelegramError(rpc(400, 'PEER_ID_INVALID'))).toThrow();
+      expect(() =>
+        raiseTelegramError(rpc(400, 'SOMETHING_UNMAPPED')),
+      ).toThrow();
       expect(entries).toHaveLength(1);
       expect(entries[0]).toMatchObject({
         source: 'telegram',
-        telegramError: 'PEER_ID_INVALID',
+        telegramError: 'SOMETHING_UNMAPPED',
         errorCode: 'TELEGRAM_ERROR',
       });
       expect(entries[0]?.telegramResponse).toMatchObject({ code: 400 });

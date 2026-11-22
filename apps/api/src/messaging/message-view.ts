@@ -174,6 +174,29 @@ export function toMessageView(message: MessageLike): MessageView {
 }
 
 /**
+ * Merges dialog lists fetched from several Telegram folders (0 = main,
+ * 1 = archive) into one list, dropping repeats of the same peer id while
+ * keeping the first occurrence's order. A `limit` caps the merged result.
+ */
+export function mergeDialogsById<T extends { peer: { id: number } }>(
+  groups: ReadonlyArray<ReadonlyArray<T>>,
+  limit = Number.POSITIVE_INFINITY,
+): T[] {
+  if (limit <= 0) return [];
+  const seen = new Set<number>();
+  const merged: T[] = [];
+  for (const group of groups) {
+    for (const dialog of group) {
+      if (seen.has(dialog.peer.id)) continue;
+      seen.add(dialog.peer.id);
+      merged.push(dialog);
+      if (merged.length >= limit) return merged;
+    }
+  }
+  return merged;
+}
+
+/**
  * Chat DTO for a bare peer (e.g. `getPeer` or a global-search hit), where no
  * dialog state is available. Flags default to their neutral values.
  */
