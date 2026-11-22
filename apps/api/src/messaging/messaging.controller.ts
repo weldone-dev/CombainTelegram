@@ -24,7 +24,10 @@ import { CurrentUser } from '../user-context/current-user.decorator.js';
 import { apiError, notFound } from '../common/api-error.js';
 import { MessagingService } from './messaging.service.js';
 import type {
+  ChatInfoMediaView,
+  ChatInfoSimilarView,
   ChatInfoView,
+  ChatPeerView,
   ChatRemovedView,
   ChatSearchView,
   DeletedMessageView,
@@ -145,8 +148,56 @@ export class MessagingController {
     @Param('accountId') accountId: string,
     @Param('chatId') chatId: string,
     @Query('sessionId') sessionId?: string,
-  ): Promise<ChatInfoView> {
+  ): Promise<ChatPeerView> {
     return this.messaging.getChat(user.id, accountId, chatId, sessionId);
+  }
+
+  @Get(':chatId/info')
+  @ApiOperation({ summary: 'Full chat info for the info panel' })
+  getChatInfo(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Query('sessionId') sessionId?: string,
+  ): Promise<ChatInfoView> {
+    return this.messaging.getChatInfo(user.id, accountId, chatId, sessionId);
+  }
+
+  @Get(':chatId/info/media')
+  @ApiOperation({
+    summary: 'Chat info tab: photos/videos, links or polls',
+  })
+  getChatInfoMedia(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Query('kind') kind?: string,
+    @Query('limit') limit?: string,
+    @Query('offsetId') offsetId?: string,
+    @Query('sessionId') sessionId?: string,
+  ): Promise<ChatInfoMediaView> {
+    return this.messaging.getChatInfoMedia(user.id, accountId, chatId, {
+      kind,
+      limit,
+      offsetId,
+      sessionId,
+    });
+  }
+
+  @Get(':chatId/info/similar')
+  @ApiOperation({ summary: 'Similar channels for the info panel' })
+  getChatInfoSimilar(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Query('sessionId') sessionId?: string,
+  ): Promise<ChatInfoSimilarView> {
+    return this.messaging.getChatInfoSimilar(
+      user.id,
+      accountId,
+      chatId,
+      sessionId,
+    );
   }
 
   @Patch(':chatId')

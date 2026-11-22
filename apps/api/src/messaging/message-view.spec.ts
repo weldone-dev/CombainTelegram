@@ -1,4 +1,5 @@
 import {
+  canSendMessages,
   toChatView,
   toChatViewFromPeer,
   toFolderView,
@@ -171,6 +172,7 @@ describe('message DTO mapping', () => {
       muted: false,
       archived: false,
       readInboxMaxId: 42,
+      canSendMessages: true,
     });
   });
 
@@ -193,6 +195,7 @@ describe('message DTO mapping', () => {
       muted: false,
       archived: false,
       readInboxMaxId: 0,
+      canSendMessages: false,
     });
   });
 
@@ -227,6 +230,63 @@ describe('message DTO mapping', () => {
       lastMessage: null,
       muted: true,
       archived: true,
+      canSendMessages: true,
     });
+  });
+});
+
+describe('canSendMessages', () => {
+  const peer = (
+    overrides: Partial<DialogLike['peer']> = {},
+  ): DialogLike['peer'] => ({
+    id: 1,
+    type: 'user',
+    displayName: 'Peer',
+    username: null,
+    ...overrides,
+  });
+
+  it('allows private chats and bots unless explicitly restricted', () => {
+    expect(canSendMessages(peer())).toBe(true);
+    expect(canSendMessages(peer({ type: 'bot' }))).toBe(true);
+    expect(
+      canSendMessages(peer({ permissions: { canSendMessages: false } })),
+    ).toBe(false);
+  });
+
+  it('allows legacy groups without permission info', () => {
+    expect(canSendMessages(peer({ type: 'group' }))).toBe(true);
+  });
+
+  it('follows the permission object for supergroups', () => {
+    expect(
+      canSendMessages(
+        peer({ type: 'supergroup', permissions: { canSendMessages: true } }),
+      ),
+    ).toBe(true);
+    expect(
+      canSendMessages(
+        peer({ type: 'supergroup', permissions: { canSendMessages: false } }),
+      ),
+    ).toBe(false);
+  });
+
+  it('requires admin or creator rights in broadcast channels', () => {
+    expect(canSendMessages(peer({ type: 'channel' }))).toBe(false);
+    expect(canSendMessages(peer({ type: 'channel', isAdmin: true }))).toBe(
+      true,
+    );
+    expect(canSendMessages(peer({ type: 'channel', isCreator: true }))).toBe(
+      true,
+    );
+    expect(
+      canSendMessages(
+        peer({
+          type: 'channel',
+          isAdmin: true,
+          permissions: { canSendMessages: false },
+        }),
+      ),
+    ).toBe(false);
   });
 });

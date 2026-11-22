@@ -11,6 +11,15 @@ export interface PeerLike {
   type: string;
   displayName: string;
   username: string | null;
+  /** mtcute chat subtype; optional so plain test peers stay valid. */
+  chatType?: string;
+  /**
+   * Current user's permissions. Only `group`/`supergroup`/`channel` peers can
+   * have them; `null`/`undefined` means no restriction information.
+   */
+  permissions?: { canSendMessages: boolean } | null;
+  isAdmin?: boolean;
+  isCreator?: boolean;
 }
 
 export interface DialogLike {
@@ -86,6 +95,28 @@ export interface ChatView {
   archived: boolean;
   /** Highest incoming message id already marked as read by this account. */
   readInboxMaxId: number;
+  /** Whether this account may send messages to the chat right now. */
+  canSendMessages: boolean;
+}
+
+/**
+ * Whether the current account can post in a peer.
+ *
+ * Private chats, bots and legacy groups are writable unless the peer carries
+ * an explicit `canSendMessages: false` permission. Supergroups follow their
+ * permission object; broadcast channels additionally require admin/creator
+ * rights, because followers cannot post there.
+ */
+export function canSendMessages(peer: PeerLike): boolean {
+  // mtcute's `Peer.type` is `user`/`chat`; the concrete subtype lives in
+  // `chatType`, so prefer it when it is available.
+  const type =
+    peer.type === 'chat' && peer.chatType ? peer.chatType : peer.type;
+  const allowed = peer.permissions?.canSendMessages !== false;
+  if (type === 'channel') {
+    return allowed && (peer.isAdmin === true || peer.isCreator === true);
+  }
+  return allowed;
 }
 
 /**
@@ -158,6 +189,7 @@ export function toChatViewFromPeer(peer: PeerLike): ChatView {
     muted: false,
     archived: false,
     readInboxMaxId: 0,
+    canSendMessages: canSendMessages(peer),
   };
 }
 
@@ -195,5 +227,6 @@ export function toChatView(dialog: DialogLike): ChatView {
     muted: dialog.isMuted ?? false,
     archived: dialog.isArchived,
     readInboxMaxId: dialog.raw?.readInboxMaxId ?? 0,
+    canSendMessages: canSendMessages(dialog.peer),
   };
 }

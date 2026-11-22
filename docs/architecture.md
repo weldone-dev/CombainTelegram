@@ -264,7 +264,10 @@ GET    /accounts/:accountId/chats?limit=50&folderId=&archived=&sessionId=
 GET    /accounts/:accountId/folders?sessionId=                  chat folders
 GET    /accounts/:accountId/search?q=&limit=&sessionId=         global chat/user search
 GET    /accounts/:accountId/chats/resolve?username=&sessionId=   @name / t.me link → chat
-GET    /accounts/:accountId/chats/:chatId                       chat info
+GET    /accounts/:accountId/chats/:chatId                       chat peer (id/type/title/username)
+GET    /accounts/:accountId/chats/:chatId/info                  full chat info panel (about, members, permissions, invite link)
+GET    /accounts/:accountId/chats/:chatId/info/media?kind=&limit=&offsetId=  media|links|polls tab
+GET    /accounts/:accountId/chats/:chatId/info/similar          similar channels
 GET    /accounts/:accountId/chats/:chatId/avatar                JPEG chat photo (404 if none)
 GET    /accounts/:accountId/chats/:chatId/messages?limit=50&offsetId=&newerThanId=&sessionId=
 GET    /accounts/:accountId/chats/:chatId/search?q=&limit=&offsetId=&sessionId=
@@ -280,7 +283,18 @@ POST   /accounts/:accountId/chats/:chatId/typing               { status?, sessio
 ```
 
 Chats are mapped from `iterDialogs({ limit, archived: 'keep' })`:
-`{ id, type, title, username, lastMessage, unreadCount, pinned, muted, archived }`.
+`{ id, type, title, username, lastMessage, unreadCount, pinned, muted, archived,
+canSendMessages }`. `canSendMessages` follows the peer's
+`permissions.canSendMessages` when present; broadcast channels additionally
+need `isAdmin`/`isCreator`, while legacy groups without permission info stay
+writable. The info panel (`/chats/:chatId/info`) adds `about`, `memberCount`,
+`onlineCount`, `isChannel`, `isGroup`, `isAdmin`, `isCreator` and `inviteLink`
+from `getFullChat`, falling back to the plain peer for private chats. Its tabs
+come from in-chat `searchMessages` with `inputMessagesFilterPhotoVideo`,
+`inputMessagesFilterUrl` or `inputMessagesFilterPoll` (`limit` capped at 50,
+paged by `offsetId`); similar channels use raw
+`channels.getChannelRecommendations` and return an empty list when Telegram
+does not support it for the peer.
 `folderId` selects one folder; `archived=true|false` lists only archived or
 only non-archived dialogs (with no params the historic behaviour is kept).
 Folders come from `getFolders()` as `{ id, title, emoticon }`. Global search

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
   InputMedia,
+  SearchFilters,
   type Message,
   type Peer,
   type SendableTypingStatus,
@@ -21,16 +22,25 @@ import {
   sanitizeFileName,
 } from './media.js';
 import {
+  canSendMessages,
   toChatView,
   toChatViewFromPeer,
   toFolderView,
   toMessageMediaView,
   toMessageView,
 } from './message-view.js';
-import type { ChatView, FolderView, MessageView } from './message-view.js';
+import type {
+  ChatView,
+  FolderView,
+  MessageMediaView,
+  MessageView,
+  PeerLike,
+} from './message-view.js';
 import {
+  extractFirstUrl,
   normalizeUsername,
   parseChatId,
+  parseChatInfoKind,
   parseFolderId,
   parseLimit,
   parseMessageId,
@@ -43,12 +53,56 @@ import {
   parseOptionalSessionId,
   parseSearchQuery,
 } from './params.js';
+import type { ChatInfoKind } from './params.js';
 
-export interface ChatInfoView {
+export interface ChatPeerView {
   id: number;
   type: string;
   title: string;
   username: string | null;
+}
+
+export interface ChatInfoView extends ChatPeerView {
+  about: string | null;
+  memberCount: number | null;
+  onlineCount: number | null;
+  isChannel: boolean;
+  isGroup: boolean;
+  isAdmin: boolean;
+  isCreator: boolean;
+  canSendMessages: boolean;
+  inviteLink: string | null;
+}
+
+export interface ChatInfoPollView {
+  question: string;
+  options: string[];
+  totalVoters: number;
+}
+
+export interface ChatInfoItemView {
+  messageId: number;
+  date: string;
+  text: string;
+  media: MessageMediaView | null;
+  url: string | null;
+  poll: ChatInfoPollView | null;
+}
+
+export interface ChatInfoMediaView {
+  items: ChatInfoItemView[];
+  nextOffsetId: number | null;
+}
+
+export interface SimilarChatView {
+  id: number;
+  title: string;
+  username: string | null;
+  memberCount: number | null;
+}
+
+export interface ChatInfoSimilarView {
+  chats: SimilarChatView[];
 }
 
 export interface MessageHistoryView {
@@ -119,6 +173,73 @@ export interface ReadAllView {
 
 /** Upper bound for `POST /chats/read-all` to keep the fan-out bounded. */
 const MAX_READ_ALL_DIALOGS = 200;
+
+/** `limit` cap for the chat info tabs. */
+const CHAT_INFO_LIMIT = 50;
+
+/** Marked chat id from a raw `chat`/`channel` TL object. */
+function markedChatId(raw: { _: string; id: number }): number | null {
+  switch (raw._) {
+    case 'channel':
+    case 'channelForbidden':
+      return -(1_000_000_000_000 + raw.id);
+    case 'chat':
+    case 'chatForbidden':
+      return raw.id;
+    default:
+      return null;
+  }
+}
+
+interface PollMediaLike {
+  type: string;
+  question?: unknown;
+  answers?: ReadonlyArray<{ text?: unknown }>;
+  voters?: unknown;
+}
+
+/** Poll tab payload; malformed/partial polls keep an empty-but-valid shape. */
+function toPollView(media: unknown, text: string): ChatInfoPollView {
+  const fallbackQuestion = text.trim() || 'Опрос';
+  if (!media || typeof media !== 'object') {
+    return { question: fallbackQuestion, options: [], totalVoters: 0 };
+  }
+
+  const candidate = media as PollMediaLike;
+  if (candidate.type !== 'poll') {
+    return { question: fallbackQuestion, options: [], totalVoters: 0 };
+  }
+
+  const question =
+    typeof candidate.question === 'string' && candidate.question.trim()
+      ? candidate.question
+      : fallbackQuestion;
+  const options = Array.isArray(candidate.answers)
+    ? candidate.answers
+        .map((answer) => (typeof answer?.text === 'string' ? answer.text : ''))
+        .filter((answer) => answer.length > 0)
+    : [];
+  const totalVoters =
+    typeof candidate.voters === 'number' && Number.isFinite(candidate.voters)
+      ? candidate.voters
+      : 0;
+
+  return { question, options, totalVoters };
+}
+
+function toChatInfoItemView(
+  message: Message,
+  kind: ChatInfoKind,
+): ChatInfoItemView {
+  return {
+    messageId: message.id,
+    date: message.date.toISOString(),
+    text: message.text,
+    media: toMessageMediaView(message.media),
+    url: kind === 'links' ? extractFirstUrl(message.text) : null,
+    poll: kind === 'polls' ? toPollView(message.media, message.text) : null,
+  };
+}
 
 export type AllowedTypingStatus =
   | 'typing'
@@ -232,7 +353,7 @@ export class MessagingService {
     accountId: string,
     rawChatId: string,
     sessionIdParam?: unknown,
-  ): Promise<ChatInfoView> {
+  ): Promise<ChatPeerView> {
     const chatId = parseChatId(rawChatId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
     const { client } = await this.accounts.resolveSession(
@@ -253,6 +374,206 @@ export class MessagingService {
       title: peer.displayName,
       username: peer.username,
     };
+  }
+
+  /**
+   * Full chat info for the info panel. `getFullChat` is authoritative for
+   * bios, member counts, invite links and permissions, but it only accepts
+   * chats/channels; private chats fall back to the plain peer lookup.
+   */
+  async getChatInfo(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    sessionIdParam?: unknown,
+  ): Promise<ChatInfoView> {
+    const chatId = parseChatId(rawChatId);
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const full = await client.getFullChat(chatId);
+      return this.toFullChatInfoView(full);
+    } catch {
+      // Users and a few restricted peers have no full-chat record.
+      // `client.getChat` still returns the basic peer fields.
+    }
+
+    let peer: Peer;
+    try {
+      peer = await client.getChat(chatId);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+
+    const extra = peer as unknown as {
+      chatType?: string;
+      permissions?: { canSendMessages: boolean } | null;
+      isAdmin?: boolean;
+      isCreator?: boolean;
+      membersCount?: number | null;
+    };
+    const chatType = extra.chatType;
+    const type = chatType ?? peer.type;
+    return {
+      id: peer.id,
+      type,
+      title: peer.displayName,
+      username: peer.username,
+      about: null,
+      memberCount: extra.membersCount ?? null,
+      onlineCount: null,
+      isChannel: chatType === 'channel',
+      isGroup:
+        chatType === 'group' ||
+        chatType === 'supergroup' ||
+        chatType === 'gigagroup',
+      isAdmin: extra.isAdmin === true,
+      isCreator: extra.isCreator === true,
+      canSendMessages: canSendMessages({
+        id: peer.id,
+        type,
+        displayName: peer.displayName,
+        username: peer.username,
+        chatType,
+        permissions: extra.permissions ?? null,
+        isAdmin: extra.isAdmin,
+        isCreator: extra.isCreator,
+      }),
+      inviteLink: peer.username ? `https://t.me/${peer.username}` : null,
+    };
+  }
+
+  private toFullChatInfoView(
+    full: Awaited<ReturnType<TelegramClient['getFullChat']>>,
+  ): ChatInfoView {
+    const type = full.chatType;
+    return {
+      id: full.id,
+      type,
+      title: full.displayName,
+      username: full.username,
+      about: full.bio || null,
+      memberCount: full.membersCount > 0 ? full.membersCount : null,
+      onlineCount: full.onlineCount > 0 ? full.onlineCount : null,
+      isChannel: type === 'channel',
+      isGroup:
+        type === 'group' || type === 'supergroup' || type === 'gigagroup',
+      isAdmin: full.isAdmin,
+      isCreator: full.isCreator,
+      canSendMessages: canSendMessages(full as unknown as PeerLike),
+      inviteLink:
+        full.inviteLink?.link ??
+        (full.username ? `https://t.me/${full.username}` : null),
+    };
+  }
+
+  /**
+   * One tab of the chat info panel: photos/videos, links or polls. Message
+   * search is paginated by `offsetId`; `limit` is capped at 50 per request.
+   */
+  async getChatInfoMedia(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    query: {
+      kind?: unknown;
+      limit?: unknown;
+      offsetId?: unknown;
+      sessionId?: unknown;
+    } = {},
+  ): Promise<ChatInfoMediaView> {
+    const chatId = parseChatId(rawChatId);
+    const kind = parseChatInfoKind(query.kind);
+    const limit = parseLimit(query.limit, CHAT_INFO_LIMIT);
+    const offsetId = parseOffsetId(query.offsetId);
+    const sessionId = parseOptionalSessionId(query.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    const filter: tl.TypeMessagesFilter =
+      kind === 'media'
+        ? SearchFilters.PhotoAndVideo
+        : kind === 'links'
+          ? SearchFilters.Url
+          : { _: 'inputMessagesFilterPoll' };
+
+    try {
+      const result = await client.searchMessages({
+        chatId,
+        filter,
+        limit,
+        ...(offsetId !== undefined ? { offset: offsetId } : {}),
+      });
+      return {
+        items: result.map((message) => toChatInfoItemView(message, kind)),
+        nextOffsetId: result.next ?? null,
+      };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Similar channels for the info panel. Telegram only exposes this as a raw
+   * TL call, and it fails for private chats/supergroups; an unsupported peer
+   * yields an empty list rather than an error.
+   */
+  async getChatInfoSimilar(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    sessionIdParam?: unknown,
+  ): Promise<ChatInfoSimilarView> {
+    const chatId = parseChatId(rawChatId);
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const peer = await client.resolvePeer(chatId);
+      if (peer._ !== 'inputPeerChannel') return { chats: [] };
+
+      const result = await client.call({
+        _: 'channels.getChannelRecommendations',
+        channel: {
+          _: 'inputChannel',
+          channelId: peer.channelId,
+          accessHash: peer.accessHash,
+        },
+      });
+
+      const chats: SimilarChatView[] = [];
+      for (const raw of result.chats) {
+        const id = markedChatId(raw);
+        if (id === null) continue;
+        const meta = raw as unknown as {
+          title?: string;
+          username?: string;
+          usernames?: Array<{ username: string }>;
+          participantsCount?: number;
+        };
+        chats.push({
+          id,
+          title: meta.title ?? '',
+          username: meta.username ?? meta.usernames?.[0]?.username ?? null,
+          memberCount: meta.participantsCount ?? null,
+        });
+      }
+      return { chats };
+    } catch {
+      return { chats: [] };
+    }
   }
 
   /** Small profile photo of a chat/user/channel, cached briefly in memory. */
