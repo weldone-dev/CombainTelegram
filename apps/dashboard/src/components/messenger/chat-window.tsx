@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { mediaUrl } from "../../lib/api";
 import { chatAvatarUrl } from "../../lib/avatar";
 import { copyToClipboard } from "../../lib/clipboard";
 import {
@@ -16,7 +17,7 @@ import {
   readDraft,
   writeDraft,
 } from "../../lib/drafts";
-import { formatTime } from "../../lib/format";
+import { formatFileSize, formatTime } from "../../lib/format";
 import type {
   AccountView,
   ChatView,
@@ -46,6 +47,7 @@ export function ChatWindow({
   typing,
   onLoadMore,
   onSend,
+  onSendMedia,
   onEdit,
   onDelete,
   onDeleteMany,
@@ -65,6 +67,11 @@ export function ChatWindow({
   typing: TypingEntry[];
   onLoadMore: () => void;
   onSend: (text: string, replyToId?: number) => Promise<void>;
+  onSendMedia: (
+    file: File,
+    caption: string,
+    replyToId?: number,
+  ) => Promise<void>;
   onEdit: (messageId: number, text: string) => void;
   onDelete: (messageId: number) => void;
   onDeleteMany: (messageIds: number[]) => Promise<void>;
@@ -74,6 +81,10 @@ export function ChatWindow({
   onRead: (maxId: number) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [attachment, setAttachment] = useState<File | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<string | null>(
+    null,
+  );
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [replyTo, setReplyTo] = useState<MessageView | null>(null);
@@ -85,6 +96,7 @@ export function ChatWindow({
   const [status, setStatus] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -109,6 +121,8 @@ export function ChatWindow({
   // Restore the per-account/per-chat draft and reset transient composer state
   // whenever the open chat changes. localStorage is only touched here.
   useEffect(() => {
+    setAttachment(null);
+    setAttachmentPreview(null);
     if (!draftKey) {
       setDraft("");
       return;
@@ -122,6 +136,31 @@ export function ChatWindow({
     setForwardIds(null);
     setStatus(null);
   }, [draftKey]);
+
+  // Revoke the previous object URL whenever the preview changes or the
+  // composer unmounts; the browser keeps blobs alive until then.
+  useEffect(() => {
+    if (!attachmentPreview) return;
+    return () => URL.revokeObjectURL(attachmentPreview);
+  }, [attachmentPreview]);
+
+  const chooseAttachment = (file: File | null) => {
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      setStatus("Файл больше 50 МБ");
+      return;
+    }
+    setStatus(null);
+    setAttachment(file);
+    setAttachmentPreview(
+      file.type.startsWith("image/") ? URL.createObjectURL(file) : null,
+    );
+  };
+
+  const clearAttachment = () => {
+    setAttachment(null);
+    setAttachmentPreview(null);
+  };
 
   // Snapshot the unread counter once per chat: this is where the divider and
   // the initial scroll position come from. Opening a chat no longer marks
@@ -272,14 +311,21 @@ export function ChatWindow({
 
   const submit = async () => {
     const text = draft.trim();
-    if (!text || !account || !chat) return;
+    if ((!text && !attachment) || !account || !chat) return;
     const key = draftStorageKey(account.id, chat.id);
     const replyTargetId = replyTo?.id;
     try {
-      await onSend(text, replyTargetId);
-      clearDraft(key);
+      if (attachment) {
+        await onSendMedia(attachment, text, replyTargetId);
+        clearDraft(key);
+      } else {
+        await onSend(text, replyTargetId);
+        clearDraft(key);
+      }
       if (draftKeyRef.current === key) {
         setDraft("");
+        setAttachment(null);
+        setAttachmentPreview(null);
         setReplyTo(null);
         setStatus(null);
       }
@@ -582,14 +628,22 @@ export function ChatWindow({
                       </div>
                     ) : (
                       <>
+                        <MessageMedia
+                          message={message}
+                          accountId={account.id}
+                          selecting={selecting}
+                        />
                         {(message.text || !message.mediaType) && (
                           <MessageText text={message.text} links={!selecting} />
                         )}
-                        {!message.text && message.mediaType && (
-                          <p className="text-sm opacity-80">
-                            [{message.mediaType}]
-                          </p>
-                        )}
+                        {!message.text &&
+                          message.mediaType &&
+                          message.media?.kind !== "photo" &&
+                          message.media?.kind !== "document" && (
+                            <p className="text-sm opacity-80">
+                              [{message.mediaType}]
+                            </p>
+                          )}
                       </>
                     )}
 
@@ -757,29 +811,86 @@ export function ChatWindow({
           event.preventDefault();
           void submit();
         }}
-        className="flex items-center gap-2 border-t border-zinc-800 px-5 py-3"
+        className="border-t border-zinc-800 px-5 py-3"
       >
-        <input
-          ref={inputRef}
-          value={draft}
-          onChange={(event) => handleDraftChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              void submit();
+        {attachment && (
+          <div className="mb-2 flex items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900/70 p-2">
+            {attachmentPreview ? (
+              <img
+                src={attachmentPreview}
+                alt={attachment.name}
+                className="h-14 w-14 rounded object-cover"
+              />
+            ) : (
+              <span
+                aria-hidden="true"
+                className="flex h-14 w-14 items-center justify-center rounded bg-zinc-800 text-xl"
+              >
+                📄
+              </span>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm text-zinc-100">
+                {attachment.name}
+              </p>
+              <p className="text-xs text-zinc-500">
+                {formatFileSize(attachment.size)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={clearAttachment}
+              title="Убрать файл"
+              aria-label="Убрать файл"
+              className="shrink-0 rounded-md px-2 py-1 text-sm text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(event) => {
+              chooseAttachment(event.target.files?.[0] ?? null);
+              event.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            title="Прикрепить фото или файл"
+            aria-label="Прикрепить фото или файл"
+            className="rounded-full border border-zinc-700 px-3 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+          >
+            📎
+          </button>
+          <input
+            ref={inputRef}
+            value={draft}
+            onChange={(event) => handleDraftChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void submit();
+              }
+              if (event.key === "Escape") setReplyTo(null);
+            }}
+            placeholder={
+              attachment ? "Подпись к файлу…" : `Сообщение в ${chat.title}`
             }
-            if (event.key === "Escape") setReplyTo(null);
-          }}
-          placeholder={`Сообщение в ${chat.title}`}
-          className="flex-1 rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
-        />
-        <button
-          type="submit"
-          disabled={!draft.trim()}
-          className="rounded-full bg-sky-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-400 disabled:opacity-40"
-        >
-          Отправить
-        </button>
+            className="flex-1 rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
+          />
+          <button
+            type="submit"
+            disabled={!draft.trim() && !attachment}
+            className="rounded-full bg-sky-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-400 disabled:opacity-40"
+          >
+            Отправить
+          </button>
+        </div>
       </form>
 
       {forwardIds && (
@@ -796,6 +907,73 @@ export function ChatWindow({
       )}
     </section>
   );
+}
+
+function MessageMedia({
+  message,
+  accountId,
+  selecting,
+}: {
+  message: MessageView;
+  accountId: string;
+  selecting: boolean;
+}) {
+  const media = message.media;
+  if (!media || !media.downloadable) return null;
+
+  const url = mediaUrl(accountId, message.chatId, message.id, media.fileName);
+
+  if (media.kind === "photo") {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(event) => {
+          if (selecting) event.preventDefault();
+        }}
+        className="my-1 block"
+        title="Открыть фото"
+      >
+        <img
+          src={url}
+          alt={media.fileName ?? "Фото"}
+          loading="lazy"
+          className="max-h-72 max-w-full rounded-lg object-contain"
+        />
+      </a>
+    );
+  }
+
+  if (media.kind === "document") {
+    const fileName = media.fileName ?? "Документ";
+    return (
+      <a
+        href={url}
+        download={media.fileName ?? undefined}
+        onClick={(event) => {
+          if (selecting) event.preventDefault();
+        }}
+        className="my-1 flex max-w-xs items-center gap-3 rounded-lg bg-black/20 px-3 py-2 transition-colors hover:bg-black/30"
+        title="Скачать файл"
+      >
+        <span aria-hidden="true" className="text-xl">
+          📄
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium">{fileName}</span>
+          <span className="block text-[11px] opacity-75">
+            {formatFileSize(media.size) || media.mimeType || "файл"}
+          </span>
+        </span>
+        <span className="shrink-0 text-[11px] underline underline-offset-2">
+          Скачать
+        </span>
+      </a>
+    );
+  }
+
+  return null;
 }
 
 function SelectionMark({ checked }: { checked: boolean }) {

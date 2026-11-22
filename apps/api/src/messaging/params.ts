@@ -88,6 +88,18 @@ export function parseMessageText(value: unknown): string {
   return text;
 }
 
+/** Optional media caption: trimmed, at most 4096 characters. */
+export function parseOptionalCaption(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') invalid('caption must be a string');
+  const caption = value.trim();
+  if (!caption) return undefined;
+  if (caption.length > MAX_TEXT_LENGTH) {
+    invalid(`caption must be at most ${MAX_TEXT_LENGTH} characters`);
+  }
+  return caption;
+}
+
 /** Search query: trimmed, 1..256 characters. */
 export function parseSearchQuery(value: unknown): string {
   if (typeof value !== 'string') invalid('q is required');

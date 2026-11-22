@@ -272,6 +272,40 @@ export function ChatsPage() {
     [selectedAccountId, selectedChatId],
   );
 
+  const sendMedia = useCallback(
+    async (file: File, caption: string, replyToId?: number) => {
+      if (selectedAccountId === null || selectedChatId === null) return;
+      const form = new FormData();
+      form.append("file", file);
+      const trimmed = caption.trim();
+      if (trimmed) form.append("caption", trimmed);
+      if (replyToId !== undefined) form.append("replyToId", String(replyToId));
+      try {
+        const message = await apiFetch<MessageView>(
+          `/accounts/${selectedAccountId}/chats/${selectedChatId}/media`,
+          { method: "POST", formData: form },
+        );
+        setMessages((previous) =>
+          previous.some((item) => item.id === message.id)
+            ? previous
+            : [...previous, message],
+        );
+        setChats((previous) =>
+          previous.map((chat) =>
+            chat.id === selectedChatId
+              ? { ...chat, lastMessage: message, unreadCount: 0 }
+              : chat,
+          ),
+        );
+      } catch (error) {
+        const textError = errorMessage(error);
+        setMessagesError(textError);
+        throw new Error(textError);
+      }
+    },
+    [selectedAccountId, selectedChatId],
+  );
+
   const forwardMessages = useCallback(
     async (toChatId: number, messageIds: number[]) => {
       if (selectedAccountId === null || selectedChatId === null) return;
@@ -756,6 +790,9 @@ export function ChatsPage() {
         typing={chatTyping}
         onLoadMore={() => void loadMore()}
         onSend={(text, replyToId) => sendMessage(text, replyToId)}
+        onSendMedia={(file, caption, replyToId) =>
+          sendMedia(file, caption, replyToId)
+        }
         onEdit={(messageId, text) => void editMessage(messageId, text)}
         onDelete={(messageId) => void deleteMessage(messageId)}
         onDeleteMany={deleteMessages}

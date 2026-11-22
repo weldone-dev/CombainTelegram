@@ -1,19 +1,27 @@
 import {
   Body,
+  Catch,
   Controller,
   Delete,
   Get,
   Header,
   Param,
   Patch,
+  PayloadTooLargeException,
   Post,
   Query,
   StreamableFile,
+  UploadedFile,
+  UseFilters,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { ArgumentsHost, ExceptionFilter } from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { UserModel } from '@repo/database';
 import { CurrentUser } from '../user-context/current-user.decorator.js';
-import { notFound } from '../common/api-error.js';
+import { apiError, notFound } from '../common/api-error.js';
 import { MessagingService } from './messaging.service.js';
 import type {
   ChatInfoView,
@@ -21,11 +29,43 @@ import type {
   ChatSearchView,
   DeletedMessageView,
   ForwardView,
+  MediaDownloadView,
   MessageHistoryView,
   ReadAllView,
   ReadView,
 } from './messaging.service.js';
 import type { ChatView, MessageView } from './message-view.js';
+import { MAX_MEDIA_BYTES } from './media.js';
+
+interface UploadedMediaFile {
+  originalname?: string;
+  mimetype?: string;
+  size?: number;
+  buffer?: Buffer;
+}
+
+/**
+ * Multer reports oversized files as a Nest `PayloadTooLargeException`, whose
+ * default body does not match the `{ code, message }` API error contract.
+ */
+@Catch(PayloadTooLargeException)
+class MediaUploadTooLargeFilter implements ExceptionFilter {
+  constructor(private readonly adapterHost: HttpAdapterHost) {}
+
+  catch(_exception: PayloadTooLargeException, host: ArgumentsHost): void {
+    const context = host.switchToHttp();
+    const error = apiError(
+      'PAYLOAD_TOO_LARGE',
+      `file must be at most ${MAX_MEDIA_BYTES} bytes`,
+      413,
+    );
+    this.adapterHost.httpAdapter.reply(
+      context.getResponse(),
+      error.getResponse(),
+      413,
+    );
+  }
+}
 
 @ApiTags('messaging')
 @Controller('accounts/:accountId/chats')
@@ -198,6 +238,68 @@ export class MessagingController {
     return this.messaging.sendMessage(user.id, accountId, chatId, body);
   }
 
+  @Post(':chatId/media')
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: MAX_MEDIA_BYTES } }),
+  )
+  @UseFilters(MediaUploadTooLargeFilter)
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Upload and send one photo or document (multipart `file`)',
+  })
+  sendMedia(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @UploadedFile() file: UploadedMediaFile | undefined,
+    @Body()
+    body: {
+      caption?: unknown;
+      replyToId?: unknown;
+      sessionId?: unknown;
+    } = {},
+  ): Promise<MessageView> {
+    if (!file?.buffer || file.buffer.byteLength === 0) {
+      throw apiError('VALIDATION_ERROR', 'file is required');
+    }
+    return this.messaging.sendMedia(user.id, accountId, chatId, {
+      buffer: file.buffer,
+      fileName: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size ?? file.buffer.byteLength,
+      caption: body.caption,
+      replyToId: body.replyToId,
+      sessionId: body.sessionId,
+    });
+  }
+
+  @Get(':chatId/messages/:messageId/media')
+  @ApiOperation({
+    summary: 'Download the photo or document attached to a message',
+  })
+  async downloadMedia(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Query('sessionId') sessionId?: string,
+    @Query('filename') filename?: string,
+  ): Promise<StreamableFile> {
+    const media: MediaDownloadView = await this.messaging.downloadMedia(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      sessionId,
+      filename,
+    );
+    return new StreamableFile(media.data, {
+      type: media.mimeType,
+      disposition: media.disposition,
+      length: media.length,
+    });
+  }
+
   @Post(':chatId/forward')
   @ApiOperation({ summary: 'Forward messages from another chat into this one' })
   forwardMessages(
@@ -251,7 +353,9 @@ export class MessagingController {
   }
 
   @Post(':chatId/read')
-  @ApiOperation({ summary: 'Mark chat history as read (optionally up to maxId)' })
+  @ApiOperation({
+    summary: 'Mark chat history as read (optionally up to maxId)',
+  })
   markRead(
     @CurrentUser() user: UserModel,
     @Param('accountId') accountId: string,

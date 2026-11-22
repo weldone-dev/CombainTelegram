@@ -20,6 +20,22 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Direct URL of a message attachment. Images are served inline, documents as
+ * an attachment; `filename` lets the browser save a nicer name.
+ */
+export function mediaUrl(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  fileName?: string | null,
+): string {
+  const params = new URLSearchParams();
+  if (fileName) params.set("filename", fileName);
+  const query = params.toString();
+  return `${API_URL}/accounts/${encodeURIComponent(accountId)}/chats/${chatId}/messages/${messageId}/media${query ? `?${query}` : ""}`;
+}
+
 export interface RequestOptions {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
@@ -117,6 +133,8 @@ const RU_ERRORS: Record<string, string> = {
   TDATA_UPLOAD_NOT_FOUND: "Загрузка не найдена",
   TDATA_UPLOAD_EXPIRED: "Загрузка истекла, загрузите архив снова",
   UNAUTHORIZED: "Нет доступа",
+  PAYLOAD_TOO_LARGE: "Файл больше 50 МБ",
+  MEDIA_NOT_FOUND: "В этом сообщении нет доступного фото или файла",
 };
 
 /** Human-readable Russian message for any thrown value. */

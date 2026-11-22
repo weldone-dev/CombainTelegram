@@ -32,13 +32,31 @@ export interface MessageLike {
   sender: PeerLike;
   chat: PeerLike;
   replyToMessage: { id: number | null } | null;
-  media: { type: string } | null;
+  /**
+   * Only the fields we read are structural. `fileName` / `mimeType` are
+   * getters on mtcute's document classes and `fileSize` lives on
+   * `FileLocation`, so they stay optional for plain test fixtures.
+   */
+  media: {
+    type: string;
+    fileName?: string | null;
+    mimeType?: string | null;
+    fileSize?: number;
+  } | null;
   /**
    * Raw TL message. `_` (the TL constructor) is required so both
    * `RawMessage` and `RawMessageService` structurally match; only `editDate`
    * is read (`edited`).
    */
   raw: { _: string; editDate?: unknown };
+}
+
+export interface MessageMediaView {
+  kind: 'photo' | 'document' | 'other';
+  mimeType: string | null;
+  fileName: string | null;
+  size: number | null;
+  downloadable: boolean;
 }
 
 export interface MessageView {
@@ -51,7 +69,9 @@ export interface MessageView {
   senderId: number;
   senderName: string;
   replyToId: number | null;
+  /** Kept for older clients; `media` is the structured descriptor. */
   mediaType: string | null;
+  media: MessageMediaView | null;
 }
 
 export interface ChatView {
@@ -68,6 +88,43 @@ export interface ChatView {
   readInboxMaxId: number;
 }
 
+/**
+ * Reads a getter that some media classes do not have. Missing or throwing
+ * getters become `null` instead of failing the whole message mapping.
+ */
+function readMediaField<T>(
+  media: NonNullable<MessageLike['media']>,
+  key: 'fileName' | 'mimeType' | 'fileSize',
+): T | null {
+  try {
+    const value = media[key] as T | null | undefined;
+    return value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Structured media descriptor. Only photos and generic documents are
+ * downloadable; everything else keeps a kind of `other` so the client can
+ * still show `mediaType` without pretending to support it.
+ */
+export function toMessageMediaView(
+  media: MessageLike['media'],
+): MessageMediaView | null {
+  if (!media) return null;
+  const type = typeof media.type === 'string' ? media.type : null;
+  const kind: MessageMediaView['kind'] =
+    type === 'photo' ? 'photo' : type === 'document' ? 'document' : 'other';
+  return {
+    kind,
+    mimeType: readMediaField<string>(media, 'mimeType'),
+    fileName: readMediaField<string>(media, 'fileName'),
+    size: readMediaField<number>(media, 'fileSize'),
+    downloadable: kind === 'photo' || kind === 'document',
+  };
+}
+
 /** Message DTO shared by REST responses and WS events. */
 export function toMessageView(message: MessageLike): MessageView {
   return {
@@ -81,6 +138,7 @@ export function toMessageView(message: MessageLike): MessageView {
     senderName: message.sender.displayName,
     replyToId: message.replyToMessage?.id ?? null,
     mediaType: message.media?.type ?? null,
+    media: toMessageMediaView(message.media),
   };
 }
 
@@ -131,9 +189,7 @@ export function toChatView(dialog: DialogLike): ChatView {
     type: dialog.peer.type,
     title: dialog.peer.displayName,
     username: dialog.peer.username,
-    lastMessage: dialog.lastMessage
-      ? toMessageView(dialog.lastMessage)
-      : null,
+    lastMessage: dialog.lastMessage ? toMessageView(dialog.lastMessage) : null,
     unreadCount: dialog.unreadCount,
     pinned: dialog.isPinned,
     muted: dialog.isMuted ?? false,
