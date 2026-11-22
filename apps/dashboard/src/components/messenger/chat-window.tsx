@@ -989,7 +989,7 @@ export function ChatWindow({
                         {poll ? (
                           <PollBlock
                             poll={poll}
-                            canVote={canWrite && !selecting}
+                            canVote={!selecting}
                             busy={voteBusy}
                             onVote={(index) => void vote(message, index)}
                           />
