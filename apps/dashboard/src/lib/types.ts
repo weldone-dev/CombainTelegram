@@ -353,3 +353,95 @@ export interface LogsStatsView {
   oldest: string | null;
   newest: string | null;
 }
+
+/** Admin rights exposed by the chat administration panel. */
+export interface ChatAdminRights {
+  changeInfo?: boolean;
+  deleteMessages?: boolean;
+  banUsers?: boolean;
+  inviteUsers?: boolean;
+  pinMessages?: boolean;
+  manageCall?: boolean;
+  postMessages?: boolean;
+  editMessages?: boolean;
+  addAdmins?: boolean;
+  anonymous?: boolean;
+  manageTopics?: boolean;
+}
+
+export type ChatAdminRightKey = keyof ChatAdminRights;
+
+export type ChatAdminMemberFilter =
+  | "all"
+  | "admins"
+  | "banned"
+  | "recent"
+  | "bots";
+
+/** `GET /accounts/:accountId/chats/:chatId/admin/members`. */
+export interface ChatAdminMemberView {
+  id: number;
+  name: string;
+  username: string | null;
+  status: string;
+  rank: string | null;
+  isAdmin: boolean;
+  isCreator: boolean;
+  joinedAt: string | null;
+}
+
+export interface ChatAdminMembersView {
+  items: ChatAdminMemberView[];
+  total: number | null;
+}
+
+/** `PATCH /accounts/:accountId/chats/:chatId/admin`. */
+export interface ChatAdminSettingsView {
+  title: string;
+  about: string;
+  slowModeSeconds: number;
+}
+
+export interface ChatAdminSettingsPatch {
+  title?: string;
+  about?: string;
+  slowModeSeconds?: number;
+}
+
+/** `GET /accounts/:accountId/chats/:chatId/admin/invites`. */
+export interface ChatAdminInviteView {
+  link: string;
+  creatorName: string | null;
+  isPrimary: boolean;
+  isRevoked: boolean;
+  usage: number;
+  /** `null` means no usage limit. */
+  usageLimit: number | null;
+  approvalNeeded: boolean;
+  pendingJoinRequests: number;
+  expiresAt: string | null;
+}
+
+export interface ChatAdminInvitesView {
+  items: ChatAdminInviteView[];
+}
+
+export interface ChatAdminInviteCreate {
+  expiresAt?: number;
+  usageLimit?: number;
+  withApproval?: boolean;
+  name?: string;
+}
+
+/** `GET /accounts/:accountId/chats/:chatId/admin/join-requests`. */
+export interface ChatAdminJoinRequestView {
+  userId: number;
+  name: string;
+  username: string | null;
+  about: string | null;
+  date: string;
+}
+
+export interface ChatAdminJoinRequestsView {
+  items: ChatAdminJoinRequestView[];
+}

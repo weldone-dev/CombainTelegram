@@ -30,8 +30,9 @@ import type {
   ChatView,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
+import { ChatAdminPanel } from "./chat-admin-panel";
 
-type InfoTab = "overview" | ChatInfoMediaKind | "similar";
+type InfoTab = "overview" | ChatInfoMediaKind | "similar" | "admin";
 
 interface SectionState {
   items: ChatInfoMediaItemView[];
@@ -258,6 +259,13 @@ export function ChatInfoPanel({
   if (similar && similar.length > 0) {
     tabs.push({ id: "similar", label: "Похожие" });
   }
+  if (
+    info &&
+    (info.isAdmin || info.isCreator) &&
+    (info.isGroup || info.isChannel)
+  ) {
+    tabs.push({ id: "admin", label: "Управление" });
+  }
 
   return (
     <div className="absolute inset-0 z-30 flex justify-end">
@@ -411,6 +419,10 @@ export function ChatInfoPanel({
               chats={similar ?? []}
               onOpen={openSimilar}
             />
+          )}
+
+          {tab === "admin" && info && (
+            <ChatAdminPanel accountId={accountId} chatId={chatId} info={info} />
           )}
         </div>
       </aside>

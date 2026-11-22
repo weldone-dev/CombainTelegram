@@ -342,6 +342,47 @@ Sending trims text (non-empty, max 4096); typing accepts
 Telegram errors are mapped to `{ code, message, retryAfter? }` (FLOOD_WAIT
 included).
 
+### Group and channel administration
+
+A dedicated `ChatAdminController` (`/accounts/:accountId/chats/:chatId/admin`)
+adds the "Управление" tab of the info drawer for groups, supergroups and
+channels the account administers. Every route resolves the session through
+`AccountsService`, rejects private peers with `400 NOT_A_GROUP`, and requires
+`isAdmin || isCreator` from `getFullChat`, otherwise `403 CHAT_ADMIN_REQUIRED`.
+DTOs contain no mtcute objects and validation runs before network calls.
+
+```
+GET    .../admin/members?query=&type=all|admins|banned|recent|bots&limit=&offset=
+         → { items: [{ id, name, username, status, rank, isAdmin, isCreator, joinedAt }], total }
+POST   .../admin/members/:userId/ban      { untilDate? (ms) }   banChatMember
+POST   .../admin/members/:userId/unban                         unbanChatMember
+POST   .../admin/members/:userId/kick                          kickChatMember
+POST   .../admin/members/:userId/rank     { rank: string|null } editChatMemberRank
+POST   .../admin/members/:userId/admin    { rank?, rights }     editAdminRights
+DELETE .../admin/members/:userId/admin                          editAdminRights (empty)
+PATCH  .../admin                           { title?, about?, slowModeSeconds? }
+GET    .../admin/invites                   → { items: [{ link, creatorName, isPrimary, ... }] }
+POST   .../admin/invites                   { expiresAt?, usageLimit?, withApproval?, name? }
+POST   .../admin/invites/primary           export primary link (rotates the old one)
+POST   .../admin/invites/revoke            { link }
+POST   .../admin/invites/edit              { link, expiresAt?, usageLimit?, withApproval? }
+GET    .../admin/join-requests             messages.getChatInviteImporters (requested)
+POST   .../admin/join-requests             { userIds: number[], approve: boolean }
+```
+
+`limit` is capped at 200 (Telegram's own cap; `total` comes from
+`ArrayWithTotal`). Slow mode accepts only Telegram's intervals
+(`0,10,30,60,300,900,3600,10800,21600,43200,86400`); `0` disables it. Admin
+rights are an allow-list (`changeInfo`, `deleteMessages`, `banUsers`,
+`inviteUsers`, `pinMessages`, `manageCall`, `postMessages`, `editMessages`,
+`addAdmins`, `anonymous`, `manageTopics`); an empty selection becomes
+`other: true` (admin without extra powers) instead of silently demoting.
+Invite `usageLimit: null` and `expiresAt: null` mean unlimited/no expiry;
+`pendingJoinRequests` counts approval-based join requests. mtcute 0.32 has no
+`title` on `createInviteLink`, so a named link uses the underlying
+`messages.exportChatInvite` call; join requests use the raw importer call and
+`hideJoinRequest` for approve/decline.
+
 Accounts:
 ```
 GET    /accounts                                   → slots + sessions + masked phone + isActive
