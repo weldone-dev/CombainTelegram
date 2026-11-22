@@ -1,0 +1,163 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// Local application user (not a Telegram account).
+model User {
+  id           String           @id @default(cuid())
+  email        String?          @unique
+  name         String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  accounts     TelegramAccount[]
+  authAttempts AuthAttempt[]
+  tdataUploads TdataUpload[]
+  proxies      Proxy[]
+}
+
+/// Named proxy entry. A local user keeps a reusable list; sessions point at one.
+/// `secretEncrypted` holds the password (socks/http) or MTProto secret,
+/// encrypted with `SessionCryptoService` (AAD `proxy:<id>`).
+model Proxy {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  kind            String           @default("socks5")
+  host            String
+  port            Int
+  username        String?
+  secretEncrypted Bytes?
+  enabled         Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  sessions        TelegramSession[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+/// One attached Telegram account slot. A local user can have many.
+model TelegramAccount {
+  id             String           @id @default(cuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tgUserId       BigInt
+  phoneEncrypted Bytes?
+  phoneNonce     Bytes?
+  phoneTag       Bytes?
+  firstName      String
+  lastName       String?
+  username       String?
+  deviceProfile  String           @default("{}")
+  isActive       Boolean          @default(false)
+  lastUsedAt     DateTime?
+  createdAt      DateTime         @default(now())
+  sessions       TelegramSession[]
+
+  @@unique([userId, tgUserId])
+  @@index([userId])
+}
+
+/// One Telegram auth key = one device/session. An account can have several
+/// (e.g. desktop + phone) and each is a full mtcute client.
+model TelegramSession {
+  id          String          @id @default(cuid())
+  accountId   String
+  account     TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  deviceId    String
+  label       String?
+  platform    String          @default("desktop")
+  profile     String          @default("TelegramDesktop")
+  dcId        Int
+  apiId       Int
+  proxyId     String?
+  proxy       Proxy?          @relation(fields: [proxyId], references: [id], onDelete: SetNull)
+  keyVersion  Int             @default(1)
+  cipher      Bytes
+  nonce       Bytes
+  tag         Bytes
+  dekWrapped  Bytes
+  dekNonce    Bytes
+  dekTag      Bytes
+  revokedAt   DateTime?
+  lastUsedAt  DateTime?
+  createdAt   DateTime        @default(now())
+
+  @@unique([accountId, deviceId])
+  @@index([accountId])
+}
+
+/// Ephemeral login attempt (phone / qr / tdata).
+model AuthAttempt {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  method    String
+  status    String
+  payload   String   @default("{}")
+  error     String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+/// tdata upload kept only until import or expiry.
+model TdataUpload {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    String
+  accounts  String   @default("[]")
+  tempPath  String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId, status])
+}
+
+/// Structured application log: API calls, Telegram RPC responses, auth steps,
+/// client/proxy failures. Read by the dashboard and by AI agents over REST.
+model LogEntry {
+  id               String   @id @default(cuid())
+  level            String   @default("info")
+  source           String   @default("app")
+  action           String
+  message          String
+  status           String?
+  requestId        String?
+  userId           String?
+  accountId        String?
+  sessionId        String?
+  chatId           Int?
+  attemptId        String?
+  durationMs       Int?
+  errorCode        String?
+  telegramMethod   String?
+  telegramError    String?
+  telegramResponse String?
+  proxyId          String?
+  proxyLabel       String?
+  /// Snapshot of the proxy at request time (name, kind, host, port, username).
+  /// Kept even after the proxy is edited or deleted.
+  proxySnapshot    String?
+  details          String   @default("{}")
+  createdAt        DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@index([source, createdAt])
+  @@index([accountId, createdAt])
+  @@index([proxyId, createdAt])
+  @@index([requestId])
+}
+
