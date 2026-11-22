@@ -76,6 +76,60 @@ export interface ChatView {
   archived: boolean;
   /** Highest incoming message id already read by this account. */
   readInboxMaxId: number;
+  /** False for channels/groups the account may only read. */
+  canSendMessages: boolean;
+}
+
+/** `GET /accounts/:accountId/chats/:chatId/info`. */
+export interface ChatInfoView {
+  id: number;
+  type: string;
+  title: string;
+  username: string | null;
+  about: string | null;
+  memberCount: number | null;
+  onlineCount: number | null;
+  isChannel: boolean;
+  isGroup: boolean;
+  isAdmin: boolean;
+  isCreator: boolean;
+  canSendMessages: boolean;
+  inviteLink: string | null;
+}
+
+export type ChatInfoMediaKind = "media" | "links" | "polls";
+
+export interface ChatInfoPollView {
+  question: string;
+  options: string[];
+  totalVoters: number;
+}
+
+export interface ChatInfoMediaItemView {
+  messageId: number;
+  date: string;
+  text: string;
+  media: MessageMediaView | null;
+  url: string | null;
+  poll: ChatInfoPollView | null;
+}
+
+/** `GET /accounts/:accountId/chats/:chatId/info/media`. */
+export interface ChatInfoMediaView {
+  items: ChatInfoMediaItemView[];
+  nextOffsetId: number | null;
+}
+
+export interface ChatInfoSimilarChatView {
+  id: number;
+  title: string;
+  username: string | null;
+  memberCount: number | null;
+}
+
+/** `GET /accounts/:accountId/chats/:chatId/info/similar`. */
+export interface ChatInfoSimilarView {
+  chats: ChatInfoSimilarChatView[];
 }
 
 export interface MessageHistoryView {
