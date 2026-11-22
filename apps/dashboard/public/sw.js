@@ -1,9 +1,20 @@
 /* Service worker: Web Push notifications and the offline shell. */
 
-const STATIC_CACHE = "ct-static-v1";
-const PAGE_CACHE = "ct-pages-v1";
+const STATIC_CACHE = "ct-static-v2";
+const PAGE_CACHE = "ct-pages-v2";
 const OFFLINE_URL = "/offline.html";
 const PRECACHE = ["/", "/chats", OFFLINE_URL];
+
+// Local development reuses some Next chunk URLs between recompiles, so a
+// cache-first SW would pin an old bundle until the SW is unregistered (stale
+// UI after every edit). On local hosts static assets go network-first and the
+// cache is only the offline fallback; production keeps cache-first for
+// immutable hashed chunks.
+const IS_LOCAL_HOST =
+  self.location.hostname === "localhost" ||
+  self.location.hostname === "127.0.0.1" ||
+  self.location.hostname === "[::1]" ||
+  self.location.hostname === "::1";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -51,6 +62,18 @@ async function cacheFirst(request) {
   return response;
 }
 
+/** Network-first variant for dev, where chunk URLs are not immutable. */
+async function networkFirstStatic(request) {
+  const cache = await caches.open(STATIC_CACHE);
+  try {
+    const response = await fetch(request);
+    if (response.ok) cache.put(request, response.clone());
+    return response;
+  } catch {
+    return (await cache.match(request)) || Response.error();
+  }
+}
+
 async function staleWhileRevalidate(request) {
   const cache = await caches.open(PAGE_CACHE);
   const cached = await cache.match(request);
@@ -92,7 +115,9 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (url.pathname.startsWith("/_next/static/")) {
-    event.respondWith(cacheFirst(request));
+    event.respondWith(
+      IS_LOCAL_HOST ? networkFirstStatic(request) : cacheFirst(request),
+    );
   }
 });
 
