@@ -1500,10 +1500,9 @@ export class MessagingService {
   }
 
   /**
-   * Delete one message. `revoke` defaults to `false` (remove only from this
-   * account); `revoke=true` deletes it for everyone. Without the explicit
-   * default mtcute would revoke, silently deleting other people's messages
-   * where an admin is allowed to.
+   * Delete one message. `revoke` defaults to `true`, so the message disappears
+   * for everyone; `revoke=false` keeps the account-local delete for
+   * compatibility.
    */
   async deleteMessage(
     userId: string,

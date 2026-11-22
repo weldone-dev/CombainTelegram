@@ -637,7 +637,7 @@ describe('message-level features', () => {
     expect(result.mimeType).toBe('image/jpeg');
   });
 
-  it('deletes a message only for the account unless revoke=true', async () => {
+  it('deletes a message for everyone by default and honours revoke=false', async () => {
     const deleteMessagesById = vi.fn(async () => undefined);
     const service = createService({
       deleteMessagesById,
@@ -647,16 +647,16 @@ describe('message-level features', () => {
     expect(deleteMessagesById).toHaveBeenLastCalledWith(
       CHAT_ID,
       [77],
-      { revoke: false },
+      { revoke: true },
     );
 
     await service.deleteMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77', {
-      revoke: 'true',
+      revoke: 'false',
     });
     expect(deleteMessagesById).toHaveBeenLastCalledWith(
       CHAT_ID,
       [77],
-      { revoke: true },
+      { revoke: false },
     );
   });
 
