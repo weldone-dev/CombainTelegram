@@ -476,12 +476,16 @@ export class MessagingController {
   }
 
   @Delete(':chatId/messages/:messageId')
-  @ApiOperation({ summary: 'Delete a message' })
+  @ApiOperation({
+    summary:
+      'Delete a message; revoke=false (default) removes it only for this account',
+  })
   deleteMessage(
     @CurrentUser() user: UserModel,
     @Param('accountId') accountId: string,
     @Param('chatId') chatId: string,
     @Param('messageId') messageId: string,
+    @Query('revoke') revoke?: string,
     @Query('sessionId') sessionId?: string,
   ): Promise<DeletedMessageView> {
     return this.messaging.deleteMessage(
@@ -489,7 +493,7 @@ export class MessagingController {
       accountId,
       chatId,
       messageId,
-      sessionId,
+      { revoke, sessionId },
     );
   }
 

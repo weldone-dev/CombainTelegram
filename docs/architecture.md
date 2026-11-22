@@ -283,7 +283,7 @@ PATCH  /accounts/:accountId/chats/:chatId                      { pinned?, muted?
 DELETE /accounts/:accountId/chats/:chatId?revoke=&clearHistory=&sessionId=
 POST   /accounts/:accountId/chats/read-all                     { sessionId? } → { read, failed }
 PATCH  /accounts/:accountId/chats/:chatId/messages/:messageId  { text, sessionId? }
-DELETE /accounts/:accountId/chats/:chatId/messages/:messageId?sessionId=
+DELETE /accounts/:accountId/chats/:chatId/messages/:messageId?revoke=&sessionId=
 POST   /accounts/:accountId/chats/:chatId/read                 { maxId?, sessionId? }
 POST   /accounts/:accountId/chats/:chatId/typing               { status?, sessionId? }
 ```
@@ -344,7 +344,13 @@ default `ru`, `message.text` includes captions) and a raw
 `PREMIUM_ACCOUNT_REQUIRED` → 403 `PREMIUM_REQUIRED`).
 Uploads (`POST /chats/:chatId/media`) accept one multipart `file` up to 50 MB
 (`MAX_MEDIA_BYTES`, `413 PAYLOAD_TOO_LARGE`), with an optional caption; images
-are sent as photos, everything else as documents. Downloads
+are sent as photos, everything else as documents. If Telegram rejects a photo
+with `IMAGE_PROCESS_FAILED` (e.g. very small PNGs), the upload is retried once
+as a document; a second failure returns `400 MEDIA_PROCESS_FAILED`. Deletes
+(`DELETE .../messages/:messageId`) are account-local by default
+(`revoke=false`); `revoke=true` deletes for everyone. The dashboard loop used
+for selection-mode batch deletes calls the same single-message endpoint, so it
+inherits that default and asks explicitly before revoking. Downloads
 (`GET .../messages/:messageId/media`) reject descriptors above the same 50 MB
 limit (`413 MEDIA_TOO_LARGE`) before fetching bytes, cache at most 200 MB total
 (entries over 10 MB are not cached, TTL 5 min), and validate the sender's MIME

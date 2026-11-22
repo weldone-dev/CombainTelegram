@@ -141,8 +141,11 @@ export function ChatWindow({
     replyToId?: number,
   ) => Promise<void>;
   onEdit: (messageId: number, text: string) => void;
-  onDelete: (messageId: number) => void;
-  onDeleteMany: (messageIds: number[]) => Promise<void>;
+  onDelete: (messageId: number, options?: { revoke?: boolean }) => void;
+  onDeleteMany: (
+    messageIds: number[],
+    options?: { revoke?: boolean },
+  ) => Promise<void>;
   onForward: (toChatId: number, messageIds: number[]) => Promise<void>;
   onTyping: () => void;
   /** Called with the newest visible id once the user is at the bottom. */
@@ -569,8 +572,20 @@ export function ChatWindow({
     const ids = [...selected];
     if (ids.length === 0) return;
     if (!window.confirm(`Удалить выбранные сообщения (${ids.length})?`)) return;
+    // Deleting only for this account is the safe default. Messages from other
+    // people (and outgoing messages in groups) can also be revoked for
+    // everyone, but only after an explicit second confirmation.
+    const others = visible.filter(
+      (message) => selected.has(message.id) && !message.outgoing,
+    ).length;
+    let revoke = false;
+    if (others > 0) {
+      revoke = window.confirm(
+        `Среди выбранных есть чужие сообщения (${others}). Удалить их у всех участников?\n\n«ОК» — удалить у всех, «Отмена» — только у себя.`,
+      );
+    }
     try {
-      await onDeleteMany(ids);
+      await onDeleteMany(ids, { revoke });
       setStatus(null);
     } catch (caught) {
       setStatus(
@@ -1193,31 +1208,50 @@ export function ChatWindow({
                             : "Копировать"}
                         </button>
                         {message.outgoing && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => startEdit(message)}
-                              title="Изменить"
-                              aria-label="Изменить"
-                              className="underline underline-offset-2 hover:text-white"
-                            >
-                              Изменить
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (window.confirm("Удалить это сообщение?")) {
-                                  onDelete(message.id);
-                                }
-                              }}
-                              title="Удалить"
-                              aria-label="Удалить"
-                              className="text-red-200 underline underline-offset-2 hover:text-red-100"
-                            >
-                              Удалить
-                            </button>
-                          </>
+                          <button
+                            type="button"
+                            onClick={() => startEdit(message)}
+                            title="Изменить"
+                            aria-label="Изменить"
+                            className="underline underline-offset-2 hover:text-white"
+                          >
+                            Изменить
+                          </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                "Удалить это сообщение только у себя?",
+                              )
+                            ) {
+                              onDelete(message.id, { revoke: false });
+                            }
+                          }}
+                          title="Удалить у себя"
+                          aria-label="Удалить у себя"
+                          className="text-red-200 underline underline-offset-2 hover:text-red-100"
+                        >
+                          Удалить у себя
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                "Удалить это сообщение у всех участников? Это действие необратимо.",
+                              )
+                            ) {
+                              onDelete(message.id, { revoke: true });
+                            }
+                          }}
+                          title="Удалить у всех"
+                          aria-label="Удалить у всех"
+                          className="text-red-200 underline underline-offset-2 hover:text-red-100"
+                        >
+                          Удалить у всех
+                        </button>
                       </div>
                     )}
                   </div>
