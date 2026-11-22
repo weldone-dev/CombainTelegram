@@ -175,6 +175,15 @@ const AVATAR_CACHE_MAX_ENTRIES = 100;
 /** `limit` cap for the chat info tabs. */
 const CHAT_INFO_LIMIT = 50;
 
+/**
+ * Whether the peer is a one-to-one chat. mtcute 0.32 models bots as `User`
+ * (`type: 'user'`), but `'bot'` is kept for versions that report it apart.
+ */
+function isPrivatePeer(peer: Peer): boolean {
+  const type: string = peer.type;
+  return type === 'user' || type === 'bot';
+}
+
 /** Marked chat id from a raw `chat`/`channel` TL object. */
 function markedChatId(raw: { _: string; id: number }): number | null {
   switch (raw._) {
@@ -316,11 +325,7 @@ export class MessagingService {
     }
   }
 
-  private setAvatar(
-    key: string,
-    data: Buffer | null,
-    now = Date.now(),
-  ): void {
+  private setAvatar(key: string, data: Buffer | null, now = Date.now()): void {
     this.avatars.delete(key);
     this.avatars.set(key, { data, at: now });
     this.pruneAvatars(now);
@@ -334,10 +339,7 @@ export class MessagingService {
     if (this.downloadBytes < 0) this.downloadBytes = 0;
   }
 
-  private rememberDownload(
-    key: string,
-    entry: DownloadCacheEntry,
-  ): void {
+  private rememberDownload(key: string, entry: DownloadCacheEntry): void {
     this.forgetDownload(key);
     // Huge documents are served but not retained; one of them could evict the
     // whole cache and keep hundreds of MB resident.
@@ -465,12 +467,12 @@ export class MessagingService {
 
     let peer: Peer;
     try {
-      peer = await client.getPeer(chatId);
+      peer = await this.resolvePeerForChat(client, chatId);
     } catch (error) {
       raiseTelegramError(error);
     }
 
-    if (peer.type === 'user') {
+    if (isPrivatePeer(peer)) {
       try {
         const fullUser = await client.getFullUser(chatId);
         return toChatInfoFromUser(fullUser);
@@ -523,8 +525,11 @@ export class MessagingService {
           : { _: 'inputMessagesFilterPoll' };
 
     try {
+      // Warm/confirm the peer first: search resolves the chat id itself, and
+      // an uncached private chat would fail before Telegram is asked.
+      const peer = await this.resolvePeerForChat(client, chatId);
       const result = await client.searchMessages({
-        chatId,
+        chatId: peer,
         filter,
         limit,
         ...(offsetId !== undefined ? { offset: offsetId } : {}),
@@ -617,7 +622,7 @@ export class MessagingService {
 
     let photo: { small: unknown } | null = null;
     try {
-      const peer = await client.getPeer(chatId);
+      const peer = await this.resolvePeerForChat(client, chatId);
       photo = peer.photo;
     } catch (error) {
       raiseTelegramError(error);
@@ -1232,9 +1237,9 @@ export class MessagingService {
         return { removed: false };
       }
 
-      const peer = await client.getPeer(chatId);
+      const peer = await this.resolvePeerForChat(client, chatId);
       if (
-        peer.type === 'user' ||
+        isPrivatePeer(peer) ||
         (peer.type === 'chat' && peer.chatType === 'group')
       ) {
         await client.deleteHistory(chatId, {
@@ -1326,6 +1331,27 @@ export class MessagingService {
       return { folders };
     } catch (error) {
       raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Resolve a numeric chat id to a peer even when it is not in the local peer
+   * cache yet (a fresh private chat opened straight from a link or notification).
+   * `getPeer` starts from the cached peer, so it can reject with
+   * `Peer ... is not found in local cache` before the full-user read runs; the
+   * fallback asks Telegram for the id (`force` skips the cache) and then loads
+   * the user or chat from that resolution. Cached peers keep the fast path.
+   */
+  private async resolvePeerForChat(
+    client: TelegramClient,
+    chatId: number,
+  ): Promise<Peer> {
+    try {
+      return await client.getPeer(chatId);
+    } catch {
+      const input = await client.resolvePeer(chatId, true);
+      if ('userId' in input) return await client.getUser(input);
+      return await client.getChat(input);
     }
   }
 
