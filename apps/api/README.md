@@ -25,6 +25,28 @@
 
 [Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
 
+## Web Push
+
+Incoming Telegram messages are delivered as browser Web Push notifications
+(service worker `apps/dashboard/public/sw.js`), even when the dashboard tab is
+closed. Generate a VAPID key pair once and put it in `apps/api/.env`; the keys
+are not committed:
+
+```bash
+bunx web-push generate-vapid-keys
+```
+
+```dotenv
+VAPID_PUBLIC_KEY=<publicKey>
+VAPID_PRIVATE_KEY=<privateKey>
+VAPID_SUBJECT=mailto:you@example.com
+```
+
+Without both keys the API still boots, logs one warning, and `/push/*` answers
+`503 PUSH_DISABLED`. Routes: `GET /push/key`, `PUT /push/subscribe`,
+`DELETE /push/subscribe`, `POST /push/test`. More detail in
+`docs/architecture.md` (section "Web Push").
+
 ## Project setup
 
 ```bash

@@ -9,6 +9,14 @@ import {
   readNotificationsEnabled,
   writeNotificationsEnabled,
 } from "../../lib/notifications";
+import {
+  disablePush,
+  enablePush,
+  getPushStatus,
+  type PushStatus,
+  registerServiceWorker,
+  sendTestPush,
+} from "../../lib/push";
 import { useAppData } from "./app-data";
 
 interface NavItem {
@@ -35,12 +43,32 @@ const COLLAPSE_KEY = "ct:sidebar-collapsed";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const { accounts, notice, realtimeOnline } = useAppData();
+  const { accounts, notice, realtimeOnline, showNotice } = useAppData();
   const [collapsed, setCollapsed] = useState(false);
   const [notifications, setNotifications] = useState<NotificationsState>("off");
+  const [pushStatus, setPushStatus] = useState<PushStatus>("off");
+  const [pushBusy, setPushBusy] = useState(false);
 
   useEffect(() => {
     setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1");
+  }, []);
+
+  // Service worker + push state are read once, then re-checked on focus so a
+  // permission change made in the browser settings is picked up.
+  useEffect(() => {
+    let cancelled = false;
+    const syncPush = async () => {
+      await registerServiceWorker();
+      const status = await getPushStatus();
+      if (!cancelled) setPushStatus(status);
+    };
+    void syncPush();
+    const onFocus = () => void syncPush();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
   }, []);
 
   // The permission may have been granted or denied outside this tab (browser
@@ -109,6 +137,74 @@ export function AppShell({ children }: { children: ReactNode }) {
       : notifications === "unavailable"
         ? "Уведомления недоступны: разрешите их в настройках браузера"
         : "Включить уведомления";
+
+  const togglePush = async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    try {
+      if (pushStatus === "subscribed") {
+        await disablePush();
+        setPushStatus(await getPushStatus());
+        showNotice("Push-уведомления выключены");
+        return;
+      }
+      if (pushStatus === "unsupported") {
+        showNotice("Этот браузер не поддерживает push-уведомления");
+        return;
+      }
+      const status = await enablePush();
+      setPushStatus(status);
+      if (status === "subscribed") {
+        showNotice("Push-уведомления включены");
+      } else if (status === "denied") {
+        showNotice("Разрешение на уведомления отклонено в браузере");
+      } else {
+        showNotice("Push-уведомления не включены");
+      }
+    } catch (error) {
+      showNotice(
+        error instanceof Error
+          ? error.message
+          : "Не удалось изменить push-уведомления",
+      );
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const testPush = async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    try {
+      const result = await sendTestPush();
+      if (result.sent > 0) {
+        showNotice(
+          result.failed > 0
+            ? `Тестовый push отправлен (${result.sent}), ошибок: ${result.failed}`
+            : "Тестовый push отправлен",
+        );
+      } else {
+        showNotice("Нет активных push-подписок");
+      }
+    } catch (error) {
+      showNotice(
+        error instanceof Error
+          ? error.message
+          : "Не удалось отправить тестовый push",
+      );
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const pushLabel =
+    pushStatus === "subscribed"
+      ? "Выключить push-уведомления"
+      : pushStatus === "unsupported"
+        ? "Push-уведомления не поддерживаются этим браузером"
+        : pushStatus === "denied"
+          ? "Push-уведомления запрещены в настройках браузера"
+          : "Включить push-уведомления";
 
   const pageTitle = PAGE_TITLES[pathname] ?? "CombainTelegram";
 
@@ -202,6 +298,39 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               <BellIcon muted={notifications !== "on"} />
             </button>
+            <span className="flex items-center gap-1 rounded-md border border-zinc-800 py-0.5 pl-0.5 pr-1">
+              <button
+                type="button"
+                onClick={() => void togglePush()}
+                disabled={pushBusy}
+                title={pushLabel}
+                aria-label={pushLabel}
+                aria-pressed={pushStatus === "subscribed"}
+                className={`rounded-md p-1 transition-colors disabled:opacity-50 ${
+                  pushStatus === "subscribed"
+                    ? "text-emerald-400 hover:bg-zinc-800 hover:text-emerald-300"
+                    : pushStatus === "denied" || pushStatus === "unsupported"
+                      ? "text-zinc-600"
+                      : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                }`}
+              >
+                <BellIcon muted={pushStatus !== "subscribed"} />
+              </button>
+              <span className="text-[10px] uppercase tracking-wide text-zinc-500">
+                push
+              </span>
+              {pushStatus === "subscribed" && (
+                <button
+                  type="button"
+                  onClick={() => void testPush()}
+                  disabled={pushBusy}
+                  title="Отправить тестовое push-уведомление"
+                  className="rounded px-1 text-[11px] text-sky-400 transition-colors hover:bg-zinc-800 hover:text-sky-300 disabled:opacity-50"
+                >
+                  Проверить
+                </button>
+              )}
+            </span>
             <span className="flex items-center gap-2">
               <span
                 className={`h-2 w-2 rounded-full ${

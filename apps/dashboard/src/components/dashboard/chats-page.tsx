@@ -17,6 +17,12 @@ import {
   notificationsReady,
   showMessageNotification,
 } from "../../lib/notifications";
+import {
+  loadChatList as loadCachedChatList,
+  loadMessages as loadCachedMessages,
+  saveChatList,
+  saveMessages,
+} from "../../lib/offline-cache";
 import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
   ChatFolderSelection,
@@ -38,6 +44,10 @@ import { ChatWindow } from "../messenger/chat-window";
 import { useAppData } from "./app-data";
 
 const LAST_ACCOUNT_KEY = "ct:last-account";
+
+function isOffline(): boolean {
+  return typeof navigator !== "undefined" && !navigator.onLine;
+}
 
 export function ChatsPage() {
   const {
@@ -71,6 +81,8 @@ export function ChatsPage() {
   const [loadingMore, setLoadingMore] = useState(false);
 
   const [typing, setTyping] = useState<Record<string, TypingEntry[]>>({});
+  const [offline, setOffline] = useState(false);
+  const [offlineBannerDismissed, setOfflineBannerDismissed] = useState(false);
   const selectedChatRef = useRef<ChatView | null>(null);
   const chatsRef = useRef<ChatView[]>([]);
   chatsRef.current = chats;
@@ -179,6 +191,7 @@ export function ChatsPage() {
         });
         if (chatsRequestRef.current !== requestId) return;
         setChats(list);
+        saveChatList(accountId, list);
         setSelectedChatId((current) =>
           current !== null && list.some((chat) => chat.id === current)
             ? current
@@ -186,8 +199,15 @@ export function ChatsPage() {
         );
       } catch (error) {
         if (chatsRequestRef.current !== requestId) return;
-        setChats([]);
-        setChatsError(errorMessage(error));
+        const cached = isOffline() ? loadCachedChatList(accountId) : null;
+        if (cached && cached.length > 0) {
+          setChats(cached);
+          setChatsError(null);
+          setOffline(true);
+        } else {
+          setChats([]);
+          setChatsError(errorMessage(error));
+        }
       } finally {
         if (chatsRequestRef.current === requestId) setChatsLoading(false);
       }
@@ -228,12 +248,23 @@ export function ChatsPage() {
         );
         if (messagesRequestRef.current !== requestId) return;
         setMessages(history.messages);
+        saveMessages(accountId, chatId, history.messages);
         setNextOffsetId(history.nextOffsetId);
       } catch (error) {
         if (messagesRequestRef.current !== requestId) return;
-        setMessages([]);
-        setNextOffsetId(null);
-        setMessagesError(errorMessage(error));
+        const cached = isOffline()
+          ? loadCachedMessages(accountId, chatId)
+          : null;
+        if (cached && cached.length > 0) {
+          setMessages(cached);
+          setNextOffsetId(null);
+          setMessagesError(null);
+          setOffline(true);
+        } else {
+          setMessages([]);
+          setNextOffsetId(null);
+          setMessagesError(errorMessage(error));
+        }
       } finally {
         if (messagesRequestRef.current === requestId) setMessagesLoading(false);
       }
@@ -293,6 +324,13 @@ export function ChatsPage() {
         );
         return [...older, ...previous];
       });
+      saveMessages(accountId, chatId, [
+        ...history.messages.filter(
+          (message) =>
+            !messagesRef.current.some((item) => item.id === message.id),
+        ),
+        ...messagesRef.current,
+      ]);
       setNextOffsetId(history.nextOffsetId);
     } catch (error) {
       if (
@@ -654,6 +692,29 @@ export function ChatsPage() {
     if (next !== null) setChatLimit(next);
   }, [chatLimit]);
 
+  // Network state for the offline banner; reconnecting refetches what the
+  // cached snapshot showed.
+  useEffect(() => {
+    setOffline(isOffline());
+
+    const handleOffline = () => setOffline(true);
+    const handleOnline = () => {
+      setOffline(false);
+      setOfflineBannerDismissed(false);
+      refreshChats();
+      const accountId = selectedAccountIdRef.current;
+      const chatId = selectedChatIdRef.current;
+      if (accountId && chatId !== null) void loadMessages(accountId, chatId);
+    };
+
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+    };
+  }, [refreshChats, loadMessages]);
+
   useEffect(() => {
     if (!selectedAccountId) {
       chatsRequestRef.current += 1;
@@ -861,70 +922,96 @@ export function ChatsPage() {
   );
 
   return (
-    <div className="flex h-full min-h-0 overflow-x-auto">
-      <AccountsSidebar
-        accounts={accounts}
-        loading={accountsLoading}
-        error={accountsError}
-        selectedId={selectedAccountId}
-        onSelect={handleSelectAccount}
-        onAdd={openAddAccount}
-        onRefresh={() => void reloadAccounts()}
-      />
+    <div className="flex h-full min-h-0 flex-col">
+      {offline && (
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-900/60 bg-amber-950/40 px-4 py-1.5 text-xs text-amber-200">
+          {offlineBannerDismissed ? (
+            <span />
+          ) : (
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate">
+                Нет сети — показаны сохранённые сообщения
+              </span>
+              <button
+                type="button"
+                onClick={() => setOfflineBannerDismissed(true)}
+                className="shrink-0 rounded px-1 text-amber-300/80 hover:bg-amber-900/60 hover:text-amber-100"
+                aria-label="Скрыть сообщение об офлайне"
+              >
+                Скрыть
+              </button>
+            </span>
+          )}
+          <span className="shrink-0 rounded-full border border-amber-800/70 px-2 py-0.5 text-[11px] text-amber-200">
+            Вы офлайн
+          </span>
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1 overflow-x-auto">
+        <AccountsSidebar
+          accounts={accounts}
+          loading={accountsLoading}
+          error={accountsError}
+          selectedId={selectedAccountId}
+          onSelect={handleSelectAccount}
+          onAdd={openAddAccount}
+          onRefresh={() => void reloadAccounts()}
+        />
 
-      <ChatList
-        hasAccount={Boolean(selectedAccount)}
-        chats={chats}
-        loading={chatsLoading}
-        error={chatsError}
-        selectedId={selectedChatId}
-        onSelect={handleSelectChat}
-        accountLabel={
-          selectedAccount ? accountName(selectedAccount) : "Аккаунт не выбран"
-        }
-        accountId={selectedAccount?.id ?? null}
-        onRefresh={refreshChats}
-        folders={folders}
-        foldersLoading={foldersLoading}
-        selectedFolder={folder}
-        onSelectFolder={handleSelectFolder}
-        canLoadMore={
-          nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
-        }
-        loadingMore={chatsLoading}
-        onLoadMore={loadMoreChats}
-        onUpdateChat={applyChatPatch}
-        onMarkRead={markChatRead}
-        onClearHistory={clearChatHistory}
-        onDeleteChat={deleteChatRow}
-        onReadAll={markAllChatsRead}
-        onOpenChat={openChat}
-        onResolveUsername={resolveAndOpen}
-      />
+        <ChatList
+          hasAccount={Boolean(selectedAccount)}
+          chats={chats}
+          loading={chatsLoading}
+          error={chatsError}
+          selectedId={selectedChatId}
+          onSelect={handleSelectChat}
+          accountLabel={
+            selectedAccount ? accountName(selectedAccount) : "Аккаунт не выбран"
+          }
+          accountId={selectedAccount?.id ?? null}
+          onRefresh={refreshChats}
+          folders={folders}
+          foldersLoading={foldersLoading}
+          selectedFolder={folder}
+          onSelectFolder={handleSelectFolder}
+          canLoadMore={
+            nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
+          }
+          loadingMore={chatsLoading}
+          onLoadMore={loadMoreChats}
+          onUpdateChat={applyChatPatch}
+          onMarkRead={markChatRead}
+          onClearHistory={clearChatHistory}
+          onDeleteChat={deleteChatRow}
+          onReadAll={markAllChatsRead}
+          onOpenChat={openChat}
+          onResolveUsername={resolveAndOpen}
+        />
 
-      <ChatWindow
-        account={selectedAccount}
-        chat={selectedChat}
-        chats={chats}
-        messages={messages}
-        loading={messagesLoading}
-        error={messagesError}
-        nextOffsetId={nextOffsetId}
-        loadingMore={loadingMore}
-        typing={chatTyping}
-        onLoadMore={() => void loadMore()}
-        onSend={(text, replyToId) => sendMessage(text, replyToId)}
-        onSendMedia={(file, caption, replyToId) =>
-          sendMedia(file, caption, replyToId)
-        }
-        onEdit={(messageId, text) => void editMessage(messageId, text)}
-        onDelete={(messageId) => void deleteMessage(messageId)}
-        onDeleteMany={deleteMessages}
-        onForward={forwardMessages}
-        onTyping={() => void sendTyping()}
-        onRead={handleRead}
-        onOpenChat={handleSelectChat}
-      />
+        <ChatWindow
+          account={selectedAccount}
+          chat={selectedChat}
+          chats={chats}
+          messages={messages}
+          loading={messagesLoading}
+          error={messagesError}
+          nextOffsetId={nextOffsetId}
+          loadingMore={loadingMore}
+          typing={chatTyping}
+          onLoadMore={() => void loadMore()}
+          onSend={(text, replyToId) => sendMessage(text, replyToId)}
+          onSendMedia={(file, caption, replyToId) =>
+            sendMedia(file, caption, replyToId)
+          }
+          onEdit={(messageId, text) => void editMessage(messageId, text)}
+          onDelete={(messageId) => void deleteMessage(messageId)}
+          onDeleteMany={deleteMessages}
+          onForward={forwardMessages}
+          onTyping={() => void sendTyping()}
+          onRead={handleRead}
+          onOpenChat={handleSelectChat}
+        />
+      </div>
     </div>
   );
 }

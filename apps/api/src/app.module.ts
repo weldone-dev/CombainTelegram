@@ -11,6 +11,7 @@ import { AllExceptionsFilter } from './logs/all-exceptions.filter.js';
 import { MessagingModule } from './messaging/messaging.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { ProxiesModule } from './proxies/proxies.module.js';
+import { PushModule } from './push/push.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
 import { TelegramModule } from './telegram/telegram.module.js';
 import { DefaultUserGuard } from './user-context/default-user.guard.js';
@@ -29,6 +30,7 @@ import { UserContextModule } from './user-context/user-context.module.js';
     MessagingModule,
     AuthModule,
     ProxiesModule,
+    PushModule,
   ],
   controllers: [AppController],
   providers: [
