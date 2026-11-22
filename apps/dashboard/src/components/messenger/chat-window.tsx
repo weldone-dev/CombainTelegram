@@ -125,6 +125,7 @@ export function ChatWindow({
   onTyping,
   onRead,
   onOpenChat,
+  focusMessage,
 }: {
   account: AccountView | null;
   chat: ChatView | null;
@@ -152,6 +153,12 @@ export function ChatWindow({
   onRead: (maxId: number) => void;
   /** Opens another chat from the info panel's "Похожие" list. */
   onOpenChat?: (chatId: number) => void;
+  /** Scrolls to and highlights a message picked in the in-chat search. */
+  focusMessage?: {
+    chatId: number;
+    messageId: number;
+    nonce: number;
+  } | null;
 }) {
   const [draft, setDraft] = useState("");
   const [attachment, setAttachment] = useState<File | null>(null);
@@ -205,6 +212,7 @@ export function ChatWindow({
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transcribingRef = useRef<Set<number>>(new Set());
+  const handledFocusRef = useRef(0);
   const stickRef = useRef(true);
   const sendingRef = useRef(false);
   const messagesRef = useRef(messages);
@@ -540,7 +548,7 @@ export function ChatWindow({
     setEditDraft("");
   };
 
-  const jumpToMessage = (id: number) => {
+  const jumpToMessage = useCallback((id: number) => {
     const container = scrollRef.current;
     if (!container) return;
     const target = container.querySelector<HTMLElement>(
@@ -560,7 +568,16 @@ export function ChatWindow({
     setHighlightId(id);
     if (highlightTimer.current) clearTimeout(highlightTimer.current);
     highlightTimer.current = setTimeout(() => setHighlightId(null), 1800);
-  };
+  }, []);
+
+  // A search hit in the already open chat asks for a scroll/highlight; the
+  // nonce makes repeated clicks on the same message work again.
+  useEffect(() => {
+    if (!focusMessage || focusMessage.chatId !== chatId) return;
+    if (handledFocusRef.current === focusMessage.nonce) return;
+    handledFocusRef.current = focusMessage.nonce;
+    jumpToMessage(focusMessage.messageId);
+  }, [focusMessage, chatId, jumpToMessage]);
 
   const toggleSelection = () => {
     setSelecting((current) => {

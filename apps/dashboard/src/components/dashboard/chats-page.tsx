@@ -73,6 +73,12 @@ export function ChatsPage() {
   const [chatsLoading, setChatsLoading] = useState(false);
   const [chatsError, setChatsError] = useState<string | null>(null);
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null);
+  const [focusedMessage, setFocusedMessage] = useState<{
+    chatId: number;
+    messageId: number;
+    nonce: number;
+  } | null>(null);
+  const focusNonceRef = useRef(0);
 
   const [folders, setFolders] = useState<FolderView[]>([]);
   const [foldersLoading, setFoldersLoading] = useState(false);
@@ -564,6 +570,7 @@ export function ChatsPage() {
   const handleSelectAccount = useCallback((accountId: string) => {
     setSelectedAccountId(accountId);
     setSelectedChatId(null);
+    setFocusedMessage(null);
     messagesRequestRef.current += 1;
     setMessages([]);
     setNextOffsetId(null);
@@ -575,13 +582,34 @@ export function ChatsPage() {
   }, []);
 
   const handleSelectChat = useCallback((chatId: number) => {
+    // Re-selecting the open chat (e.g. an in-chat search hit) must not wipe a
+    // transcript that will not be requested again.
+    if (chatId === selectedChatIdRef.current) return;
     // Clear the previous transcript before the new history request starts.
     messagesRequestRef.current += 1;
     setMessages([]);
     setNextOffsetId(null);
     setMessagesError(null);
+    setFocusedMessage(null);
     setSelectedChatId(chatId);
   }, []);
+
+  /** Jumps to a search hit inside the open chat without reloading it. */
+  const openMessage = useCallback(
+    (chatId: number, messageId: number) => {
+      if (chatId !== selectedChatIdRef.current) {
+        handleSelectChat(chatId);
+        return;
+      }
+      focusNonceRef.current += 1;
+      setFocusedMessage({
+        chatId,
+        messageId,
+        nonce: focusNonceRef.current,
+      });
+    },
+    [handleSelectChat],
+  );
 
   const handleSelectFolder = useCallback((selection: ChatFolderSelection) => {
     setFolder(selection);
@@ -687,6 +715,7 @@ export function ChatsPage() {
     setMessages([]);
     setNextOffsetId(null);
     setMessagesError(null);
+    setFocusedMessage(null);
     setSelectedChatId(chat.id);
   }, []);
 
@@ -1007,6 +1036,7 @@ export function ChatsPage() {
           onDeleteChat={deleteChatRow}
           onReadAll={markAllChatsRead}
           onOpenChat={openChat}
+          onOpenMessage={openMessage}
           onResolveUsername={resolveAndOpen}
         />
 
@@ -1032,6 +1062,7 @@ export function ChatsPage() {
           onTyping={() => void sendTyping()}
           onRead={handleRead}
           onOpenChat={handleSelectChat}
+          focusMessage={focusedMessage}
         />
       </div>
     </div>
