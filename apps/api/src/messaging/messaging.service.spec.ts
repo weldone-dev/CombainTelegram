@@ -343,8 +343,7 @@ describe('uncached peer resolution', () => {
     expect(fake.downloadAsBuffer).toHaveBeenCalledWith(photo.small);
   });
 
-  it('branches deleteChat by the resolved peer type', async () => {
-    const fake = createFakeClient();
+  it('branches deleteChat by the resolved peer type', async () => {    const fake = createFakeClient();
     const service = createService(fake.client);
 
     await service.deleteChat(USER_ID, ACCOUNT_ID, String(CHAT_ID));
@@ -355,5 +354,247 @@ describe('uncached peer resolution', () => {
     });
     expect(fake.leaveChat).not.toHaveBeenCalled();
     expect(fake.getChat).not.toHaveBeenCalled();
+  });
+});
+
+describe('message-level features', () => {
+  const message = {
+    id: 77,
+    text: 'hello',
+    date: new Date('2026-11-20T12:00:00.000Z'),
+    isOutgoing: false,
+    sender: userPeer,
+    chat: userPeer,
+    replyToMessage: null,
+    media: null,
+    raw: { _: 'message' },
+  };
+
+  it('sends a reaction and returns the refreshed message', async () => {
+    const sendReaction = vi.fn(async () => message);
+    const getMessages = vi.fn(async () => [message]);
+    const service = createService({
+      sendReaction,
+      getMessages,
+    } as unknown as TelegramClient);
+
+    const view = await service.sendReaction(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      { emoji: '👍' },
+    );
+
+    expect(sendReaction).toHaveBeenCalledWith({
+      chatId: CHAT_ID,
+      message: 77,
+      emoji: '👍',
+    });
+    expect(view).toMatchObject({ id: 77, text: 'hello' });
+  });
+
+  it('removes a reaction with null and tolerates a failed re-fetch', async () => {
+    const sendReaction = vi.fn(async () => null);
+    const getMessages = vi.fn(async () => {
+      throw new Error('gone');
+    });
+    const service = createService({
+      sendReaction,
+      getMessages,
+    } as unknown as TelegramClient);
+
+    const view = await service.sendReaction(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      { emoji: null },
+    );
+
+    expect(sendReaction).toHaveBeenCalledWith({
+      chatId: CHAT_ID,
+      message: 77,
+      emoji: null,
+    });
+    expect(view).toBeNull();
+  });
+
+  it('votes in a poll and maps its new state', async () => {
+    const poll = {
+      type: 'poll',
+      id: { toString: () => '99' },
+      question: 'Pick one',
+      answers: [
+        { text: 'A', voters: 2, chosen: true, correct: true },
+        { text: 'B', voters: 0, chosen: false, correct: false },
+      ],
+      voters: 2,
+      isClosed: false,
+      isQuiz: true,
+      isMultiple: false,
+      hideResultsUntilClose: false,
+      solution: 'A is right',
+    };
+    const sendVote = vi.fn(async () => poll);
+    const service = createService({ sendVote } as unknown as TelegramClient);
+
+    const view = await service.votePoll(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      { options: [0] },
+    );
+
+    expect(sendVote).toHaveBeenCalledWith({
+      chatId: CHAT_ID,
+      message: 77,
+      options: [0],
+    });
+    expect(view).toMatchObject({
+      id: '99',
+      quiz: true,
+      answers: [{ index: 0, chosen: true }, { index: 1, chosen: false }],
+      solution: 'A is right',
+    });
+  });
+
+  it('retracts a vote with null options', async () => {
+    const sendVote = vi.fn(async () => ({
+      type: 'poll',
+      answers: [],
+      voters: 0,
+    }));
+    const service = createService({ sendVote } as unknown as TelegramClient);
+
+    await service.votePoll(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77', {});
+
+    expect(sendVote).toHaveBeenCalledWith({
+      chatId: CHAT_ID,
+      message: 77,
+      options: null,
+    });
+  });
+
+  it('translates message text with the default target', async () => {
+    const getMessages = vi.fn(async () => [message]);
+    const translateText = vi.fn(async () => ({ text: 'привет', entities: [] }));
+    const service = createService({
+      getMessages,
+      translateText,
+    } as unknown as TelegramClient);
+
+    const result = await service.translateMessage(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+    );
+
+    expect(translateText).toHaveBeenCalledWith('hello', 'ru');
+    expect(result).toEqual({ text: 'привет', to: 'ru' });
+  });
+
+  it('rejects translating a message without text', async () => {
+    const getMessages = vi.fn(async () => [{ ...message, text: '   ' }]);
+    const translateText = vi.fn();
+    const service = createService({
+      getMessages,
+      translateText,
+    } as unknown as TelegramClient);
+
+    await expect(
+      service.translateMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77'),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(translateText).not.toHaveBeenCalled();
+  });
+
+  it('transcribes a voice note through the raw TL call', async () => {    const resolvePeer = vi.fn(async () => inputPeerUser);
+    const call = vi.fn(async () => ({ text: 'привет', pending: true }));
+    const service = createService({
+      resolvePeer,
+      call,
+    } as unknown as TelegramClient);
+
+    const result = await service.transcribeVoice(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+    );
+
+    expect(call).toHaveBeenCalledWith({
+      _: 'messages.transcribeAudio',
+      peer: inputPeerUser,
+      msgId: 77,
+    });
+    expect(result).toEqual({ text: 'привет', pending: true });
+  });
+
+  it('serves and caches a thumbnail for ?thumb=1', async () => {
+    const thumb = { width: 320, isVideo: false };
+    const media = {
+      type: 'photo',
+      getThumbnail: (type: string) => (type === 'm' ? thumb : null),
+      thumbnails: [thumb],
+    };
+    const getMessages = vi.fn(async () => [{ ...message, media }]);
+    const downloadAsBuffer = vi.fn(async () => new Uint8Array([9]));
+    const service = createService({
+      getMessages,
+      downloadAsBuffer,
+    } as unknown as TelegramClient);
+
+    const first = await service.downloadMedia(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      undefined,
+      undefined,
+      '1',
+    );
+
+    expect(downloadAsBuffer).toHaveBeenCalledWith(thumb);
+    expect(first.mimeType).toBe('image/jpeg');
+    expect(first.disposition.startsWith('inline')).toBe(true);
+
+    // The preview is cached under `:thumb`, so the second request is free.
+    await service.downloadMedia(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      undefined,
+      undefined,
+      '1',
+    );
+    expect(downloadAsBuffer).toHaveBeenCalledTimes(1);
+    expect(getMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the full file when there is no thumbnail', async () => {
+    const media = { type: 'photo' };
+    const getMessages = vi.fn(async () => [{ ...message, media }]);
+    const downloadAsBuffer = vi.fn(async () => new Uint8Array([1, 2, 3]));
+    const service = createService({
+      getMessages,
+      downloadAsBuffer,
+    } as unknown as TelegramClient);
+
+    const result = await service.downloadMedia(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      undefined,
+      undefined,
+      'true',
+    );
+
+    expect(downloadAsBuffer).toHaveBeenCalledWith(media);
+    expect(result.data).toEqual(Buffer.from([1, 2, 3]));
+    expect(result.mimeType).toBe('image/jpeg');
   });
 });

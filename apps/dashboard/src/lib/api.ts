@@ -29,9 +29,11 @@ export function mediaUrl(
   chatId: number,
   messageId: number,
   fileName?: string | null,
+  options: { thumb?: boolean } = {},
 ): string {
   const params = new URLSearchParams();
   if (fileName) params.set("filename", fileName);
+  if (options.thumb) params.set("thumb", "1");
   const query = params.toString();
   return `${API_URL}/accounts/${encodeURIComponent(accountId)}/chats/${chatId}/messages/${messageId}/media${query ? `?${query}` : ""}`;
 }
@@ -145,6 +147,10 @@ const RU_ERRORS: Record<string, string> = {
   CHAT_RESTRICTED: "Отправка сообщений ограничена в этом чате",
   CHAT_SEND_MEDIA_FORBIDDEN: "В этот чат нельзя отправлять фото и файлы",
   MEDIA_TOO_LARGE: "Файл слишком большой",
+  MESSAGE_NOT_FOUND: "Сообщение не найдено",
+  TRANSCRIPTION_UNAVAILABLE: "Это сообщение нельзя расшифровать",
+  TRANSCRIPTION_FAILED: "Telegram не смог расшифровать сообщение",
+  PREMIUM_REQUIRED: "Для расшифровки голосовых нужен Telegram Premium",
 };
 
 /** Human-readable Russian message for any thrown value. */

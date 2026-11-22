@@ -44,13 +44,35 @@ export interface MessageLike {
   /**
    * Only the fields we read are structural. `fileName` / `mimeType` are
    * getters on mtcute's document classes and `fileSize` lives on
-   * `FileLocation`, so they stay optional for plain test fixtures.
+   * `FileLocation`, so they stay optional for plain test fixtures. Poll
+   * getters (`isClosed`, `isQuiz`, ...) are optional for the same reason.
    */
   media: {
     type: string;
     fileName?: string | null;
     mimeType?: string | null;
     fileSize?: number;
+    id?: unknown;
+    question?: unknown;
+    answers?: unknown;
+    voters?: unknown;
+    isClosed?: unknown;
+    isQuiz?: unknown;
+    isMultiple?: unknown;
+    hideResultsUntilClose?: unknown;
+    solution?: unknown;
+  } | null;
+  /**
+   * Reactions on the message (mtcute's `MessageReactions`). Structural so
+   * plain fixtures can pass `{ reactions: [...] }`; `emoji` can be a plain
+   * string or a `tl.Long` for custom emoji.
+   */
+  reactions?: {
+    reactions?: ReadonlyArray<{
+      emoji?: unknown;
+      count?: unknown;
+      order?: unknown;
+    }>;
   } | null;
   /**
    * Raw TL message. `_` (the TL constructor) is required so both
@@ -61,11 +83,40 @@ export interface MessageLike {
 }
 
 export interface MessageMediaView {
-  kind: 'photo' | 'document' | 'other';
+  kind: 'photo' | 'document' | 'voice' | 'other';
   mimeType: string | null;
   fileName: string | null;
   size: number | null;
   downloadable: boolean;
+}
+
+export interface MessageReactionView {
+  /** Unicode emoji, or `custom:<id>` for Telegram custom emoji. */
+  emoji: string;
+  count: number;
+  /** Whether the current account reacted with this emoji. */
+  chosen: boolean;
+}
+
+export interface MessagePollAnswerView {
+  /** Position in `poll.answers`, i.e. the value sent back when voting. */
+  index: number;
+  text: string;
+  voters: number;
+  chosen: boolean;
+  correct: boolean;
+}
+
+export interface MessagePollView {
+  id: string;
+  question: string;
+  closed: boolean;
+  quiz: boolean;
+  multiple: boolean;
+  voters: number;
+  hideResultsUntilClose: boolean;
+  answers: MessagePollAnswerView[];
+  solution: string | null;
 }
 
 export interface MessageView {
@@ -81,6 +132,12 @@ export interface MessageView {
   /** Kept for older clients; `media` is the structured descriptor. */
   mediaType: string | null;
   media: MessageMediaView | null;
+  /** Reaction counts, only non-zero entries, in Telegram's order. */
+  reactions: MessageReactionView[];
+  /** Poll descriptor when the message carries a poll; otherwise `null`. */
+  poll: MessagePollView | null;
+  /** Convenience flag for the voice-note UI (`media.kind === 'voice'`). */
+  isVoice: boolean;
 }
 
 export interface ChatView {
@@ -136,7 +193,7 @@ function readMediaField<T>(
 }
 
 /**
- * Structured media descriptor. Only photos and generic documents are
+ * Structured media descriptor. Photos, generic documents and voice notes are
  * downloadable; everything else keeps a kind of `other` so the client can
  * still show `mediaType` without pretending to support it.
  */
@@ -146,14 +203,135 @@ export function toMessageMediaView(
   if (!media) return null;
   const type = typeof media.type === 'string' ? media.type : null;
   const kind: MessageMediaView['kind'] =
-    type === 'photo' ? 'photo' : type === 'document' ? 'document' : 'other';
+    type === 'photo'
+      ? 'photo'
+      : type === 'document'
+        ? 'document'
+        : type === 'voice'
+          ? 'voice'
+          : 'other';
+  const mimeType = readMediaField<string>(media, 'mimeType');
   return {
     kind,
-    mimeType: readMediaField<string>(media, 'mimeType'),
+    // Voice notes are always OGG/Opus; the getter is optional structurally.
+    mimeType: mimeType ?? (kind === 'voice' ? 'audio/ogg' : null),
     fileName: readMediaField<string>(media, 'fileName'),
     size: readMediaField<number>(media, 'fileSize'),
-    downloadable: kind === 'photo' || kind === 'document',
+    downloadable: kind === 'photo' || kind === 'document' || kind === 'voice',
   };
+}
+
+/** Decimal string for a `tl.Long`, or `null` when the value is unusable. */
+function stringifyId(value: unknown): string | null {
+  if (typeof value === 'string') return value || null;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (value && typeof value === 'object') {
+    try {
+      const text = String(value);
+      return text && text !== '[object Object]' ? text : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Reaction emoji: a plain unicode string, or `custom:<id>` for a `tl.Long`. */
+function reactionEmoji(value: unknown): string | null {
+  if (typeof value === 'string') return value || null;
+  if (value && typeof value === 'object') {
+    const id = stringifyId(value);
+    return id ? `custom:${id}` : null;
+  }
+  return null;
+}
+
+/**
+ * Reaction chips of a message, in Telegram's order. Getters are read inside
+ * `try` because plain fixtures and partial raw objects may throw.
+ */
+export function toMessageReactions(
+  message: MessageLike,
+): MessageReactionView[] {
+  const raw = message.reactions?.reactions;
+  if (!Array.isArray(raw)) return [];
+  const views: MessageReactionView[] = [];
+  for (const reaction of raw) {
+    try {
+      const count =
+        typeof reaction?.count === 'number' && Number.isFinite(reaction.count)
+          ? reaction.count
+          : 0;
+      if (count <= 0) continue;
+      const emoji = reactionEmoji(reaction?.emoji);
+      if (!emoji) continue;
+      views.push({
+        emoji,
+        count,
+        chosen: reaction?.order !== null && reaction?.order !== undefined,
+      });
+    } catch {
+      // A single broken reaction must not drop the whole message.
+    }
+  }
+  return views;
+}
+
+/**
+ * Poll descriptor for a message whose media is a poll. Malformed or partial
+ * polls become `null` instead of throwing.
+ */
+export function toMessagePollView(media: unknown): MessagePollView | null {
+  if (!media || typeof media !== 'object') return null;
+  try {
+    const candidate = media as NonNullable<MessageLike['media']>;
+    if (candidate.type !== 'poll') return null;
+    const rawAnswers = candidate.answers;
+    if (!Array.isArray(rawAnswers)) return null;
+
+    const answers: MessagePollAnswerView[] = rawAnswers.map(
+      (answer, index) => {
+        const entry =
+          answer && typeof answer === 'object'
+            ? (answer as {
+                text?: unknown;
+                voters?: unknown;
+                chosen?: unknown;
+                correct?: unknown;
+              })
+            : {};
+        return {
+          index,
+          text: typeof entry.text === 'string' ? entry.text : '',
+          voters:
+            typeof entry.voters === 'number' && Number.isFinite(entry.voters)
+              ? entry.voters
+              : 0,
+          chosen: entry.chosen === true,
+          correct: entry.correct === true,
+        };
+      },
+    );
+
+    return {
+      id: stringifyId(candidate.id) ?? '',
+      question: typeof candidate.question === 'string' ? candidate.question : '',
+      closed: candidate.isClosed === true,
+      quiz: candidate.isQuiz === true,
+      multiple: candidate.isMultiple === true,
+      voters:
+        typeof candidate.voters === 'number' &&
+        Number.isFinite(candidate.voters)
+          ? candidate.voters
+          : 0,
+      hideResultsUntilClose: candidate.hideResultsUntilClose === true,
+      answers,
+      solution:
+        typeof candidate.solution === 'string' ? candidate.solution : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Message DTO shared by REST responses and WS events. */
@@ -170,6 +348,12 @@ export function toMessageView(message: MessageLike): MessageView {
     replyToId: message.replyToMessage?.id ?? null,
     mediaType: message.media?.type ?? null,
     media: toMessageMediaView(message.media),
+    reactions: toMessageReactions(message),
+    poll:
+      message.media?.type === 'poll'
+        ? toMessagePollView(message.media)
+        : null,
+    isVoice: message.media?.type === 'voice',
   };
 }
 

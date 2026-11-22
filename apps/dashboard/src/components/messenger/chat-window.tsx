@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { mediaUrl } from "../../lib/api";
+import { errorMessage, mediaUrl } from "../../lib/api";
 import { chatAvatarUrl } from "../../lib/avatar";
 import { copyToClipboard } from "../../lib/clipboard";
 import {
@@ -18,10 +18,18 @@ import {
   writeDraft,
 } from "../../lib/drafts";
 import { formatFileSize, formatTime } from "../../lib/format";
-import { MAX_MEDIA_UPLOAD_BYTES } from "../../lib/messaging-api";
+import {
+  MAX_MEDIA_UPLOAD_BYTES,
+  sendMessageReaction,
+  sendPollVote,
+  transcribeMessage,
+  translateMessage,
+} from "../../lib/messaging-api";
 import type {
   AccountView,
   ChatView,
+  MessagePollView,
+  MessageReactionView,
   MessageView,
   TypingEntry,
 } from "../../lib/types";
@@ -30,11 +38,68 @@ import { ChatInfoPanel } from "./chat-info-panel";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
 
+/** Emoji offered by the inline reaction picker. */
+const REACTION_EMOJI = [
+  "👍",
+  "❤️",
+  "🔥",
+  "😂",
+  "😮",
+  "😢",
+  "🙏",
+  "👏",
+  "🎉",
+  "💯",
+];
+
+/** Target languages of the per-message translation action. */
+const TRANSLATE_LANGS: ReadonlyArray<readonly [string, string]> = [
+  ["ru", "RU"],
+  ["en", "EN"],
+  ["uk", "UK"],
+  ["de", "DE"],
+  ["es", "ES"],
+  ["fr", "FR"],
+];
+
+const TRANSLATE_LANG_KEY = "tg-translate-lang";
+
 function messagePreview(message: MessageView | undefined): string {
   if (!message) return "";
   const text = message.text.trim();
   if (text) return text;
   return message.mediaType ? `[${message.mediaType}]` : "(без текста)";
+}
+
+/**
+ * Local copy of one reaction change, used for the optimistic update until the
+ * API/realtime refresh arrives. Telegram chats keep a single chosen reaction,
+ * so adding one clears the previous choice.
+ */
+function applyReactionChange(
+  current: MessageReactionView[],
+  emoji: string,
+  add: boolean,
+): MessageReactionView[] {
+  if (!add) {
+    return current
+      .map((reaction) =>
+        reaction.emoji === emoji
+          ? { ...reaction, count: reaction.count - 1, chosen: false }
+          : reaction,
+      )
+      .filter((reaction) => reaction.count > 0);
+  }
+  const exists = current.some((reaction) => reaction.emoji === emoji);
+  const cleared = current.map((reaction) => ({ ...reaction, chosen: false }));
+  if (exists) {
+    return cleared.map((reaction) =>
+      reaction.emoji === emoji
+        ? { ...reaction, count: reaction.count + 1, chosen: true }
+        : reaction,
+    );
+  }
+  return [...cleared, { emoji, count: 1, chosen: true }];
 }
 
 export function ChatWindow({
@@ -101,12 +166,38 @@ export function ChatWindow({
   const [status, setStatus] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [translateLang, setTranslateLang] = useState("ru");
+  const [reactionPending, setReactionPending] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [reactionOverrides, setReactionOverrides] = useState<
+    Map<
+      number,
+      { base: MessageView["reactions"]; value: MessageReactionView[] }
+    >
+  >(() => new Map());
+  const [emojiPickerFor, setEmojiPickerFor] = useState<number | null>(null);
+  const [pollOverrides, setPollOverrides] = useState<
+    Map<number, { base: MessageView["poll"]; value: MessagePollView }>
+  >(() => new Map());
+  const [votingId, setVotingId] = useState<number | null>(null);
+  const [translations, setTranslations] = useState<
+    Map<number, { text: string; to: string }>
+  >(() => new Map());
+  const [translating, setTranslating] = useState<Set<number>>(() => new Set());
+  const [transcripts, setTranscripts] = useState<
+    Map<number, { text: string; pending: boolean }>
+  >(() => new Map());
+  const [transcribing, setTranscribing] = useState<Set<number>>(
+    () => new Set(),
+  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const transcribingRef = useRef<Set<number>>(new Set());
   const stickRef = useRef(true);
   const sendingRef = useRef(false);
   const messagesRef = useRef(messages);
@@ -157,7 +248,36 @@ export function ChatWindow({
     setSelected(new Set());
     setForwardIds(null);
     setStatus(null);
+    setEmojiPickerFor(null);
+    setReactionOverrides(new Map());
+    setReactionPending(new Set());
+    setPollOverrides(new Map());
+    setVotingId(null);
+    setTranslations(new Map());
+    setTranslating(new Set());
+    setTranscripts(new Map());
+    setTranscribing(new Set());
   }, [draftKey]);
+
+  // The translate target is a user preference, restored after mount so the
+  // server-rendered default (`ru`) and the client markup stay identical.
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(TRANSLATE_LANG_KEY);
+      if (saved && /^[a-z]{2}$/.test(saved)) setTranslateLang(saved);
+    } catch {
+      // Private mode / disabled storage: keep the default.
+    }
+  }, []);
+
+  const changeTranslateLang = (value: string) => {
+    setTranslateLang(value);
+    try {
+      window.localStorage.setItem(TRANSLATE_LANG_KEY, value);
+    } catch {
+      // Ignore storage failures; the in-memory choice still applies.
+    }
+  };
 
   // Revoke the previous object URL whenever the preview changes or the
   // composer unmounts; the browser keeps blobs alive until then.
@@ -461,6 +581,177 @@ export function ChatWindow({
     }
   };
 
+  const reactionsFor = (message: MessageView): MessageReactionView[] => {
+    const override = reactionOverrides.get(message.id);
+    // A refreshed message (realtime edit) wins over the local optimistic copy.
+    if (override && override.base === message.reactions) return override.value;
+    return message.reactions ?? [];
+  };
+
+  const react = async (message: MessageView, emoji: string) => {
+    if (!account || chatId === null) return;
+    if (reactionPending.has(message.id)) return;
+    const current = reactionsFor(message);
+    const chosen = current.some(
+      (reaction) => reaction.emoji === emoji && reaction.chosen,
+    );
+    const target = chosen ? null : emoji;
+    setEmojiPickerFor(null);
+    setReactionOverrides((previous) =>
+      new Map(previous).set(message.id, {
+        base: message.reactions,
+        value: applyReactionChange(current, emoji, target !== null),
+      }),
+    );
+    setReactionPending((previous) => new Set(previous).add(message.id));
+    try {
+      const updated = await sendMessageReaction(
+        account.id,
+        message.chatId,
+        message.id,
+        target,
+      );
+      if (updated) {
+        setReactionOverrides((previous) =>
+          new Map(previous).set(message.id, {
+            base: message.reactions,
+            value: updated.reactions ?? [],
+          }),
+        );
+      }
+    } catch (caught) {
+      // Revert the optimistic chip and explain the failure.
+      setReactionOverrides((previous) =>
+        new Map(previous).set(message.id, {
+          base: message.reactions,
+          value: current,
+        }),
+      );
+      setStatus(errorMessage(caught));
+    } finally {
+      setReactionPending((previous) => {
+        const next = new Set(previous);
+        next.delete(message.id);
+        return next;
+      });
+    }
+  };
+
+  const pollFor = (message: MessageView): MessagePollView | null => {
+    const override = pollOverrides.get(message.id);
+    if (override && override.base === message.poll) return override.value;
+    return message.poll ?? null;
+  };
+
+  const vote = async (message: MessageView, answer: number) => {
+    if (!account) return;
+    const poll = pollFor(message);
+    if (!poll || poll.closed || votingId === message.id) return;
+    const chosen = poll.answers
+      .filter((option) => option.chosen)
+      .map((option) => option.index);
+    let options: number[] | null;
+    if (poll.multiple) {
+      const next = chosen.includes(answer)
+        ? chosen.filter((index) => index !== answer)
+        : [...chosen, answer];
+      options = next.length > 0 ? next : null;
+    } else {
+      // Clicking the chosen answer of a single-choice poll retracts it.
+      options = chosen.includes(answer) ? null : [answer];
+    }
+    setVotingId(message.id);
+    try {
+      const updated = await sendPollVote(
+        account.id,
+        message.chatId,
+        message.id,
+        options,
+      );
+      setPollOverrides((previous) =>
+        new Map(previous).set(message.id, {
+          base: message.poll,
+          value: updated,
+        }),
+      );
+      setStatus(null);
+    } catch (caught) {
+      setStatus(errorMessage(caught));
+    } finally {
+      setVotingId(null);
+    }
+  };
+
+  const toggleTranslation = async (message: MessageView) => {
+    if (!account) return;
+    if (translations.has(message.id)) {
+      setTranslations((previous) => {
+        const next = new Map(previous);
+        next.delete(message.id);
+        return next;
+      });
+      return;
+    }
+    if (translating.has(message.id)) return;
+    setTranslating((previous) => new Set(previous).add(message.id));
+    try {
+      const result = await translateMessage(
+        account.id,
+        message.chatId,
+        message.id,
+        translateLang,
+      );
+      setTranslations((previous) => new Map(previous).set(message.id, result));
+      setStatus(null);
+    } catch (caught) {
+      setStatus(errorMessage(caught));
+    } finally {
+      setTranslating((previous) => {
+        const next = new Set(previous);
+        next.delete(message.id);
+        return next;
+      });
+    }
+  };
+
+  const transcribe = useCallback(
+    async (messageId: number) => {
+      if (!accountId || chatId === null) return;
+      if (transcribingRef.current.has(messageId)) return;
+      transcribingRef.current.add(messageId);
+      setTranscribing((previous) => new Set(previous).add(messageId));
+      try {
+        const result = await transcribeMessage(accountId, chatId, messageId);
+        setTranscripts((previous) => new Map(previous).set(messageId, result));
+        setStatus(null);
+      } catch (caught) {
+        setStatus(errorMessage(caught));
+      } finally {
+        transcribingRef.current.delete(messageId);
+        setTranscribing((previous) => {
+          const next = new Set(previous);
+          next.delete(messageId);
+          return next;
+        });
+      }
+    },
+    [accountId, chatId],
+  );
+
+  // Telegram may still be transcribing (`pending`): poll again in a moment.
+  useEffect(() => {
+    if (chatId === null) return;
+    const waiting = [...transcripts].filter(
+      ([messageId, transcript]) =>
+        transcript.pending && !transcribingRef.current.has(messageId),
+    );
+    if (waiting.length === 0) return;
+    const timer = setTimeout(() => {
+      for (const [messageId] of waiting) void transcribe(messageId);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [transcripts, transcribe, chatId]);
+
   if (!account || !chat) {
     return (
       <section className="flex min-w-[420px] flex-1 items-center justify-center bg-zinc-950 text-sm text-zinc-500">
@@ -512,6 +803,22 @@ export function ChatWindow({
                 : ` (${activeTyping[0]?.status})`}
             </span>
           )}
+          <label className="flex items-center gap-1 text-[11px] text-zinc-500">
+            <span>Перевод</span>
+            <select
+              value={translateLang}
+              onChange={(event) => changeTranslateLang(event.target.value)}
+              title="Язык перевода сообщений"
+              aria-label="Язык перевода сообщений"
+              className="rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-sky-500"
+            >
+              {TRANSLATE_LANGS.map(([code, label]) => (
+                <option key={code} value={code}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             onClick={toggleSelection}
@@ -564,6 +871,12 @@ export function ChatWindow({
             ? byId.get(message.replyToId)
             : undefined;
           const isSelected = selected.has(message.id);
+          const reactions = reactionsFor(message);
+          const poll = pollFor(message);
+          const translation = translations.get(message.id);
+          const transcript = transcripts.get(message.id);
+          const reactionBusy = reactionPending.has(message.id);
+          const voteBusy = votingId === message.id;
           return (
             <Fragment key={message.id}>
               {index === unreadDividerIndex && (
@@ -673,23 +986,130 @@ export function ChatWindow({
                       </div>
                     ) : (
                       <>
-                        <MessageMedia
-                          message={message}
-                          accountId={account.id}
-                          selecting={selecting}
-                        />
-                        {(message.text || !message.mediaType) && (
-                          <MessageText text={message.text} links={!selecting} />
+                        {poll ? (
+                          <PollBlock
+                            poll={poll}
+                            canVote={canWrite && !selecting}
+                            busy={voteBusy}
+                            onVote={(index) => void vote(message, index)}
+                          />
+                        ) : (
+                          <MessageMedia
+                            message={message}
+                            accountId={account.id}
+                            selecting={selecting}
+                          />
                         )}
-                        {!message.text &&
+                        {message.text.trim() &&
+                          (!poll ||
+                            message.text.trim() !== poll.question.trim()) && (
+                            <MessageText
+                              text={message.text}
+                              links={!selecting}
+                            />
+                          )}
+                        {!poll &&
+                          !message.text &&
                           message.mediaType &&
                           message.media?.kind !== "photo" &&
-                          message.media?.kind !== "document" && (
+                          message.media?.kind !== "document" &&
+                          message.media?.kind !== "voice" && (
                             <p className="text-sm opacity-80">
                               [{message.mediaType}]
                             </p>
                           )}
+                        {message.isVoice && transcript && (
+                          <p className="mt-1 rounded bg-black/20 px-2 py-1 text-xs">
+                            {transcript.pending
+                              ? "Расшифровка…"
+                              : transcript.text || "Пустая расшифровка"}
+                          </p>
+                        )}
+                        {translation && (
+                          <p className="mt-1 rounded border-l-2 border-sky-300/60 bg-black/20 px-2 py-1 text-xs">
+                            <span className="mr-1 uppercase opacity-60">
+                              {translation.to}
+                            </span>
+                            {translation.text}
+                          </p>
+                        )}
                       </>
+                    )}
+
+                    {!selecting && editingId !== message.id && (
+                      <div className="mt-1 space-y-1">
+                        {(reactions.length > 0 || canWrite) && (
+                          <div className="flex flex-wrap items-center gap-1">
+                            {reactions.map((reaction) => (
+                              <button
+                                key={reaction.emoji}
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void react(message, reaction.emoji);
+                                }}
+                                disabled={reactionBusy}
+                                aria-pressed={reaction.chosen}
+                                title={
+                                  reaction.chosen
+                                    ? "Убрать реакцию"
+                                    : "Поставить реакцию"
+                                }
+                                className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors disabled:opacity-50 ${
+                                  reaction.chosen
+                                    ? "border-sky-300 bg-sky-500/30 text-white"
+                                    : "border-white/20 bg-black/20 hover:bg-black/30"
+                                }`}
+                              >
+                                <span aria-hidden="true">
+                                  {reaction.emoji.startsWith("custom:")
+                                    ? "✦"
+                                    : reaction.emoji}
+                                </span>
+                                <span>{reaction.count}</span>
+                              </button>
+                            ))}
+                            {canWrite && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEmojiPickerFor(
+                                    emojiPickerFor === message.id
+                                      ? null
+                                      : message.id,
+                                  )
+                                }
+                                title="Добавить реакцию"
+                                aria-label="Добавить реакцию"
+                                aria-expanded={emojiPickerFor === message.id}
+                                className="rounded-full border border-white/20 bg-black/20 px-2 py-0.5 text-[11px] transition-colors hover:bg-black/30"
+                              >
+                                +
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        {emojiPickerFor === message.id && canWrite && (
+                          <div className="flex flex-wrap gap-1 rounded-lg bg-black/30 p-1">
+                            {REACTION_EMOJI.map((emoji) => (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void react(message, emoji);
+                                }}
+                                disabled={reactionBusy}
+                                title={`Реакция ${emoji}`}
+                                aria-label={`Реакция ${emoji}`}
+                                className="rounded px-1 text-base transition-colors hover:bg-white/10 disabled:opacity-50"
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     <div className="mt-1 flex items-center justify-end gap-2 text-[11px] opacity-80">
@@ -720,6 +1140,36 @@ export function ChatWindow({
                             className="underline underline-offset-2 hover:text-white"
                           >
                             Ответить
+                          </button>
+                        )}
+                        {message.text.trim() && (
+                          <button
+                            type="button"
+                            onClick={() => void toggleTranslation(message)}
+                            disabled={translating.has(message.id)}
+                            title="Перевести сообщение"
+                            aria-label="Перевести сообщение"
+                            className="underline underline-offset-2 hover:text-white disabled:opacity-50"
+                          >
+                            {translating.has(message.id)
+                              ? "Перевод…"
+                              : translation
+                                ? "Скрыть перевод"
+                                : "Перевести"}
+                          </button>
+                        )}
+                        {message.isVoice && (
+                          <button
+                            type="button"
+                            onClick={() => void transcribe(message.id)}
+                            disabled={transcribing.has(message.id)}
+                            title="Расшифровать голосовое"
+                            aria-label="Расшифровать голосовое"
+                            className="underline underline-offset-2 hover:text-white disabled:opacity-50"
+                          >
+                            {transcript?.pending || transcribing.has(message.id)
+                              ? "Расшифровка…"
+                              : "Расшифровать"}
                           </button>
                         )}
                         <button
@@ -995,6 +1445,15 @@ function MessageMedia({
   const url = mediaUrl(accountId, message.chatId, message.id, media.fileName);
 
   if (media.kind === "photo") {
+    // The thumbnail endpoint falls back to the full image server-side, so a
+    // chat list stays cheap without ever showing a broken preview.
+    const previewUrl = mediaUrl(
+      accountId,
+      message.chatId,
+      message.id,
+      undefined,
+      { thumb: true },
+    );
     return (
       <a
         href={url}
@@ -1008,7 +1467,7 @@ function MessageMedia({
       >
         {/* biome-ignore lint/performance/noImgElement: media is streamed by our API with a dynamic URL; next/image needs a fixed remote host. */}
         <img
-          src={url}
+          src={previewUrl}
           alt={media.fileName ?? "Фото"}
           loading="lazy"
           className="max-h-72 max-w-full rounded-lg object-contain"
@@ -1017,8 +1476,33 @@ function MessageMedia({
     );
   }
 
+  if (media.kind === "voice") {
+    return (
+      <audio
+        controls
+        preload="metadata"
+        src={url}
+        onClick={(event) => {
+          if (selecting) event.preventDefault();
+        }}
+        className="my-1 w-full max-w-xs"
+      >
+        <track kind="captions" />
+      </audio>
+    );
+  }
+
   if (media.kind === "document") {
     const fileName = media.fileName ?? "Документ";
+    const mime = media.mimeType ?? "";
+    const previewable = mime.startsWith("image/") || mime.startsWith("video/");
+    const thumbUrl = mediaUrl(
+      accountId,
+      message.chatId,
+      message.id,
+      undefined,
+      { thumb: true },
+    );
     return (
       <a
         href={url}
@@ -1029,9 +1513,13 @@ function MessageMedia({
         className="my-1 flex max-w-xs items-center gap-3 rounded-lg bg-black/20 px-3 py-2 transition-colors hover:bg-black/30"
         title="Скачать файл"
       >
-        <span aria-hidden="true" className="text-xl">
-          📄
-        </span>
+        {previewable ? (
+          <DocumentThumb src={thumbUrl} alt={fileName} />
+        ) : (
+          <span aria-hidden="true" className="text-xl">
+            📄
+          </span>
+        )}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{fileName}</span>
           <span className="block text-[11px] opacity-75">
@@ -1046,6 +1534,129 @@ function MessageMedia({
   }
 
   return null;
+}
+
+/** Image/video document preview with a plain-file fallback on error. */
+function DocumentThumb({ src, alt }: { src: string; alt: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <span aria-hidden="true" className="text-xl">
+        📄
+      </span>
+    );
+  }
+  return (
+    // biome-ignore lint/performance/noImgElement: thumbnail is streamed by our API with a dynamic URL; next/image needs a fixed remote host.
+    <img
+      src={src}
+      alt={alt}
+      loading="lazy"
+      onError={() => setFailed(true)}
+      className="h-12 w-12 shrink-0 rounded object-cover"
+    />
+  );
+}
+
+/** Poll body: question, answer buttons with percent bars, quiz solution. */
+function PollBlock({
+  poll,
+  canVote,
+  busy,
+  onVote,
+}: {
+  poll: MessagePollView;
+  canVote: boolean;
+  busy: boolean;
+  onVote: (index: number) => void;
+}) {
+  const total = Math.max(
+    poll.voters,
+    poll.answers.reduce((sum, answer) => sum + answer.voters, 0),
+  );
+  const showResults = !poll.hideResultsUntilClose || poll.closed;
+
+  return (
+    <div className="my-1 min-w-0 space-y-1.5">
+      <p className="text-sm font-medium">{poll.question || "Опрос"}</p>
+      <div className="space-y-1">
+        {poll.answers.map((answer) => {
+          const percent =
+            total > 0 ? Math.round((answer.voters / total) * 100) : 0;
+          const interactive = canVote && !poll.closed && !busy;
+          const correctAnswer = poll.quiz && answer.correct && showResults;
+          return (
+            <button
+              key={answer.index}
+              type="button"
+              onClick={() => {
+                if (interactive) onVote(answer.index);
+              }}
+              disabled={!interactive}
+              aria-pressed={answer.chosen}
+              title={
+                poll.closed
+                  ? "Опрос закрыт"
+                  : answer.chosen
+                    ? "Отменить голос"
+                    : "Голосовать"
+              }
+              className={`relative block w-full overflow-hidden rounded-lg border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                answer.chosen
+                  ? "border-sky-300 bg-sky-500/20"
+                  : "border-white/15 bg-black/20 hover:bg-black/30"
+              } ${interactive ? "" : "cursor-default"} disabled:opacity-100`}
+            >
+              {showResults && (
+                <span
+                  aria-hidden="true"
+                  className={`absolute inset-y-0 left-0 ${
+                    correctAnswer
+                      ? "bg-emerald-400/20"
+                      : answer.chosen
+                        ? "bg-sky-400/25"
+                        : "bg-white/10"
+                  }`}
+                  style={{ width: `${percent}%` }}
+                />
+              )}
+              <span className="relative flex items-center gap-2">
+                {correctAnswer && <span className="text-emerald-300">✓</span>}
+                {poll.quiz &&
+                  answer.chosen &&
+                  !answer.correct &&
+                  showResults && <span className="text-red-300">✕</span>}
+                <span className="min-w-0 flex-1 break-words">
+                  {answer.text}
+                </span>
+                {showResults && (
+                  <span className="shrink-0 text-[11px] opacity-75">
+                    {percent}% · {answer.voters}
+                  </span>
+                )}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center justify-between text-[11px] opacity-70">
+        <span>
+          {poll.quiz
+            ? "Викторина"
+            : poll.multiple
+              ? "Несколько ответов"
+              : "Опрос"}
+          {poll.closed ? " · закрыт" : ""}
+        </span>
+        <span>{poll.voters} голосов</span>
+      </div>
+      {poll.solution && (
+        <p className="rounded border-l-2 border-emerald-300/60 bg-black/20 px-2 py-1 text-xs">
+          {poll.solution}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function SelectionMark({ checked }: { checked: boolean }) {

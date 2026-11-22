@@ -38,6 +38,10 @@ describe('Telegram error mapping', () => {
     ['MESSAGE_ID_INVALID', 'MESSAGE_ID_INVALID', 400],
     ['MESSAGE_EDIT_TIME_EXPIRED', 'MESSAGE_EDIT_TIME_EXPIRED', 400],
     ['PEER_ID_INVALID', 'PEER_ID_INVALID', 400],
+    ['MSG_VOICE_MISSING', 'TRANSCRIPTION_UNAVAILABLE', 400],
+    ['MSG_VOICE_TOO_LONG', 'TRANSCRIPTION_UNAVAILABLE', 400],
+    ['TRANSCRIPTION_FAILED', 'TRANSCRIPTION_FAILED', 502],
+    ['PREMIUM_ACCOUNT_REQUIRED', 'PREMIUM_REQUIRED', 403],
   ])('maps %s to %s', (telegramText, expectedCode, expectedStatus) => {
     const mapped = mapTelegramError(rpc(400, telegramText));
     expect(mapped.code).toBe(expectedCode);

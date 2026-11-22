@@ -43,11 +43,47 @@ export interface AccountView {
 }
 
 export interface MessageMediaView {
-  kind: "photo" | "document" | "other";
+  kind: "photo" | "document" | "voice" | "other";
   mimeType: string | null;
   fileName: string | null;
   size: number | null;
   downloadable: boolean;
+}
+
+export interface MessageReactionView {
+  emoji: string;
+  count: number;
+  chosen: boolean;
+}
+
+export interface MessagePollAnswerView {
+  index: number;
+  text: string;
+  voters: number;
+  chosen: boolean;
+  correct: boolean;
+}
+
+export interface MessagePollView {
+  id: string;
+  question: string;
+  closed: boolean;
+  quiz: boolean;
+  multiple: boolean;
+  voters: number;
+  hideResultsUntilClose: boolean;
+  answers: MessagePollAnswerView[];
+  solution: string | null;
+}
+
+export interface MessageTranslationView {
+  text: string;
+  to: string;
+}
+
+export interface MessageTranscriptionView {
+  text: string;
+  pending: boolean;
 }
 
 export interface MessageView {
@@ -62,6 +98,9 @@ export interface MessageView {
   replyToId: number | null;
   mediaType: string | null;
   media?: MessageMediaView | null;
+  reactions?: MessageReactionView[] | null;
+  poll?: MessagePollView | null;
+  isVoice?: boolean;
 }
 
 export interface ChatView {

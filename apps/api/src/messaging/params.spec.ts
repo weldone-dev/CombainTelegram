@@ -8,7 +8,11 @@ import {
   parseMessageIds,
   parseOptionalBoolean,
   parseOptionalMessageId,
+  parsePollOptions,
+  parseReactionEmoji,
   parseSearchQuery,
+  parseThumbFlag,
+  parseTranslateLanguage,
 } from './params.js';
 
 describe('username normalisation', () => {
@@ -148,5 +152,49 @@ describe('chat info params', () => {
     );
     expect(extractFirstUrl('no links here')).toBeNull();
     expect(extractFirstUrl('')).toBeNull();
+  });
+});
+
+describe('message feature params', () => {
+  it('parses the thumb flag', () => {
+    expect(parseThumbFlag('1')).toBe(true);
+    expect(parseThumbFlag('true')).toBe(true);
+    expect(parseThumbFlag(undefined)).toBe(false);
+    expect(parseThumbFlag('')).toBe(false);
+    expect(parseThumbFlag('false')).toBe(false);
+    expect(() => parseThumbFlag('yes')).toThrow(/thumb must be a boolean/);
+  });
+
+  it('parses reaction emoji, treating empty as a removal', () => {
+    expect(parseReactionEmoji('👍')).toBe('👍');
+    expect(parseReactionEmoji(' ❤️ ')).toBe('❤️');
+    expect(parseReactionEmoji(undefined)).toBeNull();
+    expect(parseReactionEmoji(null)).toBeNull();
+    expect(parseReactionEmoji('')).toBeNull();
+    expect(() => parseReactionEmoji(42)).toThrow(/emoji must be a string/);
+    expect(() => parseReactionEmoji('x'.repeat(65))).toThrow(/at most 64/);
+  });
+
+  it('parses poll options and the retract form', () => {
+    expect(parsePollOptions([0, '2'])).toEqual([0, 2]);
+    expect(parsePollOptions([])).toEqual([]);
+    expect(parsePollOptions(null)).toBeNull();
+    expect(parsePollOptions(undefined)).toBeNull();
+    expect(() => parsePollOptions(1)).toThrow(/must be an array/);
+    expect(() => parsePollOptions([-1])).toThrow(/non-negative/);
+    expect(() => parsePollOptions(['a'])).toThrow(/must be an integer/);
+  });
+
+  it('parses translation targets with a ru default', () => {
+    expect(parseTranslateLanguage(undefined)).toBe('ru');
+    expect(parseTranslateLanguage('')).toBe('ru');
+    expect(parseTranslateLanguage('EN')).toBe('en');
+    expect(parseTranslateLanguage('de')).toBe('de');
+    expect(() => parseTranslateLanguage('english')).toThrow(
+      /two-letter language code/,
+    );
+    expect(() => parseTranslateLanguage('e1')).toThrow(
+      /two-letter language code/,
+    );
   });
 });

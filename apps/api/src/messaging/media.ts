@@ -6,6 +6,15 @@ export const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
 
 /** Downloaded files are kept in memory briefly to make scrolling cheap. */
 export const MEDIA_CACHE_TTL_MS = 5 * 60 * 1000;
+/**
+ * Thumbnails are tiny and change rarely, so their cache entry lives ten times
+ * longer than a full download.
+ */
+export const MEDIA_THUMB_CACHE_TTL_MS = 30 * 60 * 1000;
+/** Thumbnails above this size fall back to the full media download. */
+export const MAX_MEDIA_THUMB_BYTES = 2 * 1024 * 1024;
+/** Biggest thumbnail width served by `?thumb=1`. */
+export const MAX_THUMB_WIDTH = 320;
 /** Total bytes the download cache may hold; oldest entries are pruned first. */
 export const MEDIA_CACHE_MAX_BYTES = 200 * 1024 * 1024;
 /** Responses above this size are streamed back but never cached. */
@@ -107,6 +116,53 @@ export function contentDisposition(fileName: string, inline: boolean): string {
     encoded = encodeRfc5987(ascii);
   }
   return `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+/** Structural view of mtcute photos/documents for thumbnail picking. */
+export interface ThumbnailableLike {
+  getThumbnail?: (type: string) => unknown;
+  thumbnails?: ReadonlyArray<{ width?: unknown; isVideo?: unknown }>;
+}
+
+function thumbWidth(thumb: { width?: unknown }): number | null {
+  return typeof thumb.width === 'number' && Number.isFinite(thumb.width)
+    ? thumb.width
+    : null;
+}
+
+/**
+ * Best preview thumbnail for `?thumb=1`: the 320px box (`m`) when Telegram
+ * has it, otherwise the largest known size at or below
+ * {@link MAX_THUMB_WIDTH}, otherwise the largest size available. Video and
+ * unsized (strip/outline) sizes are used only as a last resort. Never throws:
+ * getters on real media classes can reject.
+ */
+export function pickThumbnail(
+  media: ThumbnailableLike | null | undefined,
+): unknown | null {
+  if (!media) return null;
+  try {
+    if (typeof media.getThumbnail === 'function') {
+      const preferred = media.getThumbnail('m');
+      if (preferred) return preferred;
+    }
+  } catch {
+    // Fall through to the thumbnail list.
+  }
+
+  const list = Array.isArray(media.thumbnails) ? [...media.thumbnails] : [];
+  if (list.length === 0) return null;
+
+  const sized = list
+    .filter((thumb) => thumb && !thumb.isVideo && thumbWidth(thumb) !== null)
+    .sort((a, b) => (thumbWidth(b) ?? 0) - (thumbWidth(a) ?? 0));
+
+  const withinLimit = sized.find(
+    (thumb) => (thumbWidth(thumb) ?? 0) <= MAX_THUMB_WIDTH,
+  );
+  if (withinLimit) return withinLimit;
+  if (sized[0]) return sized[0];
+  return list.find((thumb) => !thumb.isVideo) ?? list[0] ?? null;
 }
 
 export function assertMediaUpload(size: number): void {
