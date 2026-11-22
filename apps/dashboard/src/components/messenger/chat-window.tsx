@@ -816,6 +816,7 @@ export function ChatWindow({
         {attachment && (
           <div className="mb-2 flex items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900/70 p-2">
             {attachmentPreview ? (
+              // biome-ignore lint/performance/noImgElement: local object URL preview of the picked file; next/image cannot optimise blob URLs.
               <img
                 src={attachmentPreview}
                 alt={attachment.name}
@@ -935,6 +936,7 @@ function MessageMedia({
         className="my-1 block"
         title="Открыть фото"
       >
+        {/* biome-ignore lint/performance/noImgElement: media is streamed by our API with a dynamic URL; next/image needs a fixed remote host. */}
         <img
           src={url}
           alt={media.fileName ?? "Фото"}
