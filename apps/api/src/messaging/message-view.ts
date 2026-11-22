@@ -84,6 +84,46 @@ export function toMessageView(message: MessageLike): MessageView {
   };
 }
 
+/**
+ * Chat DTO for a bare peer (e.g. `getPeer` or a global-search hit), where no
+ * dialog state is available. Flags default to their neutral values.
+ */
+export function toChatViewFromPeer(peer: PeerLike): ChatView {
+  return {
+    id: peer.id,
+    type: peer.type,
+    title: peer.displayName,
+    username: peer.username,
+    lastMessage: null,
+    unreadCount: 0,
+    pinned: false,
+    muted: false,
+    archived: false,
+    readInboxMaxId: 0,
+  };
+}
+
+export interface FolderLike {
+  id: number;
+  title: { text: string };
+  emoticon?: string;
+}
+
+export interface FolderView {
+  id: number;
+  title: string;
+  emoticon: string | null;
+}
+
+/** Folder DTO for `GET /accounts/:accountId/folders`. */
+export function toFolderView(folder: FolderLike): FolderView {
+  return {
+    id: folder.id,
+    title: folder.title.text,
+    emoticon: folder.emoticon ?? null,
+  };
+}
+
 /** Dialog DTO for `GET /accounts/:accountId/chats`. */
 export function toChatView(dialog: DialogLike): ChatView {
   return {

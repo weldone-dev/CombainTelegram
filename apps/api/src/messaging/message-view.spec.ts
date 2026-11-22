@@ -1,4 +1,9 @@
-import { toChatView, toMessageView } from './message-view.js';
+import {
+  toChatView,
+  toChatViewFromPeer,
+  toFolderView,
+  toMessageView,
+} from './message-view.js';
 import type { DialogLike, MessageLike } from './message-view.js';
 
 function fakeMessage(overrides: Partial<MessageLike> = {}): MessageLike {
@@ -96,6 +101,39 @@ describe('message DTO mapping', () => {
       muted: false,
       archived: false,
       readInboxMaxId: 42,
+    });
+  });
+
+  it('maps a bare peer to a neutral chat view', () => {
+    expect(
+      toChatViewFromPeer({
+        id: -1001234567890,
+        type: 'channel',
+        displayName: 'News',
+        username: 'news',
+      }),
+    ).toEqual({
+      id: -1001234567890,
+      type: 'channel',
+      title: 'News',
+      username: 'news',
+      lastMessage: null,
+      unreadCount: 0,
+      pinned: false,
+      muted: false,
+      archived: false,
+      readInboxMaxId: 0,
+    });
+  });
+
+  it('maps folders', () => {
+    expect(
+      toFolderView({ id: 2, title: { text: 'Work' }, emoticon: '💼' }),
+    ).toEqual({ id: 2, title: 'Work', emoticon: '💼' });
+    expect(toFolderView({ id: 3, title: { text: 'No icon' } })).toEqual({
+      id: 3,
+      title: 'No icon',
+      emoticon: null,
     });
   });
 

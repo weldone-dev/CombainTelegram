@@ -1,18 +1,35 @@
 import { Injectable } from '@nestjs/common';
-import type { Message, Peer, SendableTypingStatus } from '@mtcute/node';
+import type {
+  Message,
+  Peer,
+  SendableTypingStatus,
+  TelegramClient,
+  tl,
+} from '@mtcute/node';
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
 import { apiError } from '../common/api-error.js';
-import { toChatView, toMessageView } from './message-view.js';
-import type { ChatView, MessageView } from './message-view.js';
 import {
+  toChatView,
+  toChatViewFromPeer,
+  toFolderView,
+  toMessageView,
+} from './message-view.js';
+import type { ChatView, FolderView, MessageView } from './message-view.js';
+import {
+  normalizeUsername,
   parseChatId,
+  parseFolderId,
   parseLimit,
   parseMessageId,
+  parseMessageIds,
   parseMessageText,
   parseOffsetId,
+  parseOptionalBoolean,
+  parseOptionalMessageId,
   parseOptionalSessionId,
+  parseSearchQuery,
 } from './params.js';
 
 export interface ChatInfoView {
@@ -36,6 +53,42 @@ export interface ReadView {
   read: boolean;
   maxId: number | null;
 }
+
+export interface ForwardView {
+  forwarded: number;
+}
+
+export interface ChatSearchView {
+  messages: MessageView[];
+  nextOffsetId: number | null;
+}
+
+export interface SearchUserView {
+  id: number;
+  title: string;
+  username: string | null;
+}
+
+export interface GlobalSearchView {
+  chats: ChatView[];
+  users: SearchUserView[];
+}
+
+export interface FoldersView {
+  folders: FolderView[];
+}
+
+export interface ChatRemovedView {
+  removed: boolean;
+  cleared: number | null;
+}
+
+export interface ReadAllView {
+  read: number;
+}
+
+/** Upper bound for `POST /chats/read-all` to keep the fan-out bounded. */
+const MAX_READ_ALL_DIALOGS = 200;
 
 export type AllowedTypingStatus =
   | 'typing'
@@ -88,21 +141,35 @@ export class MessagingService {
   async listChats(
     userId: string,
     accountId: string,
-    query: { limit?: unknown; sessionId?: unknown } = {},
+    query: {
+      limit?: unknown;
+      folderId?: unknown;
+      archived?: unknown;
+      sessionId?: unknown;
+    } = {},
   ): Promise<ChatView[]> {
     const sessionId = parseOptionalSessionId(query.sessionId);
     const limit = parseLimit(query.limit);
+    const folderId = parseFolderId(query.folderId);
+    const archived = parseOptionalBoolean(query.archived, 'archived');
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
       sessionId,
     );
 
+    // No params keeps the historical behaviour: recent dialogs from every
+    // folder (archived included). A folder overrides `archived`, because
+    // Telegram folders already describe their own archived section.
+    const archivedMode: 'keep' | 'exclude' | 'only' =
+      archived === true ? 'only' : archived === false ? 'exclude' : 'keep';
+
     try {
       const chats: ChatView[] = [];
       for await (const dialog of client.iterDialogs({
         limit,
-        archived: 'keep',
+        archived: archivedMode,
+        ...(folderId !== undefined ? { folder: folderId } : {}),
       })) {
         chats.push(toChatView(dialog));
         if (chats.length >= limit) break;
@@ -256,10 +323,11 @@ export class MessagingService {
     userId: string,
     accountId: string,
     rawChatId: string,
-    body: { text?: unknown; sessionId?: unknown } = {},
+    body: { text?: unknown; replyToId?: unknown; sessionId?: unknown } = {},
   ): Promise<MessageView> {
     const chatId = parseChatId(rawChatId);
     const text = parseMessageText(body.text);
+    const replyToId = parseOptionalMessageId(body.replyToId);
     const sessionId = parseOptionalSessionId(body.sessionId);
     const { client } = await this.accounts.resolveSession(
       userId,
@@ -268,8 +336,151 @@ export class MessagingService {
     );
 
     try {
-      const message: Message = await client.sendText(chatId, text);
+      const message: Message = await client.sendText(
+        chatId,
+        text,
+        replyToId !== undefined ? { replyTo: replyToId } : {},
+      );
       return toMessageView(message);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  async forwardMessages(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    body: {
+      fromChatId?: unknown;
+      messageIds?: unknown;
+      sessionId?: unknown;
+    } = {},
+  ): Promise<ForwardView> {
+    const chatId = parseChatId(rawChatId);
+    const fromChatId = parseChatId(body.fromChatId, 'fromChatId');
+    const messageIds = parseMessageIds(body.messageIds);
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const forwarded = await client.forwardMessagesById({
+        toChatId: chatId,
+        fromChatId,
+        messages: messageIds,
+      });
+      return { forwarded: forwarded.length };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  async searchMessages(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    query: {
+      q?: unknown;
+      limit?: unknown;
+      offsetId?: unknown;
+      sessionId?: unknown;
+    } = {},
+  ): Promise<ChatSearchView> {
+    const chatId = parseChatId(rawChatId);
+    const text = parseSearchQuery(query.q);
+    const limit = parseLimit(query.limit);
+    const offsetId = parseOffsetId(query.offsetId);
+    const sessionId = parseOptionalSessionId(query.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const result = await client.searchMessages({
+        chatId,
+        query: text,
+        limit,
+        ...(offsetId !== undefined ? { offset: offsetId } : {}),
+      });
+      return {
+        messages: result.map((message) => toMessageView(message)),
+        nextOffsetId: result.next ?? null,
+      };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Global search over messages, whose results are folded into chats and
+   * users. mtcute 0.32 has no dedicated contact/dialog search call, so
+   * `searchGlobal` is the best available source (it covers dialogs too).
+   */
+  async searchGlobal(
+    userId: string,
+    accountId: string,
+    query: { q?: unknown; limit?: unknown; sessionId?: unknown } = {},
+  ): Promise<GlobalSearchView> {
+    const text = parseSearchQuery(query.q);
+    const limit = parseLimit(query.limit);
+    const sessionId = parseOptionalSessionId(query.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const result = await client.searchGlobal({ query: text, limit });
+      const chats = new Map<number, ChatView>();
+      const users = new Map<number, SearchUserView>();
+
+      for (const message of result) {
+        for (const peer of [message.chat, message.sender]) {
+          if (!peer || !('id' in peer)) continue;
+          if (peer.type === 'user') {
+            if (!users.has(peer.id)) {
+              users.set(peer.id, {
+                id: peer.id,
+                title: peer.displayName,
+                username: peer.username,
+              });
+            }
+          } else if (!chats.has(peer.id)) {
+            chats.set(peer.id, toChatViewFromPeer(peer));
+          }
+        }
+      }
+
+      return { chats: [...chats.values()], users: [...users.values()] };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /** Resolve `@name` / `name` / `t.me/name` / `https://t.me/name` to a chat. */
+  async resolveChat(
+    userId: string,
+    accountId: string,
+    query: { username?: unknown; sessionId?: unknown } = {},
+  ): Promise<ChatView> {
+    const username = normalizeUsername(query.username);
+    const sessionId = parseOptionalSessionId(query.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const peer = await client.getPeer(username);
+      return toChatViewFromPeer(peer);
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -352,6 +563,202 @@ export class MessagingService {
     } catch (error) {
       raiseTelegramError(error);
     }
+  }
+
+  /**
+   * Apply dialog flags. mtcute 0.32 has no high-level pin/mute helpers, so
+   * those two use the corresponding raw TL calls; archive and unread use the
+   * high-level methods. Each flag is optional and only applied when present.
+   */
+  async updateChat(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    body: {
+      pinned?: unknown;
+      muted?: unknown;
+      archived?: unknown;
+      unread?: unknown;
+      sessionId?: unknown;
+    } = {},
+  ): Promise<ChatView> {
+    const chatId = parseChatId(rawChatId);
+    const pinned = parseOptionalBoolean(body.pinned, 'pinned');
+    const muted = parseOptionalBoolean(body.muted, 'muted');
+    const archived = parseOptionalBoolean(body.archived, 'archived');
+    const unread = parseOptionalBoolean(body.unread, 'unread');
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      if (pinned !== undefined) {
+        const peer = await client.resolvePeer(chatId);
+        await client.call({
+          _: 'messages.toggleDialogPin',
+          pinned,
+          peer: { _: 'inputDialogPeer', peer },
+        });
+      }
+
+      if (muted !== undefined) {
+        const peer = await client.resolvePeer(chatId);
+        await client.call({
+          _: 'account.updateNotifySettings',
+          peer: { _: 'inputNotifyPeer', peer },
+          settings: {
+            _: 'inputPeerNotifySettings',
+            silent: muted,
+            // 0x7FFFFFFF means "muted forever"; 0 clears the mute.
+            muteUntil: muted ? 0x7fffffff : 0,
+          },
+        });
+      }
+
+      if (archived === true) {
+        await client.archiveChats(chatId);
+      } else if (archived === false) {
+        await client.unarchiveChats(chatId);
+      }
+
+      if (unread === true) {
+        await client.markChatUnread(chatId);
+      } else if (unread === false) {
+        await client.readHistory(chatId);
+      }
+
+      return await this.refreshChatView(client, chatId);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * `clearHistory=true` deletes messages but keeps the dialog. Otherwise the
+   * dialog is removed: private chats and legacy groups use `deleteHistory`
+   * (with `revoke` controlling deletion for everyone), while channels and
+   * supergroups are left.
+   */
+  async deleteChat(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    query: {
+      revoke?: unknown;
+      clearHistory?: unknown;
+      sessionId?: unknown;
+    } = {},
+  ): Promise<ChatRemovedView> {
+    const chatId = parseChatId(rawChatId);
+    const revoke = parseOptionalBoolean(query.revoke, 'revoke') ?? true;
+    const clearHistory =
+      parseOptionalBoolean(query.clearHistory, 'clearHistory') ?? false;
+    const sessionId = parseOptionalSessionId(query.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      if (clearHistory) {
+        await client.deleteHistory(chatId, { mode: 'clear' });
+        return { removed: false, cleared: null };
+      }
+
+      const peer = await client.getPeer(chatId);
+      if (
+        peer.type === 'user' ||
+        (peer.type === 'chat' && peer.chatType === 'group')
+      ) {
+        await client.deleteHistory(chatId, {
+          mode: revoke ? 'revoke' : 'delete',
+        });
+      } else {
+        await client.leaveChat(chatId, { clear: revoke });
+      }
+      return { removed: true, cleared: null };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /** Mark every unread dialog read, capped at 200 dialogs per request. */
+  async markAllRead(
+    userId: string,
+    accountId: string,
+    body: { sessionId?: unknown } = {},
+  ): Promise<ReadAllView> {
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      let read = 0;
+      for await (const dialog of client.iterDialogs({
+        limit: MAX_READ_ALL_DIALOGS,
+        archived: 'keep',
+      })) {
+        if (dialog.unreadCount > 0 || dialog.isManuallyUnread) {
+          await client.readHistory(dialog.peer.inputPeer);
+          read += 1;
+        }
+      }
+      return { read };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  async listFolders(
+    userId: string,
+    accountId: string,
+    sessionIdParam?: unknown,
+  ): Promise<FoldersView> {
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const result: tl.messages.RawDialogFilters = await client.getFolders();
+      const folders = result.filters
+        .filter(
+          (
+            filter,
+          ): filter is tl.RawDialogFilter | tl.RawDialogFilterChatlist =>
+            filter._ === 'dialogFilter' ||
+            filter._ === 'dialogFilterChatlist',
+        )
+        .map((filter) => toFolderView(filter));
+      return { folders };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /** Reload a dialog after a mutation; fall back to a bare peer DTO. */
+  private async refreshChatView(
+    client: TelegramClient,
+    chatId: number,
+  ): Promise<ChatView> {
+    try {
+      const [dialog] = await client.findDialogs(chatId);
+      if (dialog) return toChatView(dialog);
+    } catch {
+      // Dialog listing can fail for freshly created or inaccessible peers;
+      // the peer lookup below is still enough for the response shape.
+    }
+    const peer = await client.getPeer(chatId);
+    return toChatViewFromPeer(peer);
   }
 
   async sendTyping(

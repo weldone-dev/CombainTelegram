@@ -260,11 +260,19 @@ No registration or login. DefaultUserService upserts `DEFAULT_USER_ID`
 token. This must be replaced by real auth before a shared deployment.
 ```
 ```
-GET    /accounts/:accountId/chats?limit=50&sessionId=
+GET    /accounts/:accountId/chats?limit=50&folderId=&archived=&sessionId=
+GET    /accounts/:accountId/folders?sessionId=                  chat folders
+GET    /accounts/:accountId/search?q=&limit=&sessionId=         global chat/user search
+GET    /accounts/:accountId/chats/resolve?username=&sessionId=   @name / t.me link → chat
 GET    /accounts/:accountId/chats/:chatId                       chat info
 GET    /accounts/:accountId/chats/:chatId/avatar                JPEG chat photo (404 if none)
 GET    /accounts/:accountId/chats/:chatId/messages?limit=50&offsetId=&newerThanId=&sessionId=
-POST   /accounts/:accountId/chats/:chatId/messages             { text, sessionId? }
+GET    /accounts/:accountId/chats/:chatId/search?q=&limit=&offsetId=&sessionId=
+POST   /accounts/:accountId/chats/:chatId/messages             { text, replyToId?, sessionId? }
+POST   /accounts/:accountId/chats/:chatId/forward              { fromChatId, messageIds[1..100], sessionId? }
+PATCH  /accounts/:accountId/chats/:chatId                      { pinned?, muted?, archived?, unread?, sessionId? }
+DELETE /accounts/:accountId/chats/:chatId?revoke=&clearHistory=&sessionId=
+POST   /accounts/:accountId/chats/read-all                     { sessionId? }
 PATCH  /accounts/:accountId/chats/:chatId/messages/:messageId  { text, sessionId? }
 DELETE /accounts/:accountId/chats/:chatId/messages/:messageId?sessionId=
 POST   /accounts/:accountId/chats/:chatId/read                 { maxId?, sessionId? }
@@ -273,6 +281,17 @@ POST   /accounts/:accountId/chats/:chatId/typing               { status?, sessio
 
 Chats are mapped from `iterDialogs({ limit, archived: 'keep' })`:
 `{ id, type, title, username, lastMessage, unreadCount, pinned, muted, archived }`.
+`folderId` selects one folder; `archived=true|false` lists only archived or
+only non-archived dialogs (with no params the historic behaviour is kept).
+Folders come from `getFolders()` as `{ id, title, emoticon }`. Global search
+folds `searchGlobal` hits into `{ chats: ChatView[], users: { id, title,
+username }[] }`; in-chat search returns `{ messages, nextOffsetId }`. Message
+actions: reply via `replyTo`, forward via `forwardMessagesById`, pin and mute
+via the raw `messages.toggleDialogPin` / `account.updateNotifySettings` calls
+(mtcute 0.32 has no high-level helpers for those two), archive/unread via
+`archiveChats`/`unarchiveChats`/`markChatUnread`/`readHistory`. Deleting a chat
+uses `deleteHistory` for private chats and legacy groups and `leaveChat` for
+channels/supergroups; `clearHistory=true` only clears messages.
 `newerThanId` (usually the dialog's `readInboxMaxId`) returns the oldest unread
 batch plus a little read context, so opening a chat with many unread messages
 does not mark everything read at once. Messages come from `getHistory`, newest
