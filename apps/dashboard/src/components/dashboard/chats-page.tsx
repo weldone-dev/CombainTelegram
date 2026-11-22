@@ -396,7 +396,7 @@ export function ChatsPage() {
         setMessages((previous) =>
           previous.some((item) => item.id === message.id)
             ? previous
-            : [...previous, message],
+            : [message, ...previous],
         );
         setChats((previous) =>
           previous.map((chat) =>
@@ -438,7 +438,7 @@ export function ChatsPage() {
         setMessages((previous) =>
           previous.some((item) => item.id === message.id)
             ? previous
-            : [...previous, message],
+            : [message, ...previous],
         );
         setChats((previous) =>
           previous.map((chat) =>
@@ -835,7 +835,7 @@ export function ChatsPage() {
         setMessages((previous) => {
           if (data.chatId !== selectedChatId) return previous;
           if (previous.some((item) => item.id === message.id)) return previous;
-          return [...previous, message];
+          return [message, ...previous];
         });
         setChats((previous) =>
           previous.map((chat) => {
