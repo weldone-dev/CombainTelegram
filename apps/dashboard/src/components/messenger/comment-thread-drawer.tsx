@@ -191,7 +191,7 @@ export function CommentThreadDrawer({
             <p className="truncate text-xs text-zinc-500">
               {title}
               {thread && thread.discussionChatId !== null
-                ? ` · ${thread.comments}`
+                ? ` · ${thread.comments.length}`
                 : ""}
             </p>
           </div>
