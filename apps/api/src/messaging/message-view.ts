@@ -75,11 +75,24 @@ export interface MessageLike {
     }>;
   } | null;
   /**
+   * Comment thread info (mtcute's `MessageRepliesInfo`). Structural so plain
+   * fixtures work; getters are read defensively.
+   */
+  replies?: {
+    hasComments?: boolean;
+    count?: number;
+    discussion?: number | null;
+  } | null;
+  /**
    * Raw TL message. `_` (the TL constructor) is required so both
    * `RawMessage` and `RawMessageService` structurally match; only `editDate`
-   * is read (`edited`).
+   * and `replies.channelId` are read.
    */
-  raw: { _: string; editDate?: unknown };
+  raw: {
+    _: string;
+    editDate?: unknown;
+    replies?: { channelId?: number | null } | null;
+  };
 }
 
 export interface MessageMediaView {
@@ -119,6 +132,25 @@ export interface MessagePollView {
   solution: string | null;
 }
 
+export interface MessageThreadInfo {
+  /** Total number of comments in the linked discussion group. */
+  comments: number;
+  /** True when this channel post has a linked comments thread. */
+  hasComments: boolean;
+  /** Marked id of the discussion group, or `null` when unknown. */
+  discussionChatId: number | null;
+}
+
+/** Comment thread payload of `GET .../messages/:messageId/thread`. */
+export interface MessageThreadView {
+  chatId: number;
+  messageId: number;
+  discussionChatId: number | null;
+  /** Newest-first comments. `nextOffsetId` loads the next (older) page. */
+  comments: MessageView[];
+  nextOffsetId: number | null;
+}
+
 export interface MessageView {
   id: number;
   chatId: number;
@@ -138,6 +170,11 @@ export interface MessageView {
   poll: MessagePollView | null;
   /** Convenience flag for the voice-note UI (`media.kind === 'voice'`). */
   isVoice: boolean;
+  /**
+   * Channel-post comment thread; `null` for everything that is not a channel
+   * post with a linked discussion group.
+   */
+  thread: MessageThreadInfo | null;
 }
 
 export interface ChatView {
@@ -334,6 +371,56 @@ export function toMessagePollView(media: unknown): MessagePollView | null {
   }
 }
 
+/**
+ * Comment-thread info of a channel post. Only channel posts with a linked
+ * discussion group have one; regular chats and groups (whose `replies` can
+ * also be present) map to `null`.
+ *
+ * `MessageRepliesInfo` getters are memoized and may throw on partial fixtures,
+ * so each field is read defensively.
+ */
+export function toMessageThreadInfo(
+  message: MessageLike,
+): MessageThreadInfo | null {
+  const replies = message.replies;
+  if (!replies) return null;
+
+  let hasComments = false;
+  let count = 0;
+  let discussionChatId: number | null = null;
+  try {
+    hasComments = replies.hasComments === true;
+  } catch {
+    hasComments = false;
+  }
+  try {
+    if (typeof replies.count === 'number' && Number.isFinite(replies.count)) {
+      count = Math.max(replies.count, 0);
+    }
+  } catch {
+    count = 0;
+  }
+  try {
+    if (typeof replies.discussion === 'number') {
+      discussionChatId = replies.discussion;
+    }
+  } catch {
+    discussionChatId = null;
+  }
+
+  // Older/partial messages only carry the raw channel id; rebuild the marked
+  // id instead of returning a thread without a chat to load comments from.
+  if (discussionChatId === null) {
+    const channelId = message.raw.replies?.channelId;
+    if (typeof channelId === 'number') {
+      discussionChatId = -(1_000_000_000_000 + channelId);
+    }
+  }
+
+  if (!hasComments) return null;
+  return { comments: count, hasComments, discussionChatId };
+}
+
 /** Message DTO shared by REST responses and WS events. */
 export function toMessageView(message: MessageLike): MessageView {
   return {
@@ -354,6 +441,7 @@ export function toMessageView(message: MessageLike): MessageView {
         ? toMessagePollView(message.media)
         : null,
     isVoice: message.media?.type === 'voice',
+    thread: toMessageThreadInfo(message),
   };
 }
 

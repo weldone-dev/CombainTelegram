@@ -6,6 +6,7 @@ import {
   toFolderView,
   toMessageMediaView,
   toMessagePollView,
+  toMessageThreadInfo,
   toMessageView,
 } from './message-view.js';
 import type { DialogLike, MessageLike } from './message-view.js';
@@ -52,6 +53,7 @@ describe('message DTO mapping', () => {
       reactions: [],
       poll: null,
       isVoice: false,
+      thread: null,
     });
   });
 
@@ -460,5 +462,68 @@ describe('voice messages', () => {
     expect(toMessageView(fakeMessage({ media: { type: 'photo' } })).isVoice).toBe(
       false,
     );
+  });
+});
+
+describe('comment threads', () => {
+  it('returns null for messages without replies info', () => {
+    expect(toMessageView(fakeMessage()).thread).toBeNull();
+  });
+
+  it('maps a channel post with a linked discussion group', () => {
+    const message = fakeMessage({
+      replies: {
+        hasComments: true,
+        count: 12,
+        discussion: -1001234567890,
+      },
+    });
+
+    expect(toMessageThreadInfo(message)).toEqual({
+      comments: 12,
+      hasComments: true,
+      discussionChatId: -1001234567890,
+    });
+  });
+
+  it('falls back to the raw channel id for the discussion chat', () => {
+    const message = fakeMessage({
+      replies: { hasComments: true, count: 3, discussion: null },
+      raw: { _: 'message', replies: { channelId: 1234567890 } },
+    });
+
+    expect(toMessageThreadInfo(message)).toEqual({
+      comments: 3,
+      hasComments: true,
+      discussionChatId: -1001234567890,
+    });
+  });
+
+  it('ignores group reply info without a comments section', () => {
+    const message = fakeMessage({
+      replies: { hasComments: false, count: 5, discussion: null },
+    });
+
+    expect(toMessageThreadInfo(message)).toBeNull();
+  });
+
+  it('degrades to a thread with no discussions when getters throw', () => {
+    const replies = {
+      get hasComments(): boolean {
+        return true;
+      },
+      get count(): number {
+        throw new Error('broken');
+      },
+      get discussion(): number | null {
+        throw new Error('broken');
+      },
+    };
+
+    expect(toMessageThreadInfo(fakeMessage({ replies }))).toEqual({
+      comments: 0,
+      hasComments: true,
+      discussionChatId: null,
+    });
   });
 });
