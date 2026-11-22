@@ -1,7 +1,20 @@
 import { tl } from '@mtcute/node';
 import type { TelegramClient } from '@mtcute/node';
 import type { AccountsService } from '../accounts/accounts.service.js';
+import { MAX_MEDIA_BYTES, MAX_MEDIA_THUMB_BYTES } from './media.js';
 import { MessagingService } from './messaging.service.js';
+import { downloadFileBuffer } from './telegram-download.js';
+
+vi.mock('./telegram-download.js', () => ({
+  downloadFileBuffer: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.mocked(downloadFileBuffer).mockReset();
+  vi.mocked(downloadFileBuffer).mockImplementation(async () =>
+    Buffer.from([1, 2, 3]),
+  );
+});
 
 const USER_ID = 'local';
 const ACCOUNT_ID = 'account';
@@ -379,7 +392,7 @@ describe('uncached peer resolution', () => {
 
     expect(avatar?.data).toEqual(Buffer.from([1, 2, 3]));
     expect(fake.getUser).toHaveBeenCalledTimes(1);
-    expect(fake.downloadAsBuffer).toHaveBeenCalledWith(photo.small);
+    expect(downloadFileBuffer).toHaveBeenCalledWith(fake.client, photo.small);
   });
 
   it('branches deleteChat by the resolved peer type', async () => {    const fake = createFakeClient();
@@ -579,10 +592,9 @@ describe('message-level features', () => {
       thumbnails: [thumb],
     };
     const getMessages = vi.fn(async () => [{ ...message, media }]);
-    const downloadAsBuffer = vi.fn(async () => new Uint8Array([9]));
+    vi.mocked(downloadFileBuffer).mockResolvedValueOnce(Buffer.from([9]));
     const service = createService({
       getMessages,
-      downloadAsBuffer,
     } as unknown as TelegramClient);
 
     const first = await service.downloadMedia(
@@ -595,7 +607,9 @@ describe('message-level features', () => {
       '1',
     );
 
-    expect(downloadAsBuffer).toHaveBeenCalledWith(thumb);
+    expect(downloadFileBuffer).toHaveBeenCalledWith(expect.anything(), thumb, {
+      maxBytes: MAX_MEDIA_THUMB_BYTES,
+    });
     expect(first.mimeType).toBe('image/jpeg');
     expect(first.disposition.startsWith('inline')).toBe(true);
 
@@ -609,17 +623,15 @@ describe('message-level features', () => {
       undefined,
       '1',
     );
-    expect(downloadAsBuffer).toHaveBeenCalledTimes(1);
+    expect(downloadFileBuffer).toHaveBeenCalledTimes(1);
     expect(getMessages).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to the full file when there is no thumbnail', async () => {
     const media = { type: 'photo' };
     const getMessages = vi.fn(async () => [{ ...message, media }]);
-    const downloadAsBuffer = vi.fn(async () => new Uint8Array([1, 2, 3]));
     const service = createService({
       getMessages,
-      downloadAsBuffer,
     } as unknown as TelegramClient);
 
     const result = await service.downloadMedia(
@@ -632,7 +644,9 @@ describe('message-level features', () => {
       'true',
     );
 
-    expect(downloadAsBuffer).toHaveBeenCalledWith(media);
+    expect(downloadFileBuffer).toHaveBeenCalledWith(expect.anything(), media, {
+      maxBytes: MAX_MEDIA_BYTES,
+    });
     expect(result.data).toEqual(Buffer.from([1, 2, 3]));
     expect(result.mimeType).toBe('image/jpeg');
   });

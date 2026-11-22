@@ -14,6 +14,7 @@ import type { AvatarImage } from '../accounts/accounts.service.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
 import {
+  MAX_MEDIA_BYTES,
   MAX_MEDIA_THUMB_BYTES,
   MEDIA_CACHE_MAX_BYTES,
   MEDIA_CACHE_MAX_ENTRY_BYTES,
@@ -76,20 +77,9 @@ import {
   parseTranslateLanguage,
 } from './params.js';
 import type { ChatInfoKind } from './params.js';
+import { downloadFileBuffer } from './telegram-download.js';
 
 export type { ChatInfoView, ChatPeerView } from './chat-info.js';
-
-/**
- * mtcute 0.32 throws `MtUnsupportedError` when Telegram answers with
- * `upload.fileCdnRedirect`: large files/photos may live on a CDN DC that the
- * library cannot follow yet. Callers fall back to a smaller size or an
- * initials avatar instead of surfacing a 502.
- */
-export function isCdnRedirectError(error: unknown): boolean {
-  return (
-    error instanceof Error && error.message.includes('CDN redirect')
-  );
-}
 
 export interface ChatInfoPollView {
   question: string;
@@ -686,36 +676,30 @@ export class MessagingService {
     }
 
     try {
-      const data = Buffer.from(
-        await client.downloadAsBuffer(
-          photo.small as Parameters<typeof client.downloadAsBuffer>[0],
-        ),
+      const data = await downloadFileBuffer(
+        client,
+        photo.small as Parameters<typeof downloadFileBuffer>[1],
       );
       this.setAvatar(key, data);
       return { data, mime: 'image/jpeg' };
-    } catch (error) {
-      // Some official/avatar photos are served through a CDN redirect that
-      // mtcute cannot follow. Try the big variant once, then fall back to the
-      // generated initials avatar instead of a 502.
-      if (isCdnRedirectError(error)) {
-        const big = (photo as { big?: unknown }).big;
-        if (big && big !== photo.small) {
-          try {
-            const data = Buffer.from(
-              await client.downloadAsBuffer(
-                big as Parameters<typeof client.downloadAsBuffer>[0],
-              ),
-            );
-            this.setAvatar(key, data);
-            return { data, mime: 'image/jpeg' };
-          } catch {
-            // fall through to "no avatar"
-          }
+    } catch {
+      // A broken small size (some official avatars live behind a CDN
+      // redirect the old path could not follow) may still have a big one.
+      const big = (photo as { big?: unknown }).big;
+      if (big && big !== photo.small) {
+        try {
+          const data = await downloadFileBuffer(
+            client,
+            big as Parameters<typeof downloadFileBuffer>[1],
+          );
+          this.setAvatar(key, data);
+          return { data, mime: 'image/jpeg' };
+        } catch {
+          // fall through to "no avatar"
         }
-        this.setAvatar(key, null);
-        return null;
       }
-      raiseTelegramError(error);
+      this.setAvatar(key, null);
+      return null;
     }
   }
 
@@ -1129,10 +1113,10 @@ export class MessagingService {
           media as Parameters<typeof pickThumbnail>[0],
         );
         if (thumb) {
-          const data = Buffer.from(
-            await client.downloadAsBuffer(
-              thumb as Parameters<typeof client.downloadAsBuffer>[0],
-            ),
+          const data = await downloadFileBuffer(
+            client,
+            thumb as Parameters<typeof downloadFileBuffer>[1],
+            { maxBytes: MAX_MEDIA_THUMB_BYTES },
           );
           if (data.byteLength > 0 && data.byteLength <= MAX_MEDIA_THUMB_BYTES) {
             const mimeType = 'image/jpeg';
@@ -1173,20 +1157,21 @@ export class MessagingService {
 
     let data: Buffer;
     try {
-      data = Buffer.from(await client.downloadAsBuffer(media));
+      data = await downloadFileBuffer(
+        client,
+        media as unknown as Parameters<typeof downloadFileBuffer>[1],
+        { maxBytes: MAX_MEDIA_BYTES },
+      );
     } catch (error) {
-      // mtcute 0.32 cannot follow Telegram's CDN redirects for some files.
-      // Photos fall back to their largest available thumbnail instead of
-      // failing the whole download; avatars are handled separately.
-      if (!isCdnRedirectError(error) || media.type !== 'photo') {
-        raiseTelegramError(error);
-      }
+      // Photos still have a usable preview when the full file is unavailable
+      // (for example a CDN DC the account cannot reach); documents do not.
+      if (media.type !== 'photo') raiseTelegramError(error);
       const thumb = pickThumbnail(media as Parameters<typeof pickThumbnail>[0]);
       if (!thumb) raiseTelegramError(error);
-      data = Buffer.from(
-        await client.downloadAsBuffer(
-          thumb as Parameters<typeof client.downloadAsBuffer>[0],
-        ),
+      data = await downloadFileBuffer(
+        client,
+        thumb as Parameters<typeof downloadFileBuffer>[1],
+        { maxBytes: MAX_MEDIA_THUMB_BYTES },
       );
     }
 
