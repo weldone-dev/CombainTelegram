@@ -20,6 +20,22 @@ model User {
   authAttempts AuthAttempt[]
   tdataUploads TdataUpload[]
   proxies      Proxy[]
+  pushSubscriptions PushSubscription[]
+}
+
+/// Browser Web Push subscription (one per browser/device endpoint).
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 /// Named proxy entry. A local user keeps a reusable list; sessions point at one.

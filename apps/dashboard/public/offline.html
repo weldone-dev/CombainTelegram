@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Нет сети — CombainTelegram</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #09090b;
+        color: #e4e4e7;
+        font-family:
+          ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main {
+        max-width: 26rem;
+        padding: 2rem;
+        text-align: center;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        border: 1px solid #3f3f46;
+        border-radius: 999px;
+        padding: 0.25rem 0.75rem;
+        font-size: 0.75rem;
+        color: #a1a1aa;
+        margin-bottom: 1.5rem;
+      }
+      .dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 999px;
+        background: #f59e0b;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 0.75rem;
+      }
+      p {
+        margin: 0 0 1.5rem;
+        color: #a1a1aa;
+        line-height: 1.6;
+        font-size: 0.95rem;
+      }
+      button {
+        border: 1px solid #0369a1;
+        background: #0c4a6e;
+        color: #e0f2fe;
+        border-radius: 0.5rem;
+        padding: 0.6rem 1.2rem;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #075985;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="badge"><span class="dot"></span> Вы офлайн</span>
+      <h1>Нет подключения к сети</h1>
+      <p>
+        Сохранённые сообщения доступны на странице чатов. Как только сеть
+        вернётся, данные обновятся автоматически.
+      </p>
+      <button type="button" onclick="location.reload()">
+        Попробовать снова
+      </button>
+    </main>
+  </body>
+</html>

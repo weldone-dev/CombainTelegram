@@ -377,6 +377,40 @@ rows produced by that request, so an HTTP action and the Telegram error it
 caused can be joined. Secrets, passwords, codes, phone numbers and session keys
 are redacted before writing; retention is `LOG_MAX_ENTRIES` (default 10 000).
 
+### Web Push
+
+Browser notifications work without an open dashboard tab: the dashboard
+registers `public/sw.js`, and the API sends a Web Push notification for every
+incoming `message.new`. Subscriptions are stored in `PushSubscription` (one row
+per browser endpoint, cascaded with the user). Outgoing messages, edits and
+read receipts never push; a chat muted in Telegram is skipped when the dialog
+state can be read cheaply. Each chat is limited to one push per 10 s and each
+user to 20 per minute. Delivery uses `TTL: 3600`; endpoints answering 404/410
+are removed.
+
+```
+GET    /push/key                                   → { publicKey }
+PUT    /push/subscribe   { endpoint, keys: { p256dh, auth } }   → 204
+DELETE /push/subscribe   { endpoint }                           → 204
+POST   /push/test                                  → { sent, failed }
+```
+
+VAPID keys are not committed. Generate them once and put them into
+`apps/api/.env`:
+
+```bash
+bunx web-push generate-vapid-keys
+```
+
+Set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and (optionally) `VAPID_SUBJECT`
+(`mailto:you@example.com`, defaults to `mailto:admin@localhost`). Without both
+keys the API still boots, logs one warning, and the push routes answer
+`503 PUSH_DISABLED`; the dashboard shows a readable Russian message.
+
+The dashboard also keeps an offline snapshot (last 50 messages per chat and
+the chat list, versioned `tg-offline-v1`, ~2 MB with LRU eviction). It contains
+only chat titles and messages — never logs, proxies, accounts or sessions.
+
 ## 7.1 Configuration
 
 | Variable | Default | Purpose |
@@ -390,6 +424,8 @@ are redacted before writing; retention is `LOG_MAX_ENTRIES` (default 10 000).
 | `MAX_ACCOUNTS_PER_USER` | `25` | account limit per local user |
 | `MAX_SESSIONS_PER_ACCOUNT` | `10` | device/session limit per Telegram account |
 | `DEFAULT_USER_ID` | `local` | the single local user every request runs as |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | Web Push keys from `bunx web-push generate-vapid-keys`; missing = `503 PUSH_DISABLED` |
+| `VAPID_SUBJECT` | `mailto:admin@localhost` | contact address sent with each push |
 | `PORT` | `3001` | HTTP port |
 
 `apps/api/.env.example` lists all of them. With `TELEGRAM_API_MODE=custom` and no
