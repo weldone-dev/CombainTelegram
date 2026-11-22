@@ -74,6 +74,56 @@ export interface MessageHistoryView {
   nextOffsetId: number | null;
 }
 
+export interface FolderView {
+  id: number;
+  title: string;
+  emoticon: string | null;
+}
+
+export interface FoldersView {
+  folders: FolderView[];
+}
+
+export interface SearchUserView {
+  id: number;
+  title: string;
+  username: string | null;
+}
+
+export interface GlobalSearchView {
+  chats: ChatView[];
+  users: SearchUserView[];
+}
+
+export interface ChatSearchView {
+  messages: MessageView[];
+  nextOffsetId: number | null;
+}
+
+export interface ChatRemovedView {
+  removed: boolean;
+  cleared: number | null;
+}
+
+export interface ReadAllView {
+  read: number;
+}
+
+/** Body of `PATCH /accounts/:accountId/chats/:chatId`. */
+export interface ChatPatch {
+  pinned?: boolean;
+  muted?: boolean;
+  archived?: boolean;
+  unread?: boolean;
+  sessionId?: string;
+}
+
+/** Which slice of the dialog list the chat list is showing. */
+export type ChatFolderSelection =
+  | { kind: "all" }
+  | { kind: "archive" }
+  | { kind: "folder"; id: number };
+
 export interface ForwardResult {
   forwarded: number;
 }
