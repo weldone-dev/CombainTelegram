@@ -116,6 +116,8 @@ export interface MessageView {
   reactions?: MessageReactionView[] | null;
   poll?: MessagePollView | null;
   isVoice?: boolean;
+  /** Telegram service message; the transcript hides these empty bubbles. */
+  service?: boolean;
   thread?: MessageThreadInfo | null;
 }
 

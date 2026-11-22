@@ -53,6 +53,7 @@ describe('message DTO mapping', () => {
       reactions: [],
       poll: null,
       isVoice: false,
+      service: false,
       thread: null,
     });
   });

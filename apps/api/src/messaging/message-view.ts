@@ -171,6 +171,11 @@ export interface MessageView {
   /** Convenience flag for the voice-note UI (`media.kind === 'voice'`). */
   isVoice: boolean;
   /**
+   * Telegram service message (`messageService`, e.g. "history cleared").
+   * The dashboard hides these instead of rendering an empty bubble.
+   */
+  service?: boolean;
+  /**
    * Channel-post comment thread; `null` for everything that is not a channel
    * post with a linked discussion group.
    */
@@ -441,6 +446,7 @@ export function toMessageView(message: MessageLike): MessageView {
         ? toMessagePollView(message.media)
         : null,
     isVoice: message.media?.type === 'voice',
+    service: message.raw._ === 'messageService',
     thread: toMessageThreadInfo(message),
   };
 }

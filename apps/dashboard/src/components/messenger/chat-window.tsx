@@ -936,6 +936,7 @@ export function ChatWindow({
         )}
 
         {visible.map((message, index) => {
+          if (message.service) return null;
           const quoted = message.replyToId
             ? byId.get(message.replyToId)
             : undefined;

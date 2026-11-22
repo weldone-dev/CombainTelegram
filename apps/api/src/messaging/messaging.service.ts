@@ -708,6 +708,15 @@ export class MessagingService {
       sessionId,
     );
 
+    // `getHistory` resolves the peer from mtcute's local cache only; a chat
+    // restored from the UI/offline selection may not be cached in a fresh
+    // process yet, so warm it through the dialog-scan fallback first.
+    try {
+      await this.resolvePeerForChat(client, chatId);
+    } catch {
+      // Let getHistory below produce the canonical Telegram error.
+    }
+
     try {
       // `newerThanId` loads the *oldest unread* batch (`readInboxMaxId` as the
       // boundary) instead of the newest page, so opening a chat with a large
