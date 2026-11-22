@@ -8,8 +8,9 @@ import {
   useEffect,
   useState,
 } from "react";
-import { apiFetch, errorMessage } from "../../lib/api";
+import { ApiError, apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
+import { loadAccounts, saveAccounts } from "../../lib/offline-cache";
 import type { AccountView, RealtimeAuthDoneEvent } from "../../lib/types";
 import { useRealtime } from "../../lib/use-realtime";
 import { AddAccountModal } from "../messenger/add-account-modal";
@@ -46,9 +47,22 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     setAccountsLoading(true);
     setAccountsError(null);
     try {
-      setAccounts(await apiFetch<AccountView[]>("/accounts", {}));
+      const list = await apiFetch<AccountView[]>("/accounts", {});
+      setAccounts(list);
+      saveAccounts(list);
     } catch (error) {
-      setAccountsError(errorMessage(error));
+      // The API being unreachable looks the same as a real offline load from
+      // the browser's point of view, so the cached sidebar still renders.
+      const networkDown =
+        (typeof navigator !== "undefined" && !navigator.onLine) ||
+        (error instanceof ApiError && error.code === "NETWORK_ERROR");
+      const cached = networkDown ? loadAccounts() : null;
+      if (cached && cached.length > 0) {
+        setAccounts(cached);
+        setAccountsError(null);
+      } else {
+        setAccountsError(errorMessage(error));
+      }
     } finally {
       setAccountsLoading(false);
     }

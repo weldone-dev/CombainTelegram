@@ -1,16 +1,32 @@
-import type { ChatView, MessageView } from "./types";
+import type { AccountView, ChatView, MessageView } from "./types";
 
 /**
  * Small offline snapshot of the chats page.
  *
- * Only what the list and transcript need is stored: chat titles, unread
- * counters and the last messages. Logs, proxies, accounts, sessions and
- * anything from `/api/*` never go here.
+ * Only what the list and transcript need is stored: minimal account rows
+ * (id, names, username, isActive), chat titles, unread counters and the last
+ * messages. Logs, proxies, sessions, phone numbers, tokens and anything from
+ * `/api/*` never go here.
  */
 const STORAGE_KEY = "tg-offline-v1";
+const SELECTION_KEY = "tg-offline-selection";
 const VERSION = 1;
 const MAX_MESSAGES = 50;
 const MAX_BYTES = 2 * 1024 * 1024;
+
+/** The only account fields the sidebar needs; phone/sessions/device stay out. */
+export interface OfflineAccount {
+  id: string;
+  firstName: string;
+  lastName: string | null;
+  username: string | null;
+  isActive: boolean;
+}
+
+export interface OfflineSelection {
+  accountId: string;
+  chatId: number | null;
+}
 
 interface Snapshot<T> {
   /** Last write, used for LRU eviction. */
@@ -20,12 +36,13 @@ interface Snapshot<T> {
 
 interface OfflineStore {
   v: number;
+  accounts: Snapshot<OfflineAccount> | null;
   chats: Record<string, Snapshot<ChatView>>;
   messages: Record<string, Snapshot<MessageView>>;
 }
 
 function emptyStore(): OfflineStore {
-  return { v: VERSION, chats: {}, messages: {} };
+  return { v: VERSION, accounts: null, chats: {}, messages: {} };
 }
 
 function storage(): Storage | null {
@@ -47,6 +64,10 @@ function readStore(): OfflineStore | null {
     if (!parsed || parsed.v !== VERSION) return null;
     return {
       v: VERSION,
+      accounts:
+        parsed.accounts && Array.isArray(parsed.accounts.items)
+          ? parsed.accounts
+          : null,
       chats:
         parsed.chats && typeof parsed.chats === "object" ? parsed.chats : {},
       messages:
@@ -133,6 +154,93 @@ function mutate(change: (store: OfflineStore) => void): void {
   writeStore(store);
 }
 
+/** Remembers the minimal account rows used by the sidebar. */
+export function saveAccounts(accounts: AccountView[]): void {
+  const known = new Set(accounts.map((account) => account.id));
+  mutate((store) => {
+    store.accounts = {
+      at: Date.now(),
+      items: accounts.map((account) => ({
+        id: account.id,
+        firstName: account.firstName,
+        lastName: account.lastName,
+        username: account.username,
+        isActive: account.isActive,
+      })),
+    };
+    // Detached accounts must not leave their chats and transcripts behind.
+    for (const accountId of Object.keys(store.chats)) {
+      if (!known.has(accountId)) delete store.chats[accountId];
+    }
+    for (const key of Object.keys(store.messages)) {
+      if (!known.has(key.slice(0, key.indexOf(":")))) {
+        delete store.messages[key];
+      }
+    }
+  });
+}
+
+/**
+ * Cached accounts as full `AccountView` rows, with the non-cached fields
+ * neutral. Returns null when nothing was stored.
+ */
+export function loadAccounts(): AccountView[] | null {
+  const store = readStore();
+  const entry = store?.accounts;
+  if (!entry || !Array.isArray(entry.items)) return null;
+  return entry.items.map((account) => ({
+    id: account.id,
+    tgUserId: "",
+    firstName: account.firstName,
+    lastName: account.lastName ?? null,
+    username: account.username ?? null,
+    phoneMasked: null,
+    isActive: account.isActive === true,
+    createdAt: "",
+    lastUsedAt: null,
+    deviceProfile: null,
+    sessions: [],
+  }));
+}
+
+/** Remembers the last selected account/chat for offline restores. */
+export function saveSelection(accountId: string, chatId: number | null): void {
+  const target = storage();
+  if (!target) return;
+  try {
+    const selection: OfflineSelection = {
+      accountId,
+      chatId: typeof chatId === "number" ? chatId : null,
+    };
+    target.setItem(SELECTION_KEY, JSON.stringify(selection));
+  } catch {
+    // Best effort.
+  }
+}
+
+/** The last selected account/chat, or null when it is missing or malformed. */
+export function loadSelection(): OfflineSelection | null {
+  const target = storage();
+  if (!target) return null;
+  try {
+    const raw = target.getItem(SELECTION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<OfflineSelection> | null;
+    if (!parsed || typeof parsed.accountId !== "string" || !parsed.accountId) {
+      return null;
+    }
+    return {
+      accountId: parsed.accountId,
+      chatId:
+        typeof parsed.chatId === "number" && Number.isFinite(parsed.chatId)
+          ? parsed.chatId
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Remembers the latest chat list of one account. */
 export function saveChatList(accountId: string, chats: ChatView[]): void {
   mutate((store) => {
@@ -180,6 +288,7 @@ export function clearOfflineCache(): void {
   if (!target) return;
   try {
     target.removeItem(STORAGE_KEY);
+    target.removeItem(SELECTION_KEY);
   } catch {
     // Best effort.
   }

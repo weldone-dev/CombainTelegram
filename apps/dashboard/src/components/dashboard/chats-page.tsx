@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, errorMessage } from "../../lib/api";
+import { ApiError, apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
 import {
   INITIAL_CHAT_LIMIT,
@@ -20,8 +20,10 @@ import {
 import {
   loadChatList as loadCachedChatList,
   loadMessages as loadCachedMessages,
+  loadSelection,
   saveChatList,
   saveMessages,
+  saveSelection,
 } from "../../lib/offline-cache";
 import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
@@ -45,8 +47,11 @@ import { useAppData } from "./app-data";
 
 const LAST_ACCOUNT_KEY = "ct:last-account";
 
-function isOffline(): boolean {
-  return typeof navigator !== "undefined" && !navigator.onLine;
+function isOffline(error?: unknown): boolean {
+  if (typeof navigator !== "undefined" && !navigator.onLine) return true;
+  // A stopped API also fails with NETWORK_ERROR while navigator.onLine stays
+  // true, which must still restore the snapshot.
+  return error instanceof ApiError && error.code === "NETWORK_ERROR";
 }
 
 export function ChatsPage() {
@@ -95,19 +100,27 @@ export function ChatsPage() {
   const chatsRequestRef = useRef(0);
   const messagesRequestRef = useRef(0);
 
-  // Remember the last opened account and honor ?account=<id> links from the
-  // accounts page.
+  // Remember the last opened account/chat and honor ?account=<id> links from
+  // the accounts page. Offline, the selection comes from the snapshot so the
+  // cached transcript opens immediately.
   useEffect(() => {
-    const fromQuery = new URLSearchParams(window.location.search).get(
-      "account",
-    );
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = params.get("account");
+    const queryChat = Number.parseInt(params.get("chat") ?? "", 10);
     let fromStorage: string | null = null;
     try {
       fromStorage = window.localStorage.getItem(LAST_ACCOUNT_KEY);
     } catch {
       // Private mode or a blocked storage must not break the page.
     }
-    setSelectedAccountId(fromQuery ?? fromStorage);
+
+    const selection = loadSelection();
+    setSelectedAccountId(fromQuery ?? selection?.accountId ?? fromStorage);
+    if (Number.isFinite(queryChat)) {
+      setSelectedChatId(queryChat);
+    } else if (selection?.chatId != null) {
+      setSelectedChatId(selection.chatId);
+    }
   }, []);
 
   // Once the account list arrives, fall back to the first account.
@@ -127,7 +140,8 @@ export function ChatsPage() {
     } catch {
       // Preference persistence is best-effort.
     }
-  }, [selectedAccountId]);
+    saveSelection(selectedAccountId, selectedChatId);
+  }, [selectedAccountId, selectedChatId]);
 
   const markRead = useCallback(
     async (accountId: string, chatId: number, maxId?: number) => {
@@ -199,11 +213,15 @@ export function ChatsPage() {
         );
       } catch (error) {
         if (chatsRequestRef.current !== requestId) return;
-        const cached = isOffline() ? loadCachedChatList(accountId) : null;
+        const cached = isOffline(error) ? loadCachedChatList(accountId) : null;
         if (cached && cached.length > 0) {
           setChats(cached);
-          setChatsError(null);
           setOffline(true);
+          setSelectedChatId((current) =>
+            current !== null && cached.some((chat) => chat.id === current)
+              ? current
+              : null,
+          );
         } else {
           setChats([]);
           setChatsError(errorMessage(error));
@@ -252,7 +270,7 @@ export function ChatsPage() {
         setNextOffsetId(history.nextOffsetId);
       } catch (error) {
         if (messagesRequestRef.current !== requestId) return;
-        const cached = isOffline()
+        const cached = isOffline(error)
           ? loadCachedMessages(accountId, chatId)
           : null;
         if (cached && cached.length > 0) {
@@ -701,6 +719,7 @@ export function ChatsPage() {
     const handleOnline = () => {
       setOffline(false);
       setOfflineBannerDismissed(false);
+      void reloadAccounts();
       refreshChats();
       const accountId = selectedAccountIdRef.current;
       const chatId = selectedChatIdRef.current;
@@ -713,7 +732,7 @@ export function ChatsPage() {
       window.removeEventListener("offline", handleOffline);
       window.removeEventListener("online", handleOnline);
     };
-  }, [refreshChats, loadMessages]);
+  }, [reloadAccounts, refreshChats, loadMessages]);
 
   useEffect(() => {
     if (!selectedAccountId) {
@@ -931,6 +950,9 @@ export function ChatsPage() {
             <span className="flex min-w-0 items-center gap-2">
               <span className="truncate">
                 Нет сети — показаны сохранённые сообщения
+              </span>
+              <span className="hidden shrink-0 text-[11px] text-amber-300/70 sm:inline">
+                данные могут быть устаревшими
               </span>
               <button
                 type="button"
