@@ -44,6 +44,7 @@ export function ChatList({
   onDeleteChat,
   onReadAll,
   onOpenChat,
+  onOpenMessage,
   onResolveUsername,
 }: {
   chats: ChatView[];
@@ -70,6 +71,8 @@ export function ChatList({
   onReadAll: () => Promise<void>;
   /** Adds the chat to the list when missing and selects it. */
   onOpenChat: (chat: ChatView) => void;
+  /** Opens a message of the already selected chat without reloading it. */
+  onOpenMessage: (chatId: number, messageId: number) => void;
   /** Resolves `@name`/`name`/`t.me/name`; rejects on failure. */
   onResolveUsername: (username: string) => Promise<void>;
 }) {
@@ -309,7 +312,7 @@ export function ChatList({
             accountId={accountId}
             chatId={selectedId}
             chatTitle={selectedChat.title}
-            onOpenChat={onSelect}
+            onOpenChat={onOpenMessage}
           />
         )}
 

@@ -20,7 +20,7 @@ export function ChatSearchPanel({
   accountId: string;
   chatId: number;
   chatTitle: string;
-  onOpenChat: (chatId: number) => void;
+  onOpenChat: (chatId: number, messageId: number) => void;
 }) {
   const [value, setValue] = useState("");
   const [messages, setMessages] = useState<MessageView[]>([]);
@@ -124,7 +124,7 @@ export function ChatSearchPanel({
               type="button"
               onClick={() => {
                 setPickedId(message.id);
-                onOpenChat(chatId);
+                onOpenChat(chatId, message.id);
               }}
               title="Выбрать это сообщение в открытом чате"
               aria-label="Выбрать это сообщение в открытом чате"
