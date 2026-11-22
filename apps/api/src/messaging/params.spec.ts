@@ -1,6 +1,9 @@
 import {
+  extractFirstUrl,
   normalizeUsername,
+  parseChatInfoKind,
   parseFolderId,
+  parseLimit,
   parseMessageIds,
   parseOptionalBoolean,
   parseOptionalMessageId,
@@ -79,5 +82,36 @@ describe('folder and boolean params', () => {
     expect(() => parseOptionalBoolean('yes', 'archived')).toThrow(
       /must be a boolean/,
     );
+  });
+});
+
+describe('chat info params', () => {
+  it('accepts only known tab kinds', () => {
+    expect(parseChatInfoKind('media')).toBe('media');
+    expect(parseChatInfoKind('links')).toBe('links');
+    expect(parseChatInfoKind('polls')).toBe('polls');
+    expect(() => parseChatInfoKind('files')).toThrow(/kind must be one of/);
+    expect(() => parseChatInfoKind(undefined)).toThrow(/kind must be one of/);
+  });
+
+  it('caps the tab limit at 50', () => {
+    expect(parseLimit(undefined, 50)).toBe(50);
+    expect(parseLimit('10', 50)).toBe(10);
+    expect(parseLimit('500', 50)).toBe(50);
+    expect(() => parseLimit('0', 50)).toThrow(/positive integer/);
+  });
+
+  it('extracts the first URL and drops trailing punctuation', () => {
+    expect(extractFirstUrl('see https://example.com/a?b=1 now')).toBe(
+      'https://example.com/a?b=1',
+    );
+    expect(extractFirstUrl('(https://t.me/channel).')).toBe(
+      'https://t.me/channel',
+    );
+    expect(extractFirstUrl('www.example.com, then more')).toBe(
+      'www.example.com',
+    );
+    expect(extractFirstUrl('no links here')).toBeNull();
+    expect(extractFirstUrl('')).toBeNull();
   });
 });

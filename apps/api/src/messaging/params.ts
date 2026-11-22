@@ -51,14 +51,14 @@ export function parseMessageIds(value: unknown): number[] {
   return value.map((id) => parseMessageId(id, 'messageIds'));
 }
 
-/** `limit` query parameter: default 50, clamped to [1, 200]. */
-export function parseLimit(value: unknown): number {
+/** `limit` query parameter: default 50, clamped to [1, max] (default 200). */
+export function parseLimit(value: unknown, max = MAX_LIMIT): number {
   if (value === undefined || value === null || value === '') {
     return DEFAULT_LIMIT;
   }
   const limit = parseInteger(value, 'limit');
   if (limit <= 0) invalid('limit must be a positive integer');
-  return Math.min(limit, MAX_LIMIT);
+  return Math.min(limit, max);
 }
 
 export function parseOffsetId(value: unknown): number | undefined {
@@ -157,4 +157,49 @@ export function parseOptionalBoolean(
   if (value === 'true' || value === '1' || value === 1) return true;
   if (value === 'false' || value === '0' || value === 0) return false;
   return invalid(`${field} must be a boolean`);
+}
+
+export type ChatInfoKind = 'media' | 'links' | 'polls';
+
+const CHAT_INFO_KINDS: ChatInfoKind[] = ['media', 'links', 'polls'];
+
+/**
+ * `kind` of the chat-info tabs. An unknown/missing value is a clear
+ * `VALIDATION_ERROR` instead of silently falling back to `media`.
+ */
+export function parseChatInfoKind(value: unknown): ChatInfoKind {
+  if (
+    typeof value === 'string' &&
+    (CHAT_INFO_KINDS as string[]).includes(value)
+  ) {
+    return value as ChatInfoKind;
+  }
+  throw apiError(
+    'VALIDATION_ERROR',
+    'kind must be one of media, links, polls',
+    400,
+    { details: { allowed: CHAT_INFO_KINDS } },
+  );
+}
+
+const URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<>"'`]+/i;
+
+/**
+ * First URL in a message text, without trailing punctuation. Used by the
+ * `links` tab, where Telegram's URL filter guarantees there is at least one
+ * link but the text may still be prose around it.
+ */
+export function extractFirstUrl(text: string): string | null {
+  if (typeof text !== 'string') return null;
+  const match = URL_PATTERN.exec(text);
+  if (!match) return null;
+  let url = match[0].replace(/[.,;:!?…]+$/, '');
+  // Prose often wraps a link in parentheses: "(see https://t.me/x)".
+  while (
+    url.endsWith(')') &&
+    (url.match(/\)/g)?.length ?? 0) > (url.match(/\(/g)?.length ?? 0)
+  ) {
+    url = url.slice(0, -1).replace(/[.,;:!?…]+$/, '');
+  }
+  return url || null;
 }
