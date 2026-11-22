@@ -74,6 +74,10 @@ export interface MessageHistoryView {
   nextOffsetId: number | null;
 }
 
+export interface ForwardResult {
+  forwarded: number;
+}
+
 export interface ApiErrorBody {
   code: string;
   message: string;

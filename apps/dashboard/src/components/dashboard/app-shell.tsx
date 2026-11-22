@@ -3,6 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
+import {
+  type NotificationsState,
+  notificationsSupported,
+  readNotificationsEnabled,
+  writeNotificationsEnabled,
+} from "../../lib/notifications";
 import { useAppData } from "./app-data";
 
 interface NavItem {
@@ -31,9 +37,24 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const { accounts, notice, realtimeOnline } = useAppData();
   const [collapsed, setCollapsed] = useState(false);
+  const [notifications, setNotifications] = useState<NotificationsState>("off");
 
   useEffect(() => {
     setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1");
+  }, []);
+
+  // The permission may have been granted or denied outside this tab, so the
+  // stored preference is reconciled with the live permission on mount.
+  useEffect(() => {
+    if (!notificationsSupported()) {
+      setNotifications("unavailable");
+      return;
+    }
+    if (window.Notification.permission === "denied") {
+      setNotifications("unavailable");
+      return;
+    }
+    setNotifications(readNotificationsEnabled() ? "on" : "off");
   }, []);
 
   const toggle = () => {
@@ -43,6 +64,35 @@ export function AppShell({ children }: { children: ReactNode }) {
       return next;
     });
   };
+
+  const toggleNotifications = async () => {
+    if (notifications === "unavailable") return;
+    if (notifications === "on") {
+      writeNotificationsEnabled(false);
+      setNotifications("off");
+      return;
+    }
+    if (!notificationsSupported()) return;
+    let permission = window.Notification.permission;
+    if (permission === "default") {
+      // Permission is only ever requested from this user gesture.
+      permission = await window.Notification.requestPermission();
+    }
+    if (permission !== "granted") {
+      writeNotificationsEnabled(false);
+      setNotifications("unavailable");
+      return;
+    }
+    writeNotificationsEnabled(true);
+    setNotifications("on");
+  };
+
+  const notificationsLabel =
+    notifications === "on"
+      ? "Выключить уведомления"
+      : notifications === "unavailable"
+        ? "Уведомления недоступны: нет разрешения браузера"
+        : "Включить уведомления";
 
   const pageTitle = PAGE_TITLES[pathname] ?? "CombainTelegram";
 
@@ -121,13 +171,30 @@ export function AppShell({ children }: { children: ReactNode }) {
               Главная / {pageTitle}
             </span>
           </div>
-          <span className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
-            <span
-              className={`h-2 w-2 rounded-full ${
-                realtimeOnline ? "bg-emerald-500" : "bg-zinc-600"
+          <span className="flex shrink-0 items-center gap-3 text-xs text-zinc-500">
+            <button
+              type="button"
+              onClick={() => void toggleNotifications()}
+              disabled={notifications === "unavailable"}
+              title={notificationsLabel}
+              aria-label={notificationsLabel}
+              aria-pressed={notifications === "on"}
+              className={`rounded-md p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                notifications === "on"
+                  ? "text-sky-400 hover:bg-zinc-800 hover:text-sky-300"
+                  : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
               }`}
-            />
-            {realtimeOnline ? "real-time" : "офлайн"}
+            >
+              <BellIcon muted={notifications !== "on"} />
+            </button>
+            <span className="flex items-center gap-2">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  realtimeOnline ? "bg-emerald-500" : "bg-zinc-600"
+                }`}
+              />
+              {realtimeOnline ? "real-time" : "офлайн"}
+            </span>
           </span>
         </header>
 
@@ -140,6 +207,25 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       )}
     </div>
+  );
+}
+
+function BellIcon({ muted }: { muted: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-4 w-4"
+    >
+      <path d="M18 8a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6" />
+      <path d="M10.3 18a2 2 0 0 0 3.4 0" />
+      {muted && <path d="M3 3l18 18" />}
+    </svg>
   );
 }
 
