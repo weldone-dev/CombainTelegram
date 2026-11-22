@@ -4,12 +4,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
 import {
+  INITIAL_CHAT_LIMIT,
+  listChats,
+  listFolders,
+  markAllRead,
+  nextChatLimit,
+  removeChat,
+  resolveChat,
+  updateChat,
+} from "../../lib/messaging-api";
+import {
   notificationsReady,
   showMessageNotification,
 } from "../../lib/notifications";
 import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
+  ChatFolderSelection,
+  ChatPatch,
   ChatView,
+  FolderView,
   ForwardResult,
   MessageHistoryView,
   MessageView,
@@ -45,6 +58,11 @@ export function ChatsPage() {
   const [chatsLoading, setChatsLoading] = useState(false);
   const [chatsError, setChatsError] = useState<string | null>(null);
   const [selectedChatId, setSelectedChatId] = useState<number | null>(null);
+
+  const [folders, setFolders] = useState<FolderView[]>([]);
+  const [foldersLoading, setFoldersLoading] = useState(false);
+  const [folder, setFolder] = useState<ChatFolderSelection>({ kind: "all" });
+  const [chatLimit, setChatLimit] = useState(INITIAL_CHAT_LIMIT);
 
   const [messages, setMessages] = useState<MessageView[]>([]);
   const [nextOffsetId, setNextOffsetId] = useState<number | null>(null);
@@ -105,25 +123,43 @@ export function ChatsPage() {
     [],
   );
 
-  const loadChats = useCallback(async (accountId: string) => {
-    setChatsLoading(true);
-    setChatsError(null);
+  const loadChats = useCallback(
+    async (
+      accountId: string,
+      options: { limit: number; folder: ChatFolderSelection },
+    ) => {
+      setChatsLoading(true);
+      setChatsError(null);
+      try {
+        const list = await listChats(accountId, {
+          limit: options.limit,
+          folder: options.folder,
+        });
+        setChats(list);
+        setSelectedChatId((current) =>
+          current !== null && list.some((chat) => chat.id === current)
+            ? current
+            : null,
+        );
+      } catch (error) {
+        setChats([]);
+        setChatsError(errorMessage(error));
+      } finally {
+        setChatsLoading(false);
+      }
+    },
+    [],
+  );
+
+  const loadFolders = useCallback(async (accountId: string) => {
+    setFoldersLoading(true);
     try {
-      const list = await apiFetch<ChatView[]>(
-        `/accounts/${accountId}/chats?limit=50`,
-        {},
-      );
-      setChats(list);
-      setSelectedChatId((current) =>
-        current !== null && list.some((chat) => chat.id === current)
-          ? current
-          : null,
-      );
-    } catch (error) {
-      setChats([]);
-      setChatsError(errorMessage(error));
+      setFolders(await listFolders(accountId));
+    } catch {
+      // Folders are optional: "Все" and "Архив" always work.
+      setFolders([]);
     } finally {
-      setChatsLoading(false);
+      setFoldersLoading(false);
     }
   }, []);
 
@@ -347,21 +383,157 @@ export function ChatsPage() {
     setNextOffsetId(null);
     setMessagesError(null);
     setTyping({});
+    // Folder and paging state belong to one account only.
+    setFolder({ kind: "all" });
+    setChatLimit(INITIAL_CHAT_LIMIT);
   }, []);
 
   const handleSelectChat = useCallback((chatId: number) => {
     setSelectedChatId(chatId);
   }, []);
 
+  const handleSelectFolder = useCallback((selection: ChatFolderSelection) => {
+    setFolder(selection);
+    setChatLimit(INITIAL_CHAT_LIMIT);
+  }, []);
+
+  const applyChatPatch = useCallback(
+    async (chatId: number, patch: ChatPatch) => {
+      if (!selectedAccountId) throw new Error("Аккаунт не выбран");
+      const updated = await updateChat(selectedAccountId, chatId, patch);
+      setChats((previous) =>
+        previous.map((chat) => (chat.id === chatId ? updated : chat)),
+      );
+    },
+    [selectedAccountId],
+  );
+
+  const markChatRead = useCallback(
+    async (chatId: number) => {
+      if (!selectedAccountId) throw new Error("Аккаунт не выбран");
+      await apiFetch(`/accounts/${selectedAccountId}/chats/${chatId}/read`, {
+        method: "POST",
+        body: {},
+      });
+      setChats((previous) =>
+        previous.map((chat) =>
+          chat.id === chatId ? { ...chat, unreadCount: 0 } : chat,
+        ),
+      );
+    },
+    [selectedAccountId],
+  );
+
+  const clearChatHistory = useCallback(
+    async (chatId: number) => {
+      if (!selectedAccountId) throw new Error("Аккаунт не выбран");
+      const result = await removeChat(selectedAccountId, chatId, {
+        clearHistory: true,
+      });
+      setChats((previous) =>
+        previous.map((chat) =>
+          chat.id === chatId
+            ? { ...chat, lastMessage: null, unreadCount: 0 }
+            : chat,
+        ),
+      );
+      if (selectedChatIdRef.current === chatId) setMessages([]);
+      showNotice(
+        result.cleared !== null && result.cleared > 0
+          ? `История очищена (сообщений: ${result.cleared})`
+          : "История чата очищена",
+      );
+    },
+    [selectedAccountId, showNotice],
+  );
+
+  const deleteChatRow = useCallback(
+    async (chatId: number) => {
+      if (!selectedAccountId) throw new Error("Аккаунт не выбран");
+      await removeChat(selectedAccountId, chatId, { revoke: true });
+      setChats((previous) => previous.filter((chat) => chat.id !== chatId));
+      if (selectedChatIdRef.current === chatId) {
+        setSelectedChatId(null);
+        setMessages([]);
+        setNextOffsetId(null);
+      }
+      showNotice("Чат удалён");
+    },
+    [selectedAccountId, showNotice],
+  );
+
+  const markAllChatsRead = useCallback(async () => {
+    if (!selectedAccountId) throw new Error("Аккаунт не выбран");
+    const result = await markAllRead(selectedAccountId);
+    setChats((previous) =>
+      previous.map((chat) =>
+        chat.unreadCount === 0 ? chat : { ...chat, unreadCount: 0 },
+      ),
+    );
+    showNotice(
+      result.read > 0
+        ? `Прочитано чатов: ${result.read}`
+        : "Непрочитанных чатов нет",
+    );
+  }, [selectedAccountId, showNotice]);
+
+  /** Adds a chat that is not in the current page (search/resolve hit) and opens it. */
+  const openChat = useCallback((chat: ChatView) => {
+    setChats((previous) => {
+      const existing = previous.find((item) => item.id === chat.id);
+      if (!existing) return [chat, ...previous];
+      return previous.map((item) =>
+        item.id === chat.id
+          ? {
+              ...item,
+              ...chat,
+              lastMessage: chat.lastMessage ?? item.lastMessage,
+              unreadCount: Math.max(item.unreadCount, chat.unreadCount),
+            }
+          : item,
+      );
+    });
+    setSelectedChatId(chat.id);
+  }, []);
+
+  const resolveAndOpen = useCallback(
+    async (username: string) => {
+      if (!selectedAccountId) throw new Error("Аккаунт не выбран");
+      const chat = await resolveChat(selectedAccountId, username);
+      openChat(chat);
+    },
+    [selectedAccountId, openChat],
+  );
+
+  const refreshChats = useCallback(() => {
+    if (!selectedAccountId) return;
+    void loadChats(selectedAccountId, { limit: chatLimit, folder });
+    void loadFolders(selectedAccountId);
+  }, [selectedAccountId, chatLimit, folder, loadChats, loadFolders]);
+
+  const loadMoreChats = useCallback(() => {
+    const next = nextChatLimit(chatLimit);
+    if (next !== null) setChatLimit(next);
+  }, [chatLimit]);
+
   useEffect(() => {
     if (!selectedAccountId) {
       setChats([]);
       setChatsError(null);
       setSelectedChatId(null);
+      setFolders([]);
       return;
     }
-    void loadChats(selectedAccountId);
-  }, [selectedAccountId, loadChats]);
+    void loadChats(selectedAccountId, { limit: chatLimit, folder });
+  }, [selectedAccountId, folder, chatLimit, loadChats]);
+
+  useEffect(() => {
+    if (!selectedAccountId) {
+      setFolders([]);
+      return;
+    }
+    void loadFolders(selectedAccountId);
+  }, [selectedAccountId, loadFolders]);
 
   useEffect(() => {
     if (selectedAccountId === null || selectedChatId === null) {
@@ -553,9 +725,23 @@ export function ChatsPage() {
           selectedAccount ? accountName(selectedAccount) : "Аккаунт не выбран"
         }
         accountId={selectedAccount?.id ?? null}
-        onRefresh={() =>
-          selectedAccountId ? void loadChats(selectedAccountId) : undefined
+        onRefresh={refreshChats}
+        folders={folders}
+        foldersLoading={foldersLoading}
+        selectedFolder={folder}
+        onSelectFolder={handleSelectFolder}
+        canLoadMore={
+          nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
         }
+        loadingMore={chatsLoading}
+        onLoadMore={loadMoreChats}
+        onUpdateChat={applyChatPatch}
+        onMarkRead={markChatRead}
+        onClearHistory={clearChatHistory}
+        onDeleteChat={deleteChatRow}
+        onReadAll={markAllChatsRead}
+        onOpenChat={openChat}
+        onResolveUsername={resolveAndOpen}
       />
 
       <ChatWindow
