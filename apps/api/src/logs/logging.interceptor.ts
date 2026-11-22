@@ -11,7 +11,11 @@ import { randomUUID } from "node:crypto";
 import { Observable, catchError, tap, throwError } from "rxjs";
 import { LogsService } from "./logs.service.js";
 import type { LogSource } from "./log-sink.js";
-import { sanitizeDetails } from "./log-sanitize.js";
+import {
+  redactMessageBody,
+  sanitizeDetails,
+  sanitizeQueryForLog,
+} from "./log-sanitize.js";
 import { runWithLogContext } from "./log-context.js";
 import type { LogRequestContext } from "./log-context.js";
 
@@ -36,6 +40,7 @@ interface HttpResponseLike {
 const CONTROLLER_SOURCES: Record<string, LogSource> = {
   AccountsController: "accounts",
   MessagingController: "messaging",
+  MessagingSearchController: "messaging",
   ProxiesController: "proxy",
   PhoneAuthController: "auth",
   QrAuthController: "auth",
@@ -78,7 +83,7 @@ export class LoggingInterceptor implements NestInterceptor {
       method,
       path: pathOnly(request.originalUrl ?? request.url),
       params: request.params ?? {},
-      query: request.query ?? {},
+      query: sanitizeQueryForLog(request.query ?? {}),
       body: bodyForLog(request),
       ip: request.ip,
       userAgent: headerValue(request.headers["user-agent"]),
@@ -188,7 +193,7 @@ function bodyForLog(request: HttpRequestLike): unknown {
   if (contentType.includes("multipart/form-data")) {
     return "[upload]";
   }
-  return sanitizeDetails(request.body);
+  return redactMessageBody(request.body);
 }
 
 /** Auth/proxy endpoints name the proxy in the body; sessions are resolved later. */

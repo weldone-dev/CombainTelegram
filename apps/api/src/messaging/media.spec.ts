@@ -1,9 +1,12 @@
 import {
   MAX_MEDIA_BYTES,
+  assertMediaDownloadSize,
   assertMediaUpload,
   contentDisposition,
   isImageMime,
+  isInlineSafeMime,
   mediaKindForMime,
+  normalizeMimeType,
   sanitizeFileName,
 } from './media.js';
 
@@ -16,6 +19,32 @@ describe('media MIME helpers', () => {
     expect(mediaKindForMime(undefined)).toBe('document');
     expect(isImageMime('image/webp')).toBe(true);
     expect(isImageMime('video/mp4')).toBe(false);
+  });
+});
+
+describe('media response MIME allow-list', () => {
+  it('only lets raster images render inline', () => {
+    expect(isInlineSafeMime('image/jpeg')).toBe(true);
+    expect(isInlineSafeMime('IMAGE/PNG')).toBe(true);
+    expect(isInlineSafeMime('image/webp')).toBe(true);
+    expect(isInlineSafeMime('image/gif')).toBe(true);
+    expect(isInlineSafeMime('image/svg+xml')).toBe(false);
+    expect(isInlineSafeMime('text/html')).toBe(false);
+    expect(isInlineSafeMime('application/pdf')).toBe(false);
+    expect(isInlineSafeMime(null)).toBe(false);
+  });
+
+  it('rejects header-breaking or malformed MIME values', () => {
+    expect(normalizeMimeType('application/pdf')).toBe('application/pdf');
+    expect(normalizeMimeType(' Text/HTML ')).toBe('text/html');
+    expect(normalizeMimeType('image/svg+xml; charset=utf-8')).toBe(
+      'application/octet-stream',
+    );
+    expect(normalizeMimeType('image/jpeg\r\nX-Evil: 1')).toBe(
+      'application/octet-stream',
+    );
+    expect(normalizeMimeType('not-a-mime')).toBe('application/octet-stream');
+    expect(normalizeMimeType(null)).toBe('application/octet-stream');
   });
 });
 
@@ -44,6 +73,21 @@ describe('media filename helpers', () => {
     expect(contentDisposition('a"b\r\nc.txt', false)).toContain(
       'filename="a_bc.txt"',
     );
+  });
+
+  it('slices by code points and escapes RFC 5987 attr-chars', () => {
+    // 254 ASCII chars followed by an emoji: the cut must not split its pair.
+    const name = `${'a'.repeat(254)}😀`;
+    const sanitized = sanitizeFileName(name, 'file');
+    expect(Array.from(sanitized)).toHaveLength(255);
+    expect(() => contentDisposition(sanitized, false)).not.toThrow();
+
+    const disposition = contentDisposition("it's (a) *file*.txt", false);
+    expect(disposition).not.toMatch(/filename\*=UTF-8''[^;]*['()*]/);
+    expect(disposition).toContain('%27');
+    expect(disposition).toContain('%28');
+    expect(disposition).toContain('%29');
+    expect(disposition).toContain('%2A');
   });
 });
 
@@ -77,5 +121,26 @@ describe('upload size validation', () => {
 
   it('accepts a normal file', () => {
     expect(() => assertMediaUpload(1024)).not.toThrow();
+  });
+});
+
+describe('download size validation', () => {
+  it('rejects media above the limit before downloading as MEDIA_TOO_LARGE', () => {
+    expect(() => assertMediaDownloadSize(MAX_MEDIA_BYTES + 1)).toThrow(
+      /at most/,
+    );
+    try {
+      assertMediaDownloadSize(MAX_MEDIA_BYTES + 1);
+    } catch (error) {
+      expect((error as { getResponse(): unknown }).getResponse()).toMatchObject(
+        { code: 'MEDIA_TOO_LARGE' },
+      );
+      expect((error as { getStatus(): number }).getStatus()).toBe(413);
+    }
+  });
+
+  it('allows unknown and in-limit sizes', () => {
+    expect(() => assertMediaDownloadSize(null)).not.toThrow();
+    expect(() => assertMediaDownloadSize(MAX_MEDIA_BYTES)).not.toThrow();
   });
 });

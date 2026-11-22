@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   InputMedia,
   SearchFilters,
+  type Dialog,
   type Message,
   type Peer,
   type SendableTypingStatus,
@@ -13,16 +14,21 @@ import type { AvatarImage } from '../accounts/accounts.service.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
 import {
-  MEDIA_CACHE_MAX_ENTRIES,
+  MEDIA_CACHE_MAX_BYTES,
+  MEDIA_CACHE_MAX_ENTRY_BYTES,
   MEDIA_CACHE_TTL_MS,
+  assertMediaDownloadSize,
   assertMediaUpload,
   contentDisposition,
   isImageMime,
+  isInlineSafeMime,
   mediaKindForMime,
+  normalizeMimeType,
   sanitizeFileName,
 } from './media.js';
 import {
   canSendMessages,
+  mergeDialogsById,
   toChatView,
   toChatViewFromPeer,
   toFolderView,
@@ -164,15 +170,19 @@ export interface FoldersView {
 
 export interface ChatRemovedView {
   removed: boolean;
-  cleared: number | null;
 }
 
 export interface ReadAllView {
   read: number;
+  failed: number;
 }
 
 /** Upper bound for `POST /chats/read-all` to keep the fan-out bounded. */
 const MAX_READ_ALL_DIALOGS = 200;
+/** Concurrent `readHistory` calls per batch in `read-all`. */
+const READ_ALL_BATCH_SIZE = 10;
+/** Small avatars are cheap to keep, but the map must still be bounded. */
+const AVATAR_CACHE_MAX_ENTRIES = 100;
 
 /** `limit` cap for the chat info tabs. */
 const CHAT_INFO_LIMIT = 50;
@@ -286,6 +296,14 @@ function parseTypingStatus(value: unknown): AllowedTypingStatus {
  */
 const AVATAR_TTL_MS = 10 * 60 * 1000;
 
+interface DownloadCacheEntry {
+  data: Buffer;
+  mimeType: string;
+  fileName: string;
+  inline: boolean;
+  at: number;
+}
+
 @Injectable()
 export class MessagingService {
   private readonly avatars = new Map<
@@ -293,18 +311,63 @@ export class MessagingService {
     { data: Buffer | null; at: number }
   >();
 
-  private readonly downloads = new Map<
-    string,
-    {
-      data: Buffer;
-      mimeType: string;
-      fileName: string;
-      inline: boolean;
-      at: number;
-    }
-  >();
+  private readonly downloads = new Map<string, DownloadCacheEntry>();
+  /** Sum of `data.byteLength` over `downloads`, kept in sync with every write. */
+  private downloadBytes = 0;
 
   constructor(private readonly accounts: AccountsService) {}
+
+  private pruneAvatars(now: number): void {
+    for (const [key, entry] of this.avatars) {
+      if (now - entry.at >= AVATAR_TTL_MS) this.avatars.delete(key);
+    }
+    while (this.avatars.size > AVATAR_CACHE_MAX_ENTRIES) {
+      const oldest = this.avatars.keys().next().value;
+      if (oldest === undefined) break;
+      this.avatars.delete(oldest);
+    }
+  }
+
+  private setAvatar(
+    key: string,
+    data: Buffer | null,
+    now = Date.now(),
+  ): void {
+    this.avatars.delete(key);
+    this.avatars.set(key, { data, at: now });
+    this.pruneAvatars(now);
+  }
+
+  private forgetDownload(key: string): void {
+    const entry = this.downloads.get(key);
+    if (!entry) return;
+    this.downloads.delete(key);
+    this.downloadBytes -= entry.data.byteLength;
+    if (this.downloadBytes < 0) this.downloadBytes = 0;
+  }
+
+  private rememberDownload(
+    key: string,
+    entry: DownloadCacheEntry,
+  ): void {
+    this.forgetDownload(key);
+    // Huge documents are served but not retained; one of them could evict the
+    // whole cache and keep hundreds of MB resident.
+    if (entry.data.byteLength > MEDIA_CACHE_MAX_ENTRY_BYTES) return;
+    this.downloads.set(key, entry);
+    this.downloadBytes += entry.data.byteLength;
+
+    for (const [cachedKey, cached] of this.downloads) {
+      if (entry.at - cached.at >= MEDIA_CACHE_TTL_MS) {
+        this.forgetDownload(cachedKey);
+      }
+    }
+    while (this.downloadBytes > MEDIA_CACHE_MAX_BYTES) {
+      const oldest = this.downloads.keys().next().value;
+      if (oldest === undefined) break;
+      this.forgetDownload(oldest);
+    }
+  }
 
   async listChats(
     userId: string,
@@ -333,16 +396,31 @@ export class MessagingService {
       archived === true ? 'only' : archived === false ? 'exclude' : 'keep';
 
     try {
-      const chats: ChatView[] = [];
-      for await (const dialog of client.iterDialogs({
-        limit,
-        archived: archivedMode,
-        ...(folderId !== undefined ? { folder: folderId } : {}),
-      })) {
-        chats.push(toChatView(dialog));
-        if (chats.length >= limit) break;
+      // mtcute maps `archived: 'keep'` to `folderId = undefined`, i.e. the
+      // main folder only — it never asks Telegram for folder 1 (archive). To
+      // really cover every folder, fetch main and archive separately and merge.
+      const modes: Array<'exclude' | 'only' | 'keep'> =
+        folderId === undefined && archivedMode === 'keep'
+          ? ['exclude', 'only']
+          : [archivedMode];
+
+      const groups: Array<Array<Dialog>> = [];
+      for (const mode of modes) {
+        const group: Array<Dialog> = [];
+        for await (const dialog of client.iterDialogs({
+          limit,
+          archived: mode,
+          ...(folderId !== undefined ? { folder: folderId } : {}),
+        })) {
+          group.push(dialog);
+          if (group.length >= limit) break;
+        }
+        groups.push(group);
       }
-      return chats;
+
+      return mergeDialogsById(groups, limit).map((dialog) =>
+        toChatView(dialog),
+      );
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -584,18 +662,19 @@ export class MessagingService {
     sessionIdParam?: unknown,
   ): Promise<AvatarImage | null> {
     const chatId = parseChatId(rawChatId);
-    const key = `${accountId}:${chatId}`;
-    const cached = this.avatars.get(key);
-    if (cached && Date.now() - cached.at < AVATAR_TTL_MS) {
-      return cached.data ? { data: cached.data, mime: 'image/jpeg' } : null;
-    }
-
+    // Ownership/session check first: a cache hit must not bypass it.
     const sessionId = parseOptionalSessionId(sessionIdParam);
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
       sessionId,
     );
+
+    const key = `${userId}:${accountId}:${chatId}`;
+    const cached = this.avatars.get(key);
+    if (cached && Date.now() - cached.at < AVATAR_TTL_MS) {
+      return cached.data ? { data: cached.data, mime: 'image/jpeg' } : null;
+    }
 
     let photo: { small: unknown } | null = null;
     try {
@@ -605,7 +684,7 @@ export class MessagingService {
       raiseTelegramError(error);
     }
     if (!photo) {
-      this.avatars.set(key, { data: null, at: Date.now() });
+      this.setAvatar(key, null);
       return null;
     }
 
@@ -615,7 +694,7 @@ export class MessagingService {
           photo.small as Parameters<typeof client.downloadAsBuffer>[0],
         ),
       );
-      this.avatars.set(key, { data, at: Date.now() });
+      this.setAvatar(key, data);
       return { data, mime: 'image/jpeg' };
     } catch (error) {
       raiseTelegramError(error);
@@ -790,7 +869,14 @@ export class MessagingService {
     const chatId = parseChatId(rawChatId);
     const messageId = parseMessageId(rawMessageId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
-    const cacheKey = `${accountId}:${chatId}:${messageId}`;
+    const cacheKey = `${userId}:${accountId}:${chatId}:${messageId}`;
+
+    // Ownership/session check first: a cache hit must not bypass it.
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
 
     let cached = this.downloads.get(cacheKey);
     if (cached && Date.now() - cached.at < MEDIA_CACHE_TTL_MS) {
@@ -819,12 +905,6 @@ export class MessagingService {
       };
     }
 
-    const { client } = await this.accounts.resolveSession(
-      userId,
-      accountId,
-      sessionId,
-    );
-
     let message: Message | null = null;
     try {
       [message] = await client.getMessages(chatId, [messageId]);
@@ -846,13 +926,18 @@ export class MessagingService {
       );
     }
 
+    // Telegram documents may be gigabytes; reject before buffering anything.
+    assertMediaDownloadSize(descriptor.size);
+
     try {
       const data = Buffer.from(await client.downloadAsBuffer(media));
-      const mimeType =
+      // Never echo the sender's MIME verbatim: `image/svg+xml` would be
+      // executable on this origin. Invalid values become octet-stream, and
+      // only raster images are served `inline`.
+      const mimeType = normalizeMimeType(
         descriptor.mimeType ??
-        (descriptor.kind === 'photo'
-          ? 'image/jpeg'
-          : 'application/octet-stream');
+          (descriptor.kind === 'photo' ? 'image/jpeg' : null),
+      );
       const defaultFileName = sanitizeFileName(
         descriptor.fileName,
         descriptor.kind === 'photo' ? 'photo.jpg' : 'document',
@@ -861,21 +946,15 @@ export class MessagingService {
         requestedName ?? defaultFileName,
         defaultFileName,
       );
-      const inline = isImageMime(mimeType);
+      const inline = isInlineSafeMime(mimeType);
 
-      this.downloads.delete(cacheKey);
-      this.downloads.set(cacheKey, {
+      this.rememberDownload(cacheKey, {
         data,
         mimeType,
         fileName: defaultFileName,
         inline,
         at: Date.now(),
       });
-      while (this.downloads.size > MEDIA_CACHE_MAX_ENTRIES) {
-        const oldest = this.downloads.keys().next().value;
-        if (oldest === undefined) break;
-        this.downloads.delete(oldest);
-      }
 
       return {
         data,
@@ -1153,8 +1232,8 @@ export class MessagingService {
           peer: { _: 'inputNotifyPeer', peer },
           settings: {
             _: 'inputPeerNotifySettings',
-            silent: muted,
-            // 0x7FFFFFFF means "muted forever"; 0 clears the mute.
+            // `silent` means "no sound", not "muted" — official clients set
+            // only `muteUntil` (0x7FFFFFFF = muted forever, 0 clears it).
             muteUntil: muted ? 0x7fffffff : 0,
           },
         });
@@ -1207,8 +1286,10 @@ export class MessagingService {
 
     try {
       if (clearHistory) {
+        // mtcute's `deleteHistory` resolves `void` (no affected-message count),
+        // so there is nothing meaningful to report besides `removed: false`.
         await client.deleteHistory(chatId, { mode: 'clear' });
-        return { removed: false, cleared: null };
+        return { removed: false };
       }
 
       const peer = await client.getPeer(chatId);
@@ -1222,7 +1303,7 @@ export class MessagingService {
       } else {
         await client.leaveChat(chatId, { clear: revoke });
       }
-      return { removed: true, cleared: null };
+      return { removed: true };
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -1242,17 +1323,41 @@ export class MessagingService {
     );
 
     try {
+      // `archived: 'keep'` only fetches folder 0 in mtcute, so ask for the
+      // main and archive folders explicitly and merge (dedupe pinned repeats).
+      const groups: Array<Array<Dialog>> = [];
+      for (const archived of ['exclude', 'only'] as const) {
+        const group: Array<Dialog> = [];
+        for await (const dialog of client.iterDialogs({
+          limit: MAX_READ_ALL_DIALOGS,
+          archived,
+          pinned: 'exclude',
+        })) {
+          group.push(dialog);
+          if (group.length >= MAX_READ_ALL_DIALOGS) break;
+        }
+        groups.push(group);
+      }
+
+      const unread = mergeDialogsById(groups, MAX_READ_ALL_DIALOGS).filter(
+        (dialog) => dialog.unreadCount > 0 || dialog.isManuallyUnread,
+      );
+
+      // Batches keep one flood-waited dialog from aborting everything that
+      // follows; partial failures are reported instead of thrown.
       let read = 0;
-      for await (const dialog of client.iterDialogs({
-        limit: MAX_READ_ALL_DIALOGS,
-        archived: 'keep',
-      })) {
-        if (dialog.unreadCount > 0 || dialog.isManuallyUnread) {
-          await client.readHistory(dialog.peer.inputPeer);
-          read += 1;
+      let failed = 0;
+      for (let i = 0; i < unread.length; i += READ_ALL_BATCH_SIZE) {
+        const batch = unread.slice(i, i + READ_ALL_BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map((dialog) => client.readHistory(dialog.peer.inputPeer)),
+        );
+        for (const result of results) {
+          if (result.status === 'fulfilled') read += 1;
+          else failed += 1;
         }
       }
-      return { read };
+      return { read, failed };
     } catch (error) {
       raiseTelegramError(error);
     }

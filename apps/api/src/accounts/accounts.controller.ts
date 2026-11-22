@@ -52,7 +52,8 @@ export class AccountsController {
 
   @Get(':id/avatar')
   @Header('Content-Type', 'image/jpeg')
-  @Header('Cache-Control', 'public, max-age=600')
+  @Header('Cache-Control', 'private, max-age=600')
+  @Header('X-Content-Type-Options', 'nosniff')
   async avatar(
     @CurrentUser() user: UserModel,
     @Param('id') id: string,

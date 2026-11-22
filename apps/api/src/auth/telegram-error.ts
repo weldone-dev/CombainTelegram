@@ -76,6 +76,58 @@ const SIMPLE: Record<string, SimpleMapping> = {
     message: 'The QR login token is invalid',
     status: HttpStatus.BAD_REQUEST,
   },
+  // Messaging errors. These used to fall through to TELEGRAM_ERROR/502 with
+  // the raw Telegram text, which hid the real reason from the UI.
+  CHAT_WRITE_FORBIDDEN: {
+    code: 'CHAT_WRITE_FORBIDDEN',
+    message: 'You cannot write in this chat',
+    status: HttpStatus.FORBIDDEN,
+  },
+  CHAT_ADMIN_REQUIRED: {
+    code: 'CHAT_ADMIN_REQUIRED',
+    message: 'Admin rights are required for this action',
+    status: HttpStatus.FORBIDDEN,
+  },
+  CHANNEL_PRIVATE: {
+    code: 'CHANNEL_PRIVATE',
+    message: 'This channel is private or you are not a member',
+    status: HttpStatus.FORBIDDEN,
+  },
+  CHAT_FORBIDDEN: {
+    code: 'CHAT_FORBIDDEN',
+    message: 'You are not a member of this chat',
+    status: HttpStatus.FORBIDDEN,
+  },
+  CHAT_RESTRICTED: {
+    code: 'CHAT_RESTRICTED',
+    message: 'Your account is restricted in this chat',
+    status: HttpStatus.FORBIDDEN,
+  },
+  CHAT_SEND_MEDIA_FORBIDDEN: {
+    code: 'CHAT_SEND_MEDIA_FORBIDDEN',
+    message: 'Sending media is not allowed in this chat',
+    status: HttpStatus.FORBIDDEN,
+  },
+  USER_BANNED_IN_CHANNEL: {
+    code: 'USER_BANNED_IN_CHANNEL',
+    message: 'You are banned in this channel',
+    status: HttpStatus.FORBIDDEN,
+  },
+  MESSAGE_ID_INVALID: {
+    code: 'MESSAGE_ID_INVALID',
+    message: 'This message does not exist or is not accessible',
+    status: HttpStatus.BAD_REQUEST,
+  },
+  MESSAGE_EDIT_TIME_EXPIRED: {
+    code: 'MESSAGE_EDIT_TIME_EXPIRED',
+    message: 'This message is too old to edit',
+    status: HttpStatus.BAD_REQUEST,
+  },
+  PEER_ID_INVALID: {
+    code: 'PEER_ID_INVALID',
+    message: 'This chat was not found',
+    status: HttpStatus.BAD_REQUEST,
+  },
 };
 
 /** opentele2 flow errors are plain objects with a stable `code`. */

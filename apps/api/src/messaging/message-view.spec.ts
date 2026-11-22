@@ -1,5 +1,6 @@
 import {
   canSendMessages,
+  mergeDialogsById,
   toChatView,
   toChatViewFromPeer,
   toFolderView,
@@ -232,6 +233,34 @@ describe('message DTO mapping', () => {
       archived: true,
       canSendMessages: true,
     });
+  });
+});
+
+describe('mergeDialogsById', () => {
+  const dialog = (id: number) => ({ peer: { id } });
+
+  it('merges main and archive folders without duplicates', () => {
+    const merged = mergeDialogsById([
+      [dialog(1), dialog(2)],
+      [dialog(2), dialog(3)],
+    ]);
+    expect(merged.map((entry) => entry.peer.id)).toEqual([1, 2, 3]);
+  });
+
+  it('keeps the first occurrence order and honours the limit', () => {
+    const merged = mergeDialogsById(
+      [
+        [dialog(10), dialog(11)],
+        [dialog(11), dialog(12), dialog(13)],
+      ],
+      3,
+    );
+    expect(merged.map((entry) => entry.peer.id)).toEqual([10, 11, 12]);
+  });
+
+  it('handles empty folders and a zero limit', () => {
+    expect(mergeDialogsById([[], []])).toEqual([]);
+    expect(mergeDialogsById([[dialog(1)]], 0)).toEqual([]);
   });
 });
 

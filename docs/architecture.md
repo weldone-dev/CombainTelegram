@@ -270,21 +270,29 @@ GET    /accounts/:accountId/chats/:chatId/info/media?kind=&limit=&offsetId=  med
 GET    /accounts/:accountId/chats/:chatId/info/similar          similar channels
 GET    /accounts/:accountId/chats/:chatId/avatar                JPEG chat photo (404 if none)
 GET    /accounts/:accountId/chats/:chatId/messages?limit=50&offsetId=&newerThanId=&sessionId=
+GET    /accounts/:accountId/chats/:chatId/messages/:messageId/media?filename=&sessionId=  download attachment
 GET    /accounts/:accountId/chats/:chatId/search?q=&limit=&offsetId=&sessionId=
 POST   /accounts/:accountId/chats/:chatId/messages             { text, replyToId?, sessionId? }
+POST   /accounts/:accountId/chats/:chatId/media                multipart `file` (≤ 50 MB) + caption?, replyToId?  → 413 PAYLOAD_TOO_LARGE
 POST   /accounts/:accountId/chats/:chatId/forward              { fromChatId, messageIds[1..100], sessionId? }
 PATCH  /accounts/:accountId/chats/:chatId                      { pinned?, muted?, archived?, unread?, sessionId? }
 DELETE /accounts/:accountId/chats/:chatId?revoke=&clearHistory=&sessionId=
-POST   /accounts/:accountId/chats/read-all                     { sessionId? }
+POST   /accounts/:accountId/chats/read-all                     { sessionId? } → { read, failed }
 PATCH  /accounts/:accountId/chats/:chatId/messages/:messageId  { text, sessionId? }
 DELETE /accounts/:accountId/chats/:chatId/messages/:messageId?sessionId=
 POST   /accounts/:accountId/chats/:chatId/read                 { maxId?, sessionId? }
 POST   /accounts/:accountId/chats/:chatId/typing               { status?, sessionId? }
 ```
 
-Chats are mapped from `iterDialogs({ limit, archived: 'keep' })`:
-`{ id, type, title, username, lastMessage, unreadCount, pinned, muted, archived,
-canSendMessages }`. `canSendMessages` follows the peer's
+`GET /chats` with no params returns main *and* archived dialogs: mtcute maps
+`archived: 'keep'` to `folderId = undefined`, i.e. only folder 0, so the
+service fetches folder 0 and folder 1 separately and merges them by peer id
+(pinned duplicates are dropped, order is preserved). That "all" list and
+`POST /chats/read-all` therefore cover the archive too.
+Chats are mapped to `{ id, type, title, username, lastMessage, unreadCount,
+pinned, muted, archived, readInboxMaxId, canSendMessages }`;
+`readInboxMaxId` is the dialog's read boundary (used as `newerThanId`).
+`canSendMessages` follows the peer's
 `permissions.canSendMessages` when present; broadcast channels additionally
 need `isAdmin`/`isCreator`, while legacy groups without permission info stay
 writable. The info panel (`/chats/:chatId/info`) adds `about`, `memberCount`,
@@ -296,7 +304,7 @@ paged by `offsetId`); similar channels use raw
 `channels.getChannelRecommendations` and return an empty list when Telegram
 does not support it for the peer.
 `folderId` selects one folder; `archived=true|false` lists only archived or
-only non-archived dialogs (with no params the historic behaviour is kept).
+only non-archived dialogs (with no params both folders are returned).
 Folders come from `getFolders()` as `{ id, title, emoticon }`. Global search
 folds `searchGlobal` hits into `{ chats: ChatView[], users: { id, title,
 username }[] }`; in-chat search returns `{ messages, nextOffsetId }`. Message
@@ -305,13 +313,28 @@ via the raw `messages.toggleDialogPin` / `account.updateNotifySettings` calls
 (mtcute 0.32 has no high-level helpers for those two), archive/unread via
 `archiveChats`/`unarchiveChats`/`markChatUnread`/`readHistory`. Deleting a chat
 uses `deleteHistory` for private chats and legacy groups and `leaveChat` for
-channels/supergroups; `clearHistory=true` only clears messages.
+channels/supergroups; `clearHistory=true` only clears messages. The response is
+`{ removed }` (`clearHistory` keeps the dialog, so `removed: false`).
+`POST /chats/read-all` marks both folders in batches of 10 with
+`Promise.allSettled`, returning `{ read, failed }` (capped at 200 dialogs).
 `newerThanId` (usually the dialog's `readInboxMaxId`) returns the oldest unread
 batch plus a little read context, so opening a chat with many unread messages
 does not mark everything read at once. Messages come from `getHistory`, newest
 first, with `nextOffsetId` for paging:
 `{ id, chatId, text, date, outgoing, edited, senderId, senderName, replyToId,
-mediaType }`. Sending trims text (non-empty, max 4096); typing accepts
+mediaType, media }`, where `media` is
+`{ kind: photo|document|other, mimeType, fileName, size, downloadable }`.
+Uploads (`POST /chats/:chatId/media`) accept one multipart `file` up to 50 MB
+(`MAX_MEDIA_BYTES`, `413 PAYLOAD_TOO_LARGE`), with an optional caption; images
+are sent as photos, everything else as documents. Downloads
+(`GET .../messages/:messageId/media`) reject descriptors above the same 50 MB
+limit (`413 MEDIA_TOO_LARGE`) before fetching bytes, cache at most 200 MB total
+(entries over 10 MB are not cached, TTL 5 min), and validate the sender's MIME
+type: invalid values become `application/octet-stream`, only raster images
+(`image/jpeg`, `image/png`, `image/webp`, `image/gif`) are served `inline`,
+every other type is forced to `attachment`. Media/avatar responses also send
+`X-Content-Type-Options: nosniff` and `Cache-Control: private, max-age=600`.
+Sending trims text (non-empty, max 4096); typing accepts
 `typing`, `record_video`, `record_voice`, `upload_photo`, `upload_document`,
 `cancel`. The session must belong to the account and the account to the user;
 Telegram errors are mapped to `{ code, message, retryAfter? }` (FLOOD_WAIT
@@ -399,8 +422,8 @@ Never send session keys, auth keys, phone codes or passwords over WS.
    events).
 3. **tdata import**: upload, parse, account picker, fresh-session strategy.
    **Implemented** (`.zip`, `.tar.gz` and `.tgz`, max 512 MB).
-4. **Updates + messaging**: chats, messages, read/typing, realtime fan-out.
-   **Implemented** (media search/download and message cache are future work).
+4. **Updates + messaging**: chats, messages, read/typing, media upload/download,
+   avatars, realtime fan-out. **Implemented** (bounded in-memory cache).
 5. **Admin panel** workflows on top of the same API.
 
 ## 9. Open decisions
