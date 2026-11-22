@@ -313,7 +313,9 @@ via the raw `messages.toggleDialogPin` / `account.updateNotifySettings` calls
 (mtcute 0.32 has no high-level helpers for those two), archive/unread via
 `archiveChats`/`unarchiveChats`/`markChatUnread`/`readHistory`. Deleting a chat
 uses `deleteHistory` for private chats and legacy groups and `leaveChat` for
-channels/supergroups; `clearHistory=true` only clears messages. The response is
+channels/supergroups; `clearHistory=true` only clears messages. Both flags
+default to `false`, so a bare `DELETE` removes the chat only for this account —
+`revoke=true` is the explicit "delete for everyone". The response is
 `{ removed }` (`clearHistory` keeps the dialog, so `removed: false`).
 `POST /chats/read-all` marks both folders in batches of 10 with
 `Promise.allSettled`, returning `{ read, failed }` (capped at 200 dialogs).

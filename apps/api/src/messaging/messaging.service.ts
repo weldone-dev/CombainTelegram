@@ -27,7 +27,12 @@ import {
   sanitizeFileName,
 } from './media.js';
 import {
-  canSendMessages,
+  toChatInfoFromFullChat,
+  toChatInfoFromPeer,
+  toChatInfoFromUser,
+} from './chat-info.js';
+import type { ChatInfoView, ChatPeerView } from './chat-info.js';
+import {
   mergeDialogsById,
   toChatView,
   toChatViewFromPeer,
@@ -40,13 +45,13 @@ import type {
   FolderView,
   MessageMediaView,
   MessageView,
-  PeerLike,
 } from './message-view.js';
 import {
   extractFirstUrl,
   normalizeUsername,
   parseChatId,
   parseChatInfoKind,
+  parseDeleteOptions,
   parseFolderId,
   parseLimit,
   parseMessageId,
@@ -61,24 +66,7 @@ import {
 } from './params.js';
 import type { ChatInfoKind } from './params.js';
 
-export interface ChatPeerView {
-  id: number;
-  type: string;
-  title: string;
-  username: string | null;
-}
-
-export interface ChatInfoView extends ChatPeerView {
-  about: string | null;
-  memberCount: number | null;
-  onlineCount: number | null;
-  isChannel: boolean;
-  isGroup: boolean;
-  isAdmin: boolean;
-  isCreator: boolean;
-  canSendMessages: boolean;
-  inviteLink: string | null;
-}
+export type { ChatInfoView, ChatPeerView } from './chat-info.js';
 
 export interface ChatInfoPollView {
   question: string;
@@ -455,9 +443,11 @@ export class MessagingService {
   }
 
   /**
-   * Full chat info for the info panel. `getFullChat` is authoritative for
-   * bios, member counts, invite links and permissions, but it only accepts
-   * chats/channels; private chats fall back to the plain peer lookup.
+   * Full chat info for the info panel. The peer is resolved first, because
+   * `getFullChat` rejects users: private chats and bots use `getFullUser`
+   * (bio as `about`), while groups and channels use `getFullChat` (member
+   * counts, invite links, permissions). If either full record fails, the view
+   * degrades to the plain `getPeer` fields instead of erroring.
    */
   async getChatInfo(
     userId: string,
@@ -473,81 +463,30 @@ export class MessagingService {
       sessionId,
     );
 
-    try {
-      const full = await client.getFullChat(chatId);
-      return this.toFullChatInfoView(full);
-    } catch {
-      // Users and a few restricted peers have no full-chat record.
-      // `client.getChat` still returns the basic peer fields.
-    }
-
     let peer: Peer;
     try {
-      peer = await client.getChat(chatId);
+      peer = await client.getPeer(chatId);
     } catch (error) {
       raiseTelegramError(error);
     }
 
-    const extra = peer as unknown as {
-      chatType?: string;
-      permissions?: { canSendMessages: boolean } | null;
-      isAdmin?: boolean;
-      isCreator?: boolean;
-      membersCount?: number | null;
-    };
-    const chatType = extra.chatType;
-    const type = chatType ?? peer.type;
-    return {
-      id: peer.id,
-      type,
-      title: peer.displayName,
-      username: peer.username,
-      about: null,
-      memberCount: extra.membersCount ?? null,
-      onlineCount: null,
-      isChannel: chatType === 'channel',
-      isGroup:
-        chatType === 'group' ||
-        chatType === 'supergroup' ||
-        chatType === 'gigagroup',
-      isAdmin: extra.isAdmin === true,
-      isCreator: extra.isCreator === true,
-      canSendMessages: canSendMessages({
-        id: peer.id,
-        type,
-        displayName: peer.displayName,
-        username: peer.username,
-        chatType,
-        permissions: extra.permissions ?? null,
-        isAdmin: extra.isAdmin,
-        isCreator: extra.isCreator,
-      }),
-      inviteLink: peer.username ? `https://t.me/${peer.username}` : null,
-    };
-  }
+    if (peer.type === 'user') {
+      try {
+        const fullUser = await client.getFullUser(chatId);
+        return toChatInfoFromUser(fullUser);
+      } catch {
+        // Restricted account: keep the basic peer fields instead of a 502.
+        return toChatInfoFromPeer(peer);
+      }
+    }
 
-  private toFullChatInfoView(
-    full: Awaited<ReturnType<TelegramClient['getFullChat']>>,
-  ): ChatInfoView {
-    const type = full.chatType;
-    return {
-      id: full.id,
-      type,
-      title: full.displayName,
-      username: full.username,
-      about: full.bio || null,
-      memberCount: full.membersCount > 0 ? full.membersCount : null,
-      onlineCount: full.onlineCount > 0 ? full.onlineCount : null,
-      isChannel: type === 'channel',
-      isGroup:
-        type === 'group' || type === 'supergroup' || type === 'gigagroup',
-      isAdmin: full.isAdmin,
-      isCreator: full.isCreator,
-      canSendMessages: canSendMessages(full as unknown as PeerLike),
-      inviteLink:
-        full.inviteLink?.link ??
-        (full.username ? `https://t.me/${full.username}` : null),
-    };
+    try {
+      const full = await client.getFullChat(chatId);
+      return toChatInfoFromFullChat(full);
+    } catch {
+      // Restricted peer without a full-chat record.
+      return toChatInfoFromPeer(peer);
+    }
   }
 
   /**
@@ -1259,9 +1198,12 @@ export class MessagingService {
 
   /**
    * `clearHistory=true` deletes messages but keeps the dialog. Otherwise the
-   * dialog is removed: private chats and legacy groups use `deleteHistory`
-   * (with `revoke` controlling deletion for everyone), while channels and
-   * supergroups are left.
+   * dialog is removed: private chats and legacy groups use `deleteHistory`,
+   * while channels and supergroups are left.
+   *
+   * Both flags default to `false`, so a bare `DELETE` only removes the chat
+   * for this account. `revoke=true` is the explicit "delete for everyone"
+   * (and `leaveChat({ clear: true })` for channels/supergroups).
    */
   async deleteChat(
     userId: string,
@@ -1274,9 +1216,7 @@ export class MessagingService {
     } = {},
   ): Promise<ChatRemovedView> {
     const chatId = parseChatId(rawChatId);
-    const revoke = parseOptionalBoolean(query.revoke, 'revoke') ?? true;
-    const clearHistory =
-      parseOptionalBoolean(query.clearHistory, 'clearHistory') ?? false;
+    const { revoke, clearHistory } = parseDeleteOptions(query);
     const sessionId = parseOptionalSessionId(query.sessionId);
     const { client } = await this.accounts.resolveSession(
       userId,
