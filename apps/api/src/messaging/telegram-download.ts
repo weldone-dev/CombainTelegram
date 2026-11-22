@@ -359,7 +359,14 @@ export async function downloadFileBuffer(
 
   const size = normalized.fileSize;
   assertWithinLimits(size, limit);
-  const dcId = normalized.dcId ?? (await downloadClient.getPrimaryDcId());
+  // Telegram marks CDN-hosted locations with ids like 203, which are not
+  // real data centers and make mtcute's network manager throw "Could not
+  // find DC 203". Start from the primary DC in that case; the server answers
+  // with a regular file or a CDN redirect that is handled below.
+  const dcId =
+    normalized.dcId !== undefined && normalized.dcId <= 5
+      ? normalized.dcId
+      : await downloadClient.getPrimaryDcId();
   const attempt: DownloadAttempt = {
     client: downloadClient,
     normalized,
