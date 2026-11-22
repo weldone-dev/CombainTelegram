@@ -2,12 +2,12 @@ import { Injectable } from '@nestjs/common';
 import {
   InputMedia,
   SearchFilters,
+  tl,
   type Dialog,
   type Message,
   type Peer,
   type SendableTypingStatus,
   type TelegramClient,
-  type tl,
 } from '@mtcute/node';
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
@@ -58,6 +58,7 @@ import {
   parseChatId,
   parseChatInfoKind,
   parseDeleteOptions,
+  parseDeleteMessageOptions,
   parseFolderId,
   parseLimit,
   parseMessageId,
@@ -203,6 +204,15 @@ const THREAD_LIMIT = 100;
  * hash; keeps the last-resort lookup bounded instead of crawling all history.
  */
 const PEER_DIALOG_SCAN_LIMIT = 500;
+
+/**
+ * Whether Telegram's photo pipeline rejected the image. Some valid images
+ * (very small PNGs, odd colour profiles) fail as photos but upload fine as
+ * documents.
+ */
+function isImageProcessFailed(error: unknown): boolean {
+  return tl.RpcError.is(error) && error.text === 'IMAGE_PROCESS_FAILED';
+}
 
 /**
  * Whether the peer is a one-to-one chat. mtcute 0.32 models bots as `User`
@@ -919,6 +929,9 @@ export class MessagingService {
       sessionId,
     );
 
+    const sendOptions =
+      replyToId !== undefined ? { replyTo: replyToId } : {};
+
     try {
       const media =
         kind === 'photo'
@@ -937,11 +950,34 @@ export class MessagingService {
       const message: Message = await client.sendMedia(
         chatId,
         media,
-        replyToId !== undefined ? { replyTo: replyToId } : {},
+        sendOptions,
       );
       return toMessageView(message);
     } catch (error) {
-      raiseTelegramError(error);
+      // Telegram's photo pipeline rejects some valid images (e.g. tiny PNGs)
+      // with IMAGE_PROCESS_FAILED. Sending the same bytes as a document is
+      // accepted, so retry once instead of surfacing a 502.
+      if (kind !== 'photo' || !isImageProcessFailed(error)) {
+        raiseTelegramError(error);
+      }
+      try {
+        const fallback = InputMedia.document(input.buffer, {
+          fileName,
+          fileMime: mimeType,
+          fileSize: size,
+          ...(caption !== undefined ? { caption } : {}),
+        });
+        const message: Message = await client.sendMedia(
+          chatId,
+          fallback,
+          sendOptions,
+        );
+        return toMessageView(message);
+      } catch (retryError) {
+        // The retry failed too; map that error (IMAGE_PROCESS_FAILED → 400
+        // MEDIA_PROCESS_FAILED) so the UI gets a clear reason.
+        raiseTelegramError(retryError);
+      }
     }
   }
 
@@ -1454,16 +1490,23 @@ export class MessagingService {
     }
   }
 
+  /**
+   * Delete one message. `revoke` defaults to `false` (remove only from this
+   * account); `revoke=true` deletes it for everyone. Without the explicit
+   * default mtcute would revoke, silently deleting other people's messages
+   * where an admin is allowed to.
+   */
   async deleteMessage(
     userId: string,
     accountId: string,
     rawChatId: string,
     rawMessageId: string,
-    sessionIdParam?: unknown,
+    query: { revoke?: unknown; sessionId?: unknown } = {},
   ): Promise<DeletedMessageView> {
     const chatId = parseChatId(rawChatId);
     const messageId = parseMessageId(rawMessageId);
-    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const { revoke } = parseDeleteMessageOptions(query);
+    const sessionId = parseOptionalSessionId(query.sessionId);
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1471,7 +1514,7 @@ export class MessagingService {
     );
 
     try {
-      await client.deleteMessagesById(chatId, [messageId]);
+      await client.deleteMessagesById(chatId, [messageId], { revoke });
       return { deleted: true, messageId };
     } catch (error) {
       raiseTelegramError(error);

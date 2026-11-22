@@ -1,3 +1,4 @@
+import { tl } from '@mtcute/node';
 import type { TelegramClient } from '@mtcute/node';
 import type { AccountsService } from '../accounts/accounts.service.js';
 import { MessagingService } from './messaging.service.js';
@@ -634,6 +635,66 @@ describe('message-level features', () => {
     expect(downloadAsBuffer).toHaveBeenCalledWith(media);
     expect(result.data).toEqual(Buffer.from([1, 2, 3]));
     expect(result.mimeType).toBe('image/jpeg');
+  });
+
+  it('deletes a message only for the account unless revoke=true', async () => {
+    const deleteMessagesById = vi.fn(async () => undefined);
+    const service = createService({
+      deleteMessagesById,
+    } as unknown as TelegramClient);
+
+    await service.deleteMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77');
+    expect(deleteMessagesById).toHaveBeenLastCalledWith(
+      CHAT_ID,
+      [77],
+      { revoke: false },
+    );
+
+    await service.deleteMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77', {
+      revoke: 'true',
+    });
+    expect(deleteMessagesById).toHaveBeenLastCalledWith(
+      CHAT_ID,
+      [77],
+      { revoke: true },
+    );
+  });
+
+  it('retries a rejected photo once as a document', async () => {
+    const sendMedia = vi
+      .fn()
+      .mockRejectedValueOnce(new tl.RpcError(400, 'IMAGE_PROCESS_FAILED' as never))
+      .mockResolvedValueOnce(message);
+    const service = createService({ sendMedia } as unknown as TelegramClient);
+
+    const view = await service.sendMedia(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+      buffer: Buffer.from([1, 2, 3]),
+      fileName: 'tiny.png',
+      mimeType: 'image/png',
+      size: 3,
+    });
+
+    expect(sendMedia).toHaveBeenCalledTimes(2);
+    expect(sendMedia.mock.calls[0]?.[1]).toMatchObject({ type: 'photo' });
+    expect(sendMedia.mock.calls[1]?.[1]).toMatchObject({ type: 'document' });
+    expect(view.id).toBe(77);
+  });
+
+  it('does not retry a non-photo media failure', async () => {
+    const sendMedia = vi
+      .fn()
+      .mockRejectedValue(new tl.RpcError(400, 'CHAT_SEND_MEDIA_FORBIDDEN' as never));
+    const service = createService({ sendMedia } as unknown as TelegramClient);
+
+    await expect(
+      service.sendMedia(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+        buffer: Buffer.from([1]),
+        fileName: 'a.bin',
+        mimeType: 'application/octet-stream',
+        size: 1,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(sendMedia).toHaveBeenCalledTimes(1);
   });
 });
 

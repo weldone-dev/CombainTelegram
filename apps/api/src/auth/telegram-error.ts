@@ -150,6 +150,11 @@ const SIMPLE: Record<string, SimpleMapping> = {
     message: 'Voice transcription requires a Telegram Premium account',
     status: HttpStatus.FORBIDDEN,
   },
+  IMAGE_PROCESS_FAILED: {
+    code: 'MEDIA_PROCESS_FAILED',
+    message: 'Telegram could not process this image',
+    status: HttpStatus.BAD_REQUEST,
+  },
 };
 
 /** opentele2 flow errors are plain objects with a stable `code`. */

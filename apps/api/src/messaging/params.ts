@@ -174,6 +174,17 @@ export function parseDeleteOptions(
   };
 }
 
+/**
+ * `DELETE .../messages/:messageId` options. `revoke` is explicit and defaults
+ * to `false`, so a bare delete only removes the message for this account
+ * instead of for everyone (mtcute's own default is `revoke: true`).
+ */
+export function parseDeleteMessageOptions(
+  query: { revoke?: unknown } = {},
+): { revoke: boolean } {
+  return { revoke: parseOptionalBoolean(query.revoke, 'revoke') ?? false };
+}
+
 export type ChatInfoKind = 'media' | 'links' | 'polls';
 
 /** `thumb=1|true` on the media endpoint: serve a small preview thumbnail. */

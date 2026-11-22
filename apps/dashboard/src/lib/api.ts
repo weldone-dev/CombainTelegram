@@ -151,6 +151,7 @@ const RU_ERRORS: Record<string, string> = {
   TRANSCRIPTION_UNAVAILABLE: "Это сообщение нельзя расшифровать",
   TRANSCRIPTION_FAILED: "Telegram не смог расшифровать сообщение",
   PREMIUM_REQUIRED: "Для расшифровки голосовых нужен Telegram Premium",
+  MEDIA_PROCESS_FAILED: "Telegram не смог обработать это изображение",
 };
 
 /** Human-readable Russian message for any thrown value. */

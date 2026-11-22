@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
 import {
+  deleteMessage as deleteMessageRequest,
   INITIAL_CHAT_LIMIT,
   listChats,
   listFolders,
@@ -481,17 +482,14 @@ export function ChatsPage() {
   );
 
   const deleteMessages = useCallback(
-    async (messageIds: number[]) => {
+    async (messageIds: number[], options: { revoke?: boolean } = {}) => {
       if (selectedAccountId === null || selectedChatId === null) return;
       const accountId = selectedAccountId;
       const chatId = selectedChatId;
       let firstError: string | null = null;
       for (const messageId of messageIds) {
         try {
-          await apiFetch(
-            `/accounts/${accountId}/chats/${chatId}/messages/${messageId}`,
-            { method: "DELETE" },
-          );
+          await deleteMessageRequest(accountId, chatId, messageId, options);
           if (
             selectedAccountIdRef.current !== accountId ||
             selectedChatIdRef.current !== chatId
@@ -538,12 +536,14 @@ export function ChatsPage() {
   );
 
   const deleteMessage = useCallback(
-    async (messageId: number) => {
+    async (messageId: number, options: { revoke?: boolean } = {}) => {
       if (selectedAccountId === null || selectedChatId === null) return;
       try {
-        await apiFetch(
-          `/accounts/${selectedAccountId}/chats/${selectedChatId}/messages/${messageId}`,
-          { method: "DELETE" },
+        await deleteMessageRequest(
+          selectedAccountId,
+          selectedChatId,
+          messageId,
+          options,
         );
         setMessages((previous) =>
           previous.filter((message) => message.id !== messageId),

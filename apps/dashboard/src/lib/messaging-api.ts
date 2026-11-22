@@ -218,3 +218,22 @@ export function sendMessageComment(
     { method: "POST", body: { text } },
   );
 }
+
+/**
+ * Delete one message. `revoke` defaults to `false`: the message disappears
+ * only for this account. `revoke: true` deletes it for everyone.
+ */
+export function deleteMessage(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  options: { revoke?: boolean } = {},
+): Promise<{ deleted: boolean; messageId: number }> {
+  const params = new URLSearchParams();
+  if (options.revoke) params.set("revoke", "true");
+  const query = params.toString();
+  return apiFetch<{ deleted: boolean; messageId: number }>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}${query ? `?${query}` : ""}`,
+    { method: "DELETE" },
+  );
+}

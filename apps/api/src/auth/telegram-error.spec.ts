@@ -42,6 +42,7 @@ describe('Telegram error mapping', () => {
     ['MSG_VOICE_TOO_LONG', 'TRANSCRIPTION_UNAVAILABLE', 400],
     ['TRANSCRIPTION_FAILED', 'TRANSCRIPTION_FAILED', 502],
     ['PREMIUM_ACCOUNT_REQUIRED', 'PREMIUM_REQUIRED', 403],
+    ['IMAGE_PROCESS_FAILED', 'MEDIA_PROCESS_FAILED', 400],
   ])('maps %s to %s', (telegramText, expectedCode, expectedStatus) => {
     const mapped = mapTelegramError(rpc(400, telegramText));
     expect(mapped.code).toBe(expectedCode);
