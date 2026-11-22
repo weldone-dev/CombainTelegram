@@ -19,6 +19,7 @@ interface FakeClient {
   deleteHistory: ReturnType<typeof vi.fn>;
   leaveChat: ReturnType<typeof vi.fn>;
   downloadAsBuffer: ReturnType<typeof vi.fn>;
+  iterDialogs: ReturnType<typeof vi.fn>;
 }
 
 const inputPeerUser = {
@@ -54,16 +55,24 @@ const channelPeer = {
 function createFakeClient(
   overrides: {
     resolved?: Record<string, unknown>;
+    resolveFails?: boolean;
     peer?: Record<string, unknown>;
+    dialogs?: Array<{ peer: Record<string, unknown> }>;
   } = {},
 ): FakeClient {
   const resolved = overrides.resolved ?? inputPeerUser;
   const peer = overrides.peer ?? userPeer;
+  const dialogs = overrides.dialogs ?? [];
 
   const getPeer = vi.fn(async () => {
     throw new Error(`Peer ${CHAT_ID} is not found in local cache`);
   });
-  const resolvePeer = vi.fn(async () => resolved);
+  const resolvePeer = vi.fn(async () => {
+    if (overrides.resolveFails) {
+      throw new Error(`Peer ${CHAT_ID} is not found in local cache`);
+    }
+    return resolved;
+  });
   const getUser = vi.fn(async () => peer);
   const getChat = vi.fn(async () => peer);
   const getFullUser = vi.fn(async () => ({
@@ -86,6 +95,9 @@ function createFakeClient(
   const deleteHistory = vi.fn(async () => undefined);
   const leaveChat = vi.fn(async () => undefined);
   const downloadAsBuffer = vi.fn(async () => new Uint8Array([1, 2, 3]));
+  const iterDialogs = vi.fn(async function* () {
+    for (const dialog of dialogs) yield dialog;
+  });
 
   const client = {
     getPeer,
@@ -98,6 +110,7 @@ function createFakeClient(
     deleteHistory,
     leaveChat,
     downloadAsBuffer,
+    iterDialogs,
   } as unknown as TelegramClient;
 
   return {
@@ -112,6 +125,7 @@ function createFakeClient(
     deleteHistory,
     leaveChat,
     downloadAsBuffer,
+    iterDialogs,
   };
 }
 
@@ -195,6 +209,101 @@ describe('uncached peer resolution', () => {
     expect(fake.getFullChat).toHaveBeenCalledWith(CHANNEL_ID);
     expect(fake.getUser).not.toHaveBeenCalled();
     expect(fake.getFullUser).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the dialog list when no access hash is available', async () => {
+    const fake = createFakeClient({
+      resolveFails: true,
+      dialogs: [{ peer: userPeer }],
+    });
+    const service = createService(fake.client);
+
+    const info = await service.getChatInfo(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+    );
+
+    expect(info).toMatchObject({
+      id: CHAT_ID,
+      type: 'user',
+      title: 'Peer',
+      about: 'hello there',
+      isChannel: false,
+      isGroup: false,
+    });
+    expect(fake.getPeer).toHaveBeenCalledWith(CHAT_ID);
+    expect(fake.resolvePeer).toHaveBeenCalledWith(CHAT_ID, true);
+    expect(fake.iterDialogs).toHaveBeenCalled();
+    // The dialog list already carries the peer, so no extra lookup is needed.
+    expect(fake.getUser).not.toHaveBeenCalled();
+    expect(fake.getFullUser).toHaveBeenCalledWith(CHAT_ID);
+    expect(fake.getChat).not.toHaveBeenCalled();
+    expect(fake.getFullChat).not.toHaveBeenCalled();
+  });
+
+  it('uses the dialog peer for a channel and reads getFullChat', async () => {
+    const fake = createFakeClient({
+      resolveFails: true,
+      peer: channelPeer,
+      dialogs: [{ peer: channelPeer }],
+    });
+    const service = createService(fake.client);
+
+    const info = await service.getChatInfo(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHANNEL_ID),
+    );
+
+    expect(info).toMatchObject({
+      id: CHANNEL_ID,
+      type: 'channel',
+      title: 'AID Notes',
+      memberCount: 375,
+      isChannel: true,
+    });
+    expect(fake.iterDialogs).toHaveBeenCalled();
+    expect(fake.getFullChat).toHaveBeenCalledWith(CHANNEL_ID);
+    expect(fake.getChat).not.toHaveBeenCalled();
+    expect(fake.getUser).not.toHaveBeenCalled();
+    expect(fake.getFullUser).not.toHaveBeenCalled();
+  });
+
+  it('rethrows the original resolution error when the dialog scan misses', async () => {
+    const fake = createFakeClient({ resolveFails: true });
+    const service = createService(fake.client);
+
+    await expect(
+      service.getChatInfo(USER_ID, ACCOUNT_ID, String(CHAT_ID)),
+    ).rejects.toMatchObject({
+      status: 502,
+      response: {
+        code: 'TELEGRAM_ERROR',
+        message: `Peer ${CHAT_ID} is not found in local cache`,
+      },
+    });
+    expect(fake.iterDialogs).toHaveBeenCalled();
+    expect(fake.getChat).not.toHaveBeenCalled();
+  });
+
+  it('resolves GET /chats/:id from the dialog list', async () => {
+    const fake = createFakeClient({
+      resolveFails: true,
+      dialogs: [{ peer: userPeer }],
+    });
+    const service = createService(fake.client);
+
+    const chat = await service.getChat(USER_ID, ACCOUNT_ID, String(CHAT_ID));
+
+    expect(chat).toEqual({
+      id: CHAT_ID,
+      type: 'user',
+      title: 'Peer',
+      username: 'peer',
+    });
+    expect(fake.iterDialogs).toHaveBeenCalled();
+    expect(fake.getChat).not.toHaveBeenCalled();
   });
 
   it('uses the resolved peer for chat media search', async () => {

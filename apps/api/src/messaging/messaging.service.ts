@@ -176,6 +176,12 @@ const AVATAR_CACHE_MAX_ENTRIES = 100;
 const CHAT_INFO_LIMIT = 50;
 
 /**
+ * Dialogs scanned per folder when a peer id cannot be resolved by its access
+ * hash; keeps the last-resort lookup bounded instead of crawling all history.
+ */
+const PEER_DIALOG_SCAN_LIMIT = 500;
+
+/**
  * Whether the peer is a one-to-one chat. mtcute 0.32 models bots as `User`
  * (`type: 'user'`), but `'bot'` is kept for versions that report it apart.
  */
@@ -432,7 +438,7 @@ export class MessagingService {
 
     let peer: Peer;
     try {
-      peer = await client.getPeer(chatId);
+      peer = await this.resolvePeerForChat(client, chatId);
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -1341,6 +1347,11 @@ export class MessagingService {
    * `Peer ... is not found in local cache` before the full-user read runs; the
    * fallback asks Telegram for the id (`force` skips the cache) and then loads
    * the user or chat from that resolution. Cached peers keep the fast path.
+   *
+   * A forced resolve still needs an access hash, which Telegram only hands out
+   * for peers it sent us, so the final fallback scans the visible dialogs: the
+   * chat is there by definition if the UI lists it, and returning that peer
+   * also warms the cache for `getFullUser` / `getFullChat`.
    */
   private async resolvePeerForChat(
     client: TelegramClient,
@@ -1348,11 +1359,41 @@ export class MessagingService {
   ): Promise<Peer> {
     try {
       return await client.getPeer(chatId);
-    } catch {
-      const input = await client.resolvePeer(chatId, true);
-      if ('userId' in input) return await client.getUser(input);
-      return await client.getChat(input);
+    } catch (error) {
+      try {
+        const input = await client.resolvePeer(chatId, true);
+        if ('userId' in input) return await client.getUser(input);
+        return await client.getChat(input);
+      } catch {
+        const fromDialogs = await this.findPeerInDialogs(client, chatId);
+        if (fromDialogs) return fromDialogs;
+      }
+      raiseTelegramError(error);
     }
+  }
+
+  /** Last-resort peer lookup over the dialog list, bounded per folder. */
+  private async findPeerInDialogs(
+    client: TelegramClient,
+    chatId: number,
+  ): Promise<Peer | null> {
+    // Same folders as `listChats`: `archived: 'keep'` only reads the main one.
+    for (const archived of ['exclude', 'only'] as const) {
+      let scanned = 0;
+      try {
+        for await (const dialog of client.iterDialogs({
+          limit: PEER_DIALOG_SCAN_LIMIT,
+          archived,
+        })) {
+          if (dialog.peer.id === chatId) return dialog.peer;
+          scanned += 1;
+          if (scanned >= PEER_DIALOG_SCAN_LIMIT) break;
+        }
+      } catch {
+        // Folders fail independently (e.g. no archive yet); try the next one.
+      }
+    }
+    return null;
   }
 
   /** Reload a dialog after a mutation; fall back to a bare peer DTO. */
