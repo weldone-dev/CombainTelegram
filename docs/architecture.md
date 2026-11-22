@@ -407,9 +407,11 @@ Set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and (optionally) `VAPID_SUBJECT`
 keys the API still boots, logs one warning, and the push routes answer
 `503 PUSH_DISABLED`; the dashboard shows a readable Russian message.
 
-The dashboard also keeps an offline snapshot (last 50 messages per chat and
-the chat list, versioned `tg-offline-v1`, ~2 MB with LRU eviction). It contains
-only chat titles and messages — never logs, proxies, accounts or sessions.
+The dashboard also keeps an offline snapshot (last 50 messages per chat, the
+chat list, a minimal account list and the last selected account/chat, versioned
+`tg-offline-v1`/`tg-offline-selection`, ~2 MB with LRU eviction). It contains
+only account ids/names, chat titles and messages — never logs, proxies,
+sessions, phone numbers or tokens.
 
 ## 7.1 Configuration
 
