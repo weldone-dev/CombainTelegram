@@ -126,18 +126,24 @@ describe('delete chat params', () => {
 });
 
 describe('delete message params', () => {
-  it('deletes only for the current account by default', () => {
-    expect(parseDeleteMessageOptions()).toEqual({ revoke: false });
-    expect(parseDeleteMessageOptions({})).toEqual({ revoke: false });
+  it('deletes for everyone by default', () => {
+    expect(parseDeleteMessageOptions()).toEqual({ revoke: true });
+    expect(parseDeleteMessageOptions({})).toEqual({ revoke: true });
     expect(parseDeleteMessageOptions({ revoke: undefined })).toEqual({
-      revoke: false,
-    });
-    expect(parseDeleteMessageOptions({ revoke: 'false' })).toEqual({
-      revoke: false,
+      revoke: true,
     });
   });
 
-  it('requires an explicit revoke=true for delete-for-everyone', () => {
+  it('still allows an explicit revoke=false for an account-local delete', () => {
+    expect(parseDeleteMessageOptions({ revoke: 'false' })).toEqual({
+      revoke: false,
+    });
+    expect(parseDeleteMessageOptions({ revoke: '0' })).toEqual({
+      revoke: false,
+    });
+    expect(parseDeleteMessageOptions({ revoke: false })).toEqual({
+      revoke: false,
+    });
     expect(parseDeleteMessageOptions({ revoke: 'true' })).toEqual({
       revoke: true,
     });

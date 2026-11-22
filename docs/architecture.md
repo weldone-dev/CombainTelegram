@@ -347,10 +347,10 @@ Uploads (`POST /chats/:chatId/media`) accept one multipart `file` up to 50 MB
 are sent as photos, everything else as documents. If Telegram rejects a photo
 with `IMAGE_PROCESS_FAILED` (e.g. very small PNGs), the upload is retried once
 as a document; a second failure returns `400 MEDIA_PROCESS_FAILED`. Deletes
-(`DELETE .../messages/:messageId`) are account-local by default
-(`revoke=false`); `revoke=true` deletes for everyone. The dashboard loop used
-for selection-mode batch deletes calls the same single-message endpoint, so it
-inherits that default and asks explicitly before revoking. Downloads
+(`DELETE .../messages/:messageId`) are revoked for everyone by default
+(`revoke=true`); `revoke=false` keeps the account-local delete for
+compatibility. The dashboard loop used for selection-mode batch deletes calls
+the same single-message endpoint, so it always revokes too. Downloads
 (`GET .../messages/:messageId/media`) reject descriptors above the same 50 MB
 limit (`413 MEDIA_TOO_LARGE`) before fetching bytes, cache at most 200 MB total
 (entries over 10 MB are not cached, TTL 5 min), and validate the sender's MIME

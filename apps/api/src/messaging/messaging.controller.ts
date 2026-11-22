@@ -520,7 +520,7 @@ export class MessagingController {
   @Delete(':chatId/messages/:messageId')
   @ApiOperation({
     summary:
-      'Delete a message; revoke=false (default) removes it only for this account',
+      'Delete a message for everyone (revoke=true by default; revoke=false deletes only this account\'s copy)',
   })
   deleteMessage(
     @CurrentUser() user: UserModel,

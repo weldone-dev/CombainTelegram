@@ -194,6 +194,7 @@ export function ChatWindow({
     >
   >(() => new Map());
   const [emojiPickerFor, setEmojiPickerFor] = useState<number | null>(null);
+  const [menuFor, setMenuFor] = useState<number | null>(null);
   const [pollOverrides, setPollOverrides] = useState<
     Map<number, { base: MessageView["poll"]; value: MessagePollView }>
   >(() => new Map());
@@ -295,6 +296,7 @@ export function ChatWindow({
     setForwardIds(null);
     setStatus(null);
     setEmojiPickerFor(null);
+    setMenuFor(null);
     setReactionOverrides(new Map());
     setReactionPending(new Set());
     setPollOverrides(new Map());
@@ -588,11 +590,13 @@ export function ChatWindow({
       return !current;
     });
     setForwardIds(null);
+    setMenuFor(null);
   };
 
   const exitSelection = () => {
     setSelecting(false);
     setSelected(new Set());
+    setMenuFor(null);
   };
 
   const toggleSelected = (id: number) => {
@@ -625,21 +629,17 @@ export function ChatWindow({
   const deleteSelected = async () => {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!window.confirm(`Удалить выбранные сообщения (${ids.length})?`)) return;
-    // Deleting only for this account is the safe default. Messages from other
-    // people (and outgoing messages in groups) can also be revoked for
-    // everyone, but only after an explicit second confirmation.
-    const others = visible.filter(
-      (message) => selected.has(message.id) && !message.outgoing,
-    ).length;
-    let revoke = false;
-    if (others > 0) {
-      revoke = window.confirm(
-        `Среди выбранных есть чужие сообщения (${others}). Удалить их у всех участников?\n\n«ОК» — удалить у всех, «Отмена» — только у себя.`,
-      );
+    if (
+      !window.confirm(
+        `Удалить выбранные сообщения у всех участников (${ids.length})?`,
+      )
+    ) {
+      return;
     }
+    // Message deletion always revokes now: the dashboard has no
+    // "delete for me" action anymore.
     try {
-      await onDeleteMany(ids, { revoke });
+      await onDeleteMany(ids, { revoke: true });
       setStatus(null);
     } catch (caught) {
       setStatus(
@@ -648,6 +648,17 @@ export function ChatWindow({
     } finally {
       exitSelection();
     }
+  };
+
+  const deleteOne = (message: MessageView) => {
+    if (
+      !window.confirm(
+        "Удалить это сообщение у всех участников? Это действие необратимо.",
+      )
+    ) {
+      return;
+    }
+    onDelete(message.id, { revoke: true });
   };
 
   const reactionsFor = (message: MessageView): MessageReactionView[] => {
@@ -947,6 +958,66 @@ export function ChatWindow({
           const transcript = transcripts.get(message.id);
           const reactionBusy = reactionPending.has(message.id);
           const voteBusy = votingId === message.id;
+          const menuActions: MessageMenuAction[] = [];
+          if (canWrite) {
+            menuActions.push({
+              label: "Ответить",
+              onSelect: () => {
+                setReplyTo(message);
+                inputRef.current?.focus();
+              },
+            });
+          }
+          if (message.text.trim()) {
+            menuActions.push({
+              label: translating.has(message.id)
+                ? "Перевод…"
+                : translation
+                  ? "Скрыть перевод"
+                  : "Перевести",
+              disabled: translating.has(message.id),
+              onSelect: () => void toggleTranslation(message),
+            });
+          }
+          if (message.isVoice) {
+            menuActions.push({
+              label:
+                transcript?.pending || transcribing.has(message.id)
+                  ? "Расшифровка…"
+                  : "Расшифровать",
+              disabled: transcribing.has(message.id),
+              onSelect: () => void transcribe(message.id),
+            });
+          }
+          menuActions.push({
+            label: "Переслать",
+            onSelect: () => setForwardIds([message.id]),
+          });
+          menuActions.push({
+            label:
+              copiedKey === `message:${message.id}`
+                ? "Скопировано"
+                : "Копировать",
+            onSelect: () => void copyMessage(message),
+          });
+          if (message.outgoing) {
+            menuActions.push({
+              label: "Изменить",
+              onSelect: () => startEdit(message),
+            });
+          }
+          menuActions.push({
+            label: "Выбрать",
+            onSelect: () => {
+              setSelecting(true);
+              setSelected(new Set([message.id]));
+            },
+          });
+          menuActions.push({
+            label: "Удалить",
+            danger: true,
+            onSelect: () => deleteOne(message),
+          });
           return (
             <Fragment key={message.id}>
               {index === unreadDividerIndex && (
@@ -989,7 +1060,7 @@ export function ChatWindow({
                       <SelectionMark checked={isSelected} />
                     )}
                     <div
-                      className={`min-w-0 rounded-2xl px-3.5 py-2 transition-shadow ${
+                      className={`relative min-w-0 rounded-2xl px-3.5 py-2 transition-shadow ${
                         message.outgoing
                           ? "bg-sky-600 text-white"
                           : "bg-zinc-800 text-zinc-100"
@@ -1001,6 +1072,23 @@ export function ChatWindow({
                             : ""
                       }`}
                     >
+                      {!selecting && editingId !== message.id && (
+                        <MessageActionsMenu
+                          open={menuFor === message.id}
+                          onToggle={() =>
+                            setMenuFor((current) =>
+                              current === message.id ? null : message.id,
+                            )
+                          }
+                          onClose={() =>
+                            setMenuFor((current) =>
+                              current === message.id ? null : current,
+                            )
+                          }
+                          actions={menuActions}
+                        />
+                      )}
+
                       {!message.outgoing && (
                         <p className="mb-0.5 text-xs font-medium text-sky-400">
                           {message.senderName}
@@ -1200,125 +1288,6 @@ export function ChatWindow({
                         {message.edited && <span>изменено</span>}
                         <span>{formatTime(message.date)}</span>
                       </div>
-
-                      {!selecting && editingId !== message.id && (
-                        <div
-                          className={`mt-1 flex flex-wrap items-center gap-2 text-[11px] opacity-0 transition-opacity group-hover:opacity-100 ${
-                            message.outgoing ? "justify-end" : "justify-start"
-                          }`}
-                        >
-                          {canWrite && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setReplyTo(message);
-                                inputRef.current?.focus();
-                              }}
-                              title="Ответить"
-                              aria-label="Ответить"
-                              className="underline underline-offset-2 hover:text-white"
-                            >
-                              Ответить
-                            </button>
-                          )}
-                          {message.text.trim() && (
-                            <button
-                              type="button"
-                              onClick={() => void toggleTranslation(message)}
-                              disabled={translating.has(message.id)}
-                              title="Перевести сообщение"
-                              aria-label="Перевести сообщение"
-                              className="underline underline-offset-2 hover:text-white disabled:opacity-50"
-                            >
-                              {translating.has(message.id)
-                                ? "Перевод…"
-                                : translation
-                                  ? "Скрыть перевод"
-                                  : "Перевести"}
-                            </button>
-                          )}
-                          {message.isVoice && (
-                            <button
-                              type="button"
-                              onClick={() => void transcribe(message.id)}
-                              disabled={transcribing.has(message.id)}
-                              title="Расшифровать голосовое"
-                              aria-label="Расшифровать голосовое"
-                              className="underline underline-offset-2 hover:text-white disabled:opacity-50"
-                            >
-                              {transcript?.pending ||
-                              transcribing.has(message.id)
-                                ? "Расшифровка…"
-                                : "Расшифровать"}
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => setForwardIds([message.id])}
-                            title="Переслать"
-                            aria-label="Переслать"
-                            className="underline underline-offset-2 hover:text-white"
-                          >
-                            Переслать
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void copyMessage(message)}
-                            title="Копировать"
-                            aria-label="Копировать"
-                            className="underline underline-offset-2 hover:text-white"
-                          >
-                            {copiedKey === `message:${message.id}`
-                              ? "Скопировано"
-                              : "Копировать"}
-                          </button>
-                          {message.outgoing && (
-                            <button
-                              type="button"
-                              onClick={() => startEdit(message)}
-                              title="Изменить"
-                              aria-label="Изменить"
-                              className="underline underline-offset-2 hover:text-white"
-                            >
-                              Изменить
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  "Удалить это сообщение только у себя?",
-                                )
-                              ) {
-                                onDelete(message.id, { revoke: false });
-                              }
-                            }}
-                            title="Удалить у себя"
-                            aria-label="Удалить у себя"
-                            className="text-red-200 underline underline-offset-2 hover:text-red-100"
-                          >
-                            Удалить у себя
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  "Удалить это сообщение у всех участников? Это действие необратимо.",
-                                )
-                              ) {
-                                onDelete(message.id, { revoke: true });
-                              }
-                            }}
-                            title="Удалить у всех"
-                            aria-label="Удалить у всех"
-                            className="text-red-200 underline underline-offset-2 hover:text-red-100"
-                          >
-                            Удалить у всех
-                          </button>
-                        </div>
-                      )}
                     </div>
                     {selecting && message.outgoing && (
                       <SelectionMark checked={isSelected} />
@@ -1568,6 +1537,132 @@ export function ChatWindow({
         />
       )}
     </section>
+  );
+}
+
+type MessageMenuAction = {
+  label: string;
+  onSelect: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+};
+
+/**
+ * Compact "⋯" toggle with the per-message action dropdown. Absolutely placed
+ * in the bubble's top-right corner so opening it never shifts the layout; it
+ * closes on an outside click, on Escape and after any action.
+ */
+function MessageActionsMenu({
+  open,
+  onToggle,
+  onClose,
+  actions,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  actions: MessageMenuAction[];
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Move focus into the menu as soon as it opens so keyboard users can pick
+  // an item; the toggle keeps `aria-expanded` in sync for screen readers.
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+      ?.focus();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && rootRef.current?.contains(target)) return;
+      onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      onClose();
+      toggleRef.current?.focus();
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onClose]);
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]:not(:disabled)',
+      ) ?? [],
+    );
+    if (items.length === 0) return;
+    event.preventDefault();
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      event.key === "ArrowDown"
+        ? items[(index + 1) % items.length]
+        : items[(index - 1 + items.length) % items.length];
+    next?.focus();
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className="absolute right-1 top-1 z-20 opacity-100 transition-opacity focus-within:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100"
+    >
+      <button
+        ref={toggleRef}
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggle();
+        }}
+        title="Действия с сообщением"
+        aria-label="Действия с сообщением"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="flex h-6 w-6 items-center justify-center rounded-full bg-black/35 text-sm leading-none text-white/80 shadow-sm backdrop-blur transition-colors hover:bg-black/60 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+      >
+        <span aria-hidden="true">⋯</span>
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-label="Действия с сообщением"
+          onKeyDown={onMenuKeyDown}
+          className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 py-1 text-left shadow-2xl"
+        >
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              role="menuitem"
+              disabled={action.disabled}
+              onClick={() => {
+                onClose();
+                action.onSelect();
+              }}
+              className={`flex w-full items-center px-3 py-1.5 text-left text-xs transition-colors hover:bg-zinc-800 disabled:opacity-40 ${
+                action.danger
+                  ? "text-red-300 hover:bg-red-950/50"
+                  : "text-zinc-300"
+              }`}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -220,8 +220,8 @@ export function sendMessageComment(
 }
 
 /**
- * Delete one message. `revoke` defaults to `false`: the message disappears
- * only for this account. `revoke: true` deletes it for everyone.
+ * Delete one message. The API revokes for everyone by default; `revoke: false`
+ * is still accepted for an account-local delete (no UI uses it).
  */
 export function deleteMessage(
   accountId: string,
@@ -230,7 +230,9 @@ export function deleteMessage(
   options: { revoke?: boolean } = {},
 ): Promise<{ deleted: boolean; messageId: number }> {
   const params = new URLSearchParams();
-  if (options.revoke) params.set("revoke", "true");
+  if (options.revoke !== undefined) {
+    params.set("revoke", String(options.revoke));
+  }
   const query = params.toString();
   return apiFetch<{ deleted: boolean; messageId: number }>(
     `/accounts/${accountId}/chats/${chatId}/messages/${messageId}${query ? `?${query}` : ""}`,
