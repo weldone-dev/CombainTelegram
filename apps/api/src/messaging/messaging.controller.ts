@@ -10,6 +10,7 @@ import {
   PayloadTooLargeException,
   Post,
   Query,
+  Res,
   StreamableFile,
   UploadedFile,
   UseFilters,
@@ -34,10 +35,16 @@ import type {
   ForwardView,
   MediaDownloadView,
   MessageHistoryView,
+  MessageTranscriptionView,
+  MessageTranslationView,
   ReadAllView,
   ReadView,
 } from './messaging.service.js';
-import type { ChatView, MessageView } from './message-view.js';
+import type {
+  ChatView,
+  MessagePollView,
+  MessageView,
+} from './message-view.js';
 import { MAX_MEDIA_BYTES } from './media.js';
 
 interface UploadedMediaFile {
@@ -45,6 +52,11 @@ interface UploadedMediaFile {
   mimetype?: string;
   size?: number;
   buffer?: Buffer;
+}
+
+/** Minimal passive response surface used for the 204 reaction fallback. */
+interface HttpResponse {
+  status(code: number): unknown;
 }
 
 /**
@@ -338,6 +350,7 @@ export class MessagingController {
     @Param('messageId') messageId: string,
     @Query('sessionId') sessionId?: string,
     @Query('filename') filename?: string,
+    @Query('thumb') thumb?: string,
   ): Promise<StreamableFile> {
     const media: MediaDownloadView = await this.messaging.downloadMedia(
       user.id,
@@ -346,12 +359,86 @@ export class MessagingController {
       messageId,
       sessionId,
       filename,
+      thumb,
     );
     return new StreamableFile(media.data, {
       type: media.mimeType,
       disposition: media.disposition,
       length: media.length,
     });
+  }
+
+  @Post(':chatId/messages/:messageId/reaction')
+  @ApiOperation({ summary: 'Send or remove a reaction on a message' })
+  async sendReaction(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: { emoji?: unknown; sessionId?: unknown } = {},
+    @Res({ passthrough: true }) res: HttpResponse,
+  ): Promise<MessageView | null> {
+    const message = await this.messaging.sendReaction(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      body,
+    );
+    if (!message) {
+      // The reaction was accepted but Telegram did not return the message.
+      res.status(204);
+      return null;
+    }
+    return message;
+  }
+
+  @Post(':chatId/messages/:messageId/vote')
+  @ApiOperation({ summary: 'Vote in or retract a vote from a poll' })
+  votePoll(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: { options?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessagePollView> {
+    return this.messaging.votePoll(user.id, accountId, chatId, messageId, body);
+  }
+
+  @Post(':chatId/messages/:messageId/translate')
+  @ApiOperation({ summary: 'Translate a message (default target: ru)' })
+  translateMessage(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: { to?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessageTranslationView> {
+    return this.messaging.translateMessage(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      body,
+    );
+  }
+
+  @Post(':chatId/messages/:messageId/transcribe')
+  @ApiOperation({ summary: 'Transcribe a voice message' })
+  transcribeVoice(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Query('sessionId') sessionId?: string,
+  ): Promise<MessageTranscriptionView> {
+    return this.messaging.transcribeVoice(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      sessionId,
+    );
   }
 
   @Post(':chatId/forward')

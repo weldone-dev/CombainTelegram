@@ -176,6 +176,48 @@ export function parseDeleteOptions(
 
 export type ChatInfoKind = 'media' | 'links' | 'polls';
 
+/** `thumb=1|true` on the media endpoint: serve a small preview thumbnail. */
+export function parseThumbFlag(value: unknown): boolean {
+  return parseOptionalBoolean(value, 'thumb') === true;
+}
+
+/**
+ * Reaction emoji of `POST .../reaction`: an emoji string, or `null`/empty to
+ * remove the current reaction.
+ */
+export function parseReactionEmoji(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') invalid('emoji must be a string or null');
+  const emoji = value.trim();
+  if (!emoji) return null;
+  // Custom emoji can be long surrogate pairs, but an unbounded string would
+  // end up in the TL payload; 64 code units is far above any real emoji.
+  if (emoji.length > 64) invalid('emoji must be at most 64 characters');
+  return emoji;
+}
+
+/** Vote payload: `null` retracts the vote, otherwise answer indexes. */
+export function parsePollOptions(value: unknown): number[] | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) invalid('options must be an array or null');
+  if (value.length > 100) invalid('options must contain at most 100 answers');
+  const options = value.map((option) => {
+    const index = parseInteger(option, 'options');
+    if (index < 0) invalid('options must be non-negative answer indexes');
+    return index;
+  });
+  return options;
+}
+
+/** Target language of a translation: a two-letter ISO 639-1 code (`ru`). */
+export function parseTranslateLanguage(value: unknown): string {
+  if (value === undefined || value === null || value === '') return 'ru';
+  if (typeof value !== 'string' || !/^[a-zA-Z]{2}$/.test(value.trim())) {
+    invalid('to must be a two-letter language code');
+  }
+  return value.trim().toLowerCase();
+}
+
 const CHAT_INFO_KINDS: ChatInfoKind[] = ['media', 'links', 'polls'];
 
 /**

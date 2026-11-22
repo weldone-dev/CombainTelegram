@@ -14,9 +14,11 @@ import type { AvatarImage } from '../accounts/accounts.service.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
 import {
+  MAX_MEDIA_THUMB_BYTES,
   MEDIA_CACHE_MAX_BYTES,
   MEDIA_CACHE_MAX_ENTRY_BYTES,
   MEDIA_CACHE_TTL_MS,
+  MEDIA_THUMB_CACHE_TTL_MS,
   assertMediaDownloadSize,
   assertMediaUpload,
   contentDisposition,
@@ -24,6 +26,7 @@ import {
   isInlineSafeMime,
   mediaKindForMime,
   normalizeMimeType,
+  pickThumbnail,
   sanitizeFileName,
 } from './media.js';
 import {
@@ -38,12 +41,14 @@ import {
   toChatViewFromPeer,
   toFolderView,
   toMessageMediaView,
+  toMessagePollView,
   toMessageView,
 } from './message-view.js';
 import type {
   ChatView,
   FolderView,
   MessageMediaView,
+  MessagePollView,
   MessageView,
 } from './message-view.js';
 import {
@@ -62,7 +67,11 @@ import {
   parseOptionalCaption,
   parseOptionalMessageId,
   parseOptionalSessionId,
+  parsePollOptions,
+  parseReactionEmoji,
   parseSearchQuery,
+  parseThumbFlag,
+  parseTranslateLanguage,
 } from './params.js';
 import type { ChatInfoKind } from './params.js';
 
@@ -134,6 +143,16 @@ export interface MediaDownloadView {
   fileName: string;
   disposition: string;
   length: number;
+}
+
+export interface MessageTranslationView {
+  text: string;
+  to: string;
+}
+
+export interface MessageTranscriptionView {
+  text: string;
+  pending: boolean;
 }
 
 export interface ChatSearchView {
@@ -305,6 +324,8 @@ interface DownloadCacheEntry {
   fileName: string;
   inline: boolean;
   at: number;
+  /** Per-entry lifetime; thumbnails live longer than full files. */
+  ttlMs?: number;
 }
 
 @Injectable()
@@ -354,7 +375,7 @@ export class MessagingService {
     this.downloadBytes += entry.data.byteLength;
 
     for (const [cachedKey, cached] of this.downloads) {
-      if (entry.at - cached.at >= MEDIA_CACHE_TTL_MS) {
+      if (entry.at - cached.at >= (cached.ttlMs ?? MEDIA_CACHE_TTL_MS)) {
         this.forgetDownload(cachedKey);
       }
     }
@@ -804,9 +825,46 @@ export class MessagingService {
     }
   }
 
+  /** Live cache entry, refreshed to LRU position; `undefined` when stale. */
+  private cachedDownload(key: string): DownloadCacheEntry | undefined {
+    const entry = this.downloads.get(key);
+    if (!entry) return undefined;
+    if (Date.now() - entry.at >= (entry.ttlMs ?? MEDIA_CACHE_TTL_MS)) {
+      this.forgetDownload(key);
+      return undefined;
+    }
+    // Re-insert so the LRU pruning sees this key as recently used.
+    this.downloads.delete(key);
+    this.downloads.set(key, entry);
+    return entry;
+  }
+
+  /** HTTP payload for a cache entry, honouring a client-supplied name. */
+  private toDownloadView(
+    entry: DownloadCacheEntry,
+    requestedName: string | null,
+  ): MediaDownloadView {
+    const fileName = sanitizeFileName(
+      requestedName ?? entry.fileName,
+      entry.fileName,
+    );
+    return {
+      data: entry.data,
+      mimeType: entry.mimeType,
+      fileName,
+      disposition: contentDisposition(fileName, entry.inline),
+      length: entry.data.byteLength,
+    };
+  }
+
   /**
-   * Download the media attached to one message. Photos and generic documents
-   * are supported; the last few results are cached in memory for 5 minutes.
+   * Download the media attached to one message. Photos, generic documents and
+   * voice notes are supported; the last few results are cached in memory.
+   *
+   * `thumb=1|true` asks for a small preview instead: the best thumbnail is
+   * downloaded (≤ {@link MAX_MEDIA_THUMB_BYTES}), cached separately under
+   * `:thumb` for longer, and served inline. When no usable thumbnail exists —
+   * or downloading it fails — the full media is returned instead of a 404.
    */
   async downloadMedia(
     userId: string,
@@ -815,11 +873,14 @@ export class MessagingService {
     rawMessageId: string,
     sessionIdParam?: unknown,
     filenameParam?: unknown,
+    thumbParam?: unknown,
   ): Promise<MediaDownloadView> {
     const chatId = parseChatId(rawChatId);
     const messageId = parseMessageId(rawMessageId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
+    const wantThumb = parseThumbFlag(thumbParam);
     const cacheKey = `${userId}:${accountId}:${chatId}:${messageId}`;
+    const thumbKey = `${cacheKey}:thumb`;
 
     // Ownership/session check first: a cache hit must not bypass it.
     const { client } = await this.accounts.resolveSession(
@@ -828,31 +889,17 @@ export class MessagingService {
       sessionId,
     );
 
-    let cached = this.downloads.get(cacheKey);
-    if (cached && Date.now() - cached.at < MEDIA_CACHE_TTL_MS) {
-      this.downloads.delete(cacheKey);
-      this.downloads.set(cacheKey, cached);
-    } else {
-      cached = undefined;
-    }
-
     const requestedName =
       typeof filenameParam === 'string' && filenameParam.trim()
         ? filenameParam.trim()
         : null;
 
-    if (cached) {
-      const fileName = sanitizeFileName(
-        requestedName ?? cached.fileName,
-        cached.fileName,
-      );
-      return {
-        data: cached.data,
-        mimeType: cached.mimeType,
-        fileName,
-        disposition: contentDisposition(fileName, cached.inline),
-        length: cached.data.byteLength,
-      };
+    if (!wantThumb) {
+      const cached = this.cachedDownload(cacheKey);
+      if (cached) return this.toDownloadView(cached, requestedName);
+    } else {
+      const cachedThumb = this.cachedDownload(thumbKey);
+      if (cachedThumb) return this.toDownloadView(cachedThumb, requestedName);
     }
 
     let message: Message | null = null;
@@ -868,12 +915,59 @@ export class MessagingService {
       !message ||
       !media ||
       !descriptor?.downloadable ||
-      (media.type !== 'photo' && media.type !== 'document')
+      (media.type !== 'photo' &&
+        media.type !== 'document' &&
+        media.type !== 'voice')
     ) {
       throw notFound(
         'MEDIA_NOT_FOUND',
-        'This message has no downloadable photo or document',
+        'This message has no downloadable photo, document or voice note',
       );
+    }
+
+    if (wantThumb && (media.type === 'photo' || media.type === 'document')) {
+      try {
+        const thumb = pickThumbnail(
+          media as Parameters<typeof pickThumbnail>[0],
+        );
+        if (thumb) {
+          const data = Buffer.from(
+            await client.downloadAsBuffer(
+              thumb as Parameters<typeof client.downloadAsBuffer>[0],
+            ),
+          );
+          if (data.byteLength > 0 && data.byteLength <= MAX_MEDIA_THUMB_BYTES) {
+            const mimeType = 'image/jpeg';
+            const fileName = sanitizeFileName(
+              requestedName ?? 'thumb.jpg',
+              'thumb.jpg',
+            );
+            this.rememberDownload(thumbKey, {
+              data,
+              mimeType,
+              fileName: 'thumb.jpg',
+              inline: true,
+              at: Date.now(),
+              ttlMs: MEDIA_THUMB_CACHE_TTL_MS,
+            });
+            return {
+              data,
+              mimeType,
+              fileName,
+              disposition: contentDisposition(fileName, true),
+              length: data.byteLength,
+            };
+          }
+        }
+      } catch {
+        // Missing or undownloadable preview: fall back to the full file.
+      }
+    }
+
+    if (wantThumb) {
+      // A previously cached full download is the cheapest fallback.
+      const cachedFull = this.cachedDownload(cacheKey);
+      if (cachedFull) return this.toDownloadView(cachedFull, requestedName);
     }
 
     // Telegram documents may be gigabytes; reject before buffering anything.
@@ -883,20 +977,30 @@ export class MessagingService {
       const data = Buffer.from(await client.downloadAsBuffer(media));
       // Never echo the sender's MIME verbatim: `image/svg+xml` would be
       // executable on this origin. Invalid values become octet-stream, and
-      // only raster images are served `inline`.
+      // only raster images are served `inline`; voice notes are played from
+      // the API origin by an `<audio>` element, so they stay inline too.
       const mimeType = normalizeMimeType(
         descriptor.mimeType ??
-          (descriptor.kind === 'photo' ? 'image/jpeg' : null),
+          (descriptor.kind === 'photo'
+            ? 'image/jpeg'
+            : descriptor.kind === 'voice'
+              ? 'audio/ogg'
+              : null),
       );
       const defaultFileName = sanitizeFileName(
         descriptor.fileName,
-        descriptor.kind === 'photo' ? 'photo.jpg' : 'document',
+        descriptor.kind === 'photo'
+          ? 'photo.jpg'
+          : descriptor.kind === 'voice'
+            ? 'voice.ogg'
+            : 'document',
       );
       const fileName = sanitizeFileName(
         requestedName ?? defaultFileName,
         defaultFileName,
       );
-      const inline = isInlineSafeMime(mimeType);
+      const inline =
+        isInlineSafeMime(mimeType) || descriptor.kind === 'voice';
 
       this.rememberDownload(cacheKey, {
         data,
@@ -913,6 +1017,150 @@ export class MessagingService {
         disposition: contentDisposition(fileName, inline),
         length: data.byteLength,
       };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Send or remove a reaction. Telegram answers with the edited message only
+   * for users; when it is unavailable the caller gets `null` (HTTP 204) and
+   * the realtime edit event carries the new state.
+   */
+  async sendReaction(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    body: { emoji?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessageView | null> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const emoji = parseReactionEmoji(body.emoji);
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      await client.sendReaction({ chatId, message: messageId, emoji: emoji ?? null });
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+
+    try {
+      const [message] = await client.getMessages(chatId, [messageId]);
+      return message ? toMessageView(message) : null;
+    } catch {
+      // The reaction was accepted; only the re-fetch is best effort.
+      return null;
+    }
+  }
+
+  /** Vote in (or retract a vote from) a poll and return its new state. */
+  async votePoll(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    body: { options?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessagePollView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const options = parsePollOptions(body.options);
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    let poll;
+    try {
+      poll = await client.sendVote({ chatId, message: messageId, options });
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+    const view = toMessagePollView(poll);
+    if (!view) {
+      throw apiError('TELEGRAM_ERROR', 'Telegram returned an unusable poll');
+    }
+    return view;
+  }
+
+  /**
+   * Translate a message's text into `to` (default `ru`). `message.text`
+   * already includes media captions, so there is no separate caption path.
+   */
+  async translateMessage(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    body: { to?: unknown; sessionId?: unknown } = {},
+  ): Promise<MessageTranslationView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const to = parseTranslateLanguage(body.to);
+    const sessionId = parseOptionalSessionId(body.sessionId);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    let message: Message | null = null;
+    try {
+      [message] = await client.getMessages(chatId, [messageId]);
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+    if (!message) {
+      throw notFound('MESSAGE_NOT_FOUND', 'This message was not found');
+    }
+    const text = message.text?.trim();
+    if (!text) {
+      throw apiError('VALIDATION_ERROR', 'This message has no text to translate');
+    }
+
+    try {
+      const result = await client.translateText(text, to);
+      return { text: result.text, to };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Transcribe a voice note. Telegram answers immediately for short notes and
+   * with `pending: true` while the server still works; the UI can retry.
+   */
+  async transcribeVoice(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    sessionIdParam?: unknown,
+  ): Promise<MessageTranscriptionView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const peer = await client.resolvePeer(chatId);
+      const raw = await client.call({
+        _: 'messages.transcribeAudio',
+        peer,
+        msgId: messageId,
+      });
+      return { text: raw.text ?? '', pending: raw.pending === true };
     } catch (error) {
       raiseTelegramError(error);
     }

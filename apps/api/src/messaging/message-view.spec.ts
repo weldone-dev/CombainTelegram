@@ -5,6 +5,7 @@ import {
   toChatViewFromPeer,
   toFolderView,
   toMessageMediaView,
+  toMessagePollView,
   toMessageView,
 } from './message-view.js';
 import type { DialogLike, MessageLike } from './message-view.js';
@@ -48,6 +49,9 @@ describe('message DTO mapping', () => {
       replyToId: null,
       mediaType: null,
       media: null,
+      reactions: [],
+      poll: null,
+      isVoice: false,
     });
   });
 
@@ -211,8 +215,7 @@ describe('message DTO mapping', () => {
     });
   });
 
-  it('maps a dialog without messages', () => {
-    const dialog: DialogLike = {
+  it('maps a dialog without messages', () => {    const dialog: DialogLike = {
       peer: {
         id: 5,
         type: 'user',
@@ -317,5 +320,145 @@ describe('canSendMessages', () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe('message reactions', () => {
+  it('maps reaction counts, marking the chosen one', () => {
+    const message = fakeMessage({
+      reactions: {
+        reactions: [
+          { emoji: '👍', count: 3, order: null },
+          { emoji: '❤️', count: 1, order: 0 },
+        ],
+      },
+    });
+
+    expect(toMessageView(message).reactions).toEqual([
+      { emoji: '👍', count: 3, chosen: false },
+      { emoji: '❤️', count: 1, chosen: true },
+    ]);
+  });
+
+  it('strings custom emoji Longs as custom:<id>', () => {
+    const custom = { toString: () => '5368324170671202286' };
+    expect(
+      toMessageView(
+        fakeMessage({
+          reactions: { reactions: [{ emoji: custom, count: 2, order: null }] },
+        }),
+      ).reactions,
+    ).toEqual([
+      { emoji: 'custom:5368324170671202286', count: 2, chosen: false },
+    ]);
+  });
+
+  it('drops zero counts and empty reaction sets', () => {
+    expect(
+      toMessageView(
+        fakeMessage({
+          reactions: {
+            reactions: [
+              { emoji: '👍', count: 0, order: null },
+              { emoji: '', count: 4, order: null },
+            ],
+          },
+        }),
+      ).reactions,
+    ).toEqual([]);
+    expect(
+      toMessageView(fakeMessage({ reactions: { reactions: [] } })).reactions,
+    ).toEqual([]);
+    expect(toMessageView(fakeMessage({ reactions: null })).reactions).toEqual(
+      [],
+    );
+  });
+});
+
+describe('message polls', () => {
+  const pollMedia = {
+    type: 'poll',
+    id: { toString: () => '123456' },
+    question: 'Which one?',
+    answers: [
+      { text: 'A', voters: 4, chosen: true, correct: true },
+      { text: 'B', voters: 1, chosen: false, correct: false },
+    ],
+    voters: 5,
+    isClosed: false,
+    isQuiz: true,
+    isMultiple: false,
+    hideResultsUntilClose: false,
+    solution: 'Because A',
+  };
+
+  it('maps a poll including answer indexes and quiz data', () => {
+    const view = toMessageView(fakeMessage({ media: pollMedia }));
+
+    expect(view.poll).toEqual({
+      id: '123456',
+      question: 'Which one?',
+      closed: false,
+      quiz: true,
+      multiple: false,
+      voters: 5,
+      hideResultsUntilClose: false,
+      answers: [
+        { index: 0, text: 'A', voters: 4, chosen: true, correct: true },
+        { index: 1, text: 'B', voters: 1, chosen: false, correct: false },
+      ],
+      solution: 'Because A',
+    });
+  });
+
+  it('leaves poll null for non-poll media and plain messages', () => {
+    expect(toMessageView(fakeMessage()).poll).toBeNull();
+    expect(
+      toMessageView(fakeMessage({ media: { type: 'photo' } })).poll,
+    ).toBeNull();
+  });
+
+  it('survives a malformed poll without throwing', () => {
+    const malformed = {
+      type: 'poll',
+      get answers(): never {
+        throw new Error('broken poll');
+      },
+    };
+    expect(() =>
+      toMessageView(fakeMessage({ media: malformed })),
+    ).not.toThrow();
+    expect(toMessageView(fakeMessage({ media: malformed })).poll).toBeNull();
+  });
+
+  it('rejects a poll without an answers array', () => {
+    expect(
+      toMessagePollView({ type: 'poll', question: 'Q', answers: undefined }),
+    ).toBeNull();
+  });
+});
+
+describe('voice messages', () => {
+  it('maps voice media as downloadable audio/ogg', () => {
+    const message = fakeMessage({
+      media: { type: 'voice', fileSize: 2048 },
+    });
+
+    expect(toMessageView(message)).toMatchObject({
+      mediaType: 'voice',
+      isVoice: true,
+      media: {
+        kind: 'voice',
+        mimeType: 'audio/ogg',
+        size: 2048,
+        downloadable: true,
+      },
+    });
+  });
+
+  it('keeps isVoice false for other media', () => {
+    expect(toMessageView(fakeMessage({ media: { type: 'photo' } })).isVoice).toBe(
+      false,
+    );
   });
 });

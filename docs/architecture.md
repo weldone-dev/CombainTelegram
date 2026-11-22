@@ -270,11 +270,15 @@ GET    /accounts/:accountId/chats/:chatId/info/media?kind=&limit=&offsetId=  med
 GET    /accounts/:accountId/chats/:chatId/info/similar          similar channels
 GET    /accounts/:accountId/chats/:chatId/avatar                JPEG chat photo (404 if none)
 GET    /accounts/:accountId/chats/:chatId/messages?limit=50&offsetId=&newerThanId=&sessionId=
-GET    /accounts/:accountId/chats/:chatId/messages/:messageId/media?filename=&sessionId=  download attachment
+GET    /accounts/:accountId/chats/:chatId/messages/:messageId/media?filename=&thumb=&sessionId=  download attachment (`thumb=1`: inline preview)
 GET    /accounts/:accountId/chats/:chatId/search?q=&limit=&offsetId=&sessionId=
 POST   /accounts/:accountId/chats/:chatId/messages             { text, replyToId?, sessionId? }
 POST   /accounts/:accountId/chats/:chatId/media                multipart `file` (≤ 50 MB) + caption?, replyToId?  → 413 PAYLOAD_TOO_LARGE
 POST   /accounts/:accountId/chats/:chatId/forward              { fromChatId, messageIds[1..100], sessionId? }
+POST   /accounts/:accountId/chats/:chatId/messages/:messageId/reaction    { emoji } → MessageView | 204
+POST   /accounts/:accountId/chats/:chatId/messages/:messageId/vote        { options: number[] | null } → poll
+POST   /accounts/:accountId/chats/:chatId/messages/:messageId/translate   { to? } → { text, to }
+POST   /accounts/:accountId/chats/:chatId/messages/:messageId/transcribe  → { text, pending }
 PATCH  /accounts/:accountId/chats/:chatId                      { pinned?, muted?, archived?, unread?, sessionId? }
 DELETE /accounts/:accountId/chats/:chatId?revoke=&clearHistory=&sessionId=
 POST   /accounts/:accountId/chats/read-all                     { sessionId? } → { read, failed }
@@ -324,8 +328,20 @@ batch plus a little read context, so opening a chat with many unread messages
 does not mark everything read at once. Messages come from `getHistory`, newest
 first, with `nextOffsetId` for paging:
 `{ id, chatId, text, date, outgoing, edited, senderId, senderName, replyToId,
-mediaType, media }`, where `media` is
-`{ kind: photo|document|other, mimeType, fileName, size, downloadable }`.
+mediaType, media, reactions, poll, isVoice }`, where `media` is
+`{ kind: photo|document|voice|other, mimeType, fileName, size, downloadable }`
+(voice notes default to `audio/ogg`), `reactions` is
+`[{ emoji, count, chosen }]` (`custom:<id>` for custom emoji, zero counts
+dropped), and `poll` is
+`{ id, question, closed, quiz, multiple, voters, hideResultsUntilClose, answers:
+[{ index, text, voters, chosen, correct }], solution }` for poll media.
+The new message actions map to `sendReaction` (re-fetch → `MessageView`, `204`
+when Telegram returns none), `sendVote` (`null` retracts; answer indexes are
+positions in `poll.answers`), `translateText` (`to` is a 2-letter code,
+default `ru`, `message.text` includes captions) and a raw
+`messages.transcribeAudio` call (`pending` while Telegram still works;
+`MSG_VOICE_MISSING` → 400 `TRANSCRIPTION_UNAVAILABLE`,
+`PREMIUM_ACCOUNT_REQUIRED` → 403 `PREMIUM_REQUIRED`).
 Uploads (`POST /chats/:chatId/media`) accept one multipart `file` up to 50 MB
 (`MAX_MEDIA_BYTES`, `413 PAYLOAD_TOO_LARGE`), with an optional caption; images
 are sent as photos, everything else as documents. Downloads
@@ -336,6 +352,11 @@ type: invalid values become `application/octet-stream`, only raster images
 (`image/jpeg`, `image/png`, `image/webp`, `image/gif`) are served `inline`,
 every other type is forced to `attachment`. Media/avatar responses also send
 `X-Content-Type-Options: nosniff` and `Cache-Control: private, max-age=600`.
+`?thumb=1|true` serves the best preview (the `m` 320 px box, else the largest
+size ≤ 320 px, else the largest available) cached under `<key>:thumb` for
+30 minutes (`MAX_MEDIA_THUMB_BYTES` 2 MB cap); when no thumbnail exists or it
+fails, the full file is returned instead of a 404. Voice notes are served
+`audio/ogg` inline so the chat window can play them with `<audio controls>`.
 Sending trims text (non-empty, max 4096); typing accepts
 `typing`, `record_video`, `record_voice`, `upload_photo`, `upload_document`,
 `cancel`. The session must belong to the account and the account to the user;

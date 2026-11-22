@@ -128,6 +128,28 @@ const SIMPLE: Record<string, SimpleMapping> = {
     message: 'This chat was not found',
     status: HttpStatus.BAD_REQUEST,
   },
+  // Voice transcription (messages.transcribeAudio). Transcription is a
+  // Premium feature, and the message must actually be a voice note.
+  MSG_VOICE_MISSING: {
+    code: 'TRANSCRIPTION_UNAVAILABLE',
+    message: 'This message is not a voice note that can be transcribed',
+    status: HttpStatus.BAD_REQUEST,
+  },
+  MSG_VOICE_TOO_LONG: {
+    code: 'TRANSCRIPTION_UNAVAILABLE',
+    message: 'This voice message is too long to transcribe',
+    status: HttpStatus.BAD_REQUEST,
+  },
+  TRANSCRIPTION_FAILED: {
+    code: 'TRANSCRIPTION_FAILED',
+    message: 'Telegram could not transcribe this voice message',
+    status: HttpStatus.BAD_GATEWAY,
+  },
+  PREMIUM_ACCOUNT_REQUIRED: {
+    code: 'PREMIUM_REQUIRED',
+    message: 'Voice transcription requires a Telegram Premium account',
+    status: HttpStatus.FORBIDDEN,
+  },
 };
 
 /** opentele2 flow errors are plain objects with a stable `code`. */

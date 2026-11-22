@@ -8,6 +8,10 @@ import type {
   FoldersView,
   FolderView,
   GlobalSearchView,
+  MessagePollView,
+  MessageTranscriptionView,
+  MessageTranslationView,
+  MessageView,
   ReadAllView,
 } from "./types";
 
@@ -128,5 +132,57 @@ export function searchChatMessages(
   return apiFetch<ChatSearchView>(
     `/accounts/${accountId}/chats/${chatId}/search?${params.toString()}`,
     {},
+  );
+}
+
+/** Send or remove (`null`) the current account's reaction on a message. */
+export async function sendMessageReaction(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  emoji: string | null,
+): Promise<MessageView | null> {
+  const message = await apiFetch<MessageView | undefined>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/reaction`,
+    { method: "POST", body: { emoji } },
+  );
+  return message ?? null;
+}
+
+/** Vote in a poll (`[index]`), or retract with `null`. */
+export function sendPollVote(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  options: number[] | null,
+): Promise<MessagePollView> {
+  return apiFetch<MessagePollView>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/vote`,
+    { method: "POST", body: { options } },
+  );
+}
+
+/** Translate the message text (captions included) into a two-letter code. */
+export function translateMessage(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+  to: string,
+): Promise<MessageTranslationView> {
+  return apiFetch<MessageTranslationView>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/translate`,
+    { method: "POST", body: { to } },
+  );
+}
+
+/** Transcribe a voice note; `pending` means Telegram is still working. */
+export function transcribeMessage(
+  accountId: string,
+  chatId: number,
+  messageId: number,
+): Promise<MessageTranscriptionView> {
+  return apiFetch<MessageTranscriptionView>(
+    `/accounts/${accountId}/chats/${chatId}/messages/${messageId}/transcribe`,
+    { method: "POST", body: {} },
   );
 }

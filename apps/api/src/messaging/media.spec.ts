@@ -1,5 +1,6 @@
 import {
   MAX_MEDIA_BYTES,
+  MAX_THUMB_WIDTH,
   assertMediaDownloadSize,
   assertMediaUpload,
   contentDisposition,
@@ -7,6 +8,7 @@ import {
   isInlineSafeMime,
   mediaKindForMime,
   normalizeMimeType,
+  pickThumbnail,
   sanitizeFileName,
 } from './media.js';
 
@@ -88,6 +90,50 @@ describe('media filename helpers', () => {
     expect(disposition).toContain('%28');
     expect(disposition).toContain('%29');
     expect(disposition).toContain('%2A');
+  });
+});
+
+describe('thumbnail selection', () => {
+  const thumb = (width: number, extra: Record<string, unknown> = {}) => ({
+    width,
+    isVideo: false,
+    ...extra,
+  });
+
+  it('prefers the 320px box when Telegram has it', () => {
+    const m = thumb(320);
+    expect(
+      pickThumbnail({
+        getThumbnail: (type: string) => (type === 'm' ? m : null),
+        thumbnails: [thumb(100), thumb(800)],
+      }),
+    ).toBe(m);
+  });
+
+  it('falls back to the largest size at or below the cap', () => {
+    expect(
+      pickThumbnail({ thumbnails: [thumb(800), thumb(200), thumb(120)] }),
+    ).toEqual(thumb(200));
+    expect(MAX_THUMB_WIDTH).toBe(320);
+  });
+
+  it('uses the largest available size when everything is bigger', () => {
+    expect(pickThumbnail({ thumbnails: [thumb(800), thumb(1280)] })).toEqual(
+      thumb(1280),
+    );
+  });
+
+  it('skips video thumbnails and survives throwing getters', () => {
+    expect(
+      pickThumbnail({
+        getThumbnail() {
+          throw new Error('broken');
+        },
+        thumbnails: [thumb(320, { isVideo: true }), thumb(90)],
+      }),
+    ).toEqual(thumb(90));
+    expect(pickThumbnail({ thumbnails: [] })).toBeNull();
+    expect(pickThumbnail(null)).toBeNull();
   });
 });
 
