@@ -159,6 +159,21 @@ export function parseOptionalBoolean(
   return invalid(`${field} must be a boolean`);
 }
 
+/**
+ * `DELETE /chats/:id` options. Both default to `false`: a bare delete only
+ * removes the chat for this account, and `revoke=true` is the explicit
+ * "delete for everyone".
+ */
+export function parseDeleteOptions(
+  query: { revoke?: unknown; clearHistory?: unknown } = {},
+): { revoke: boolean; clearHistory: boolean } {
+  return {
+    revoke: parseOptionalBoolean(query.revoke, 'revoke') ?? false,
+    clearHistory:
+      parseOptionalBoolean(query.clearHistory, 'clearHistory') ?? false,
+  };
+}
+
 export type ChatInfoKind = 'media' | 'links' | 'polls';
 
 const CHAT_INFO_KINDS: ChatInfoKind[] = ['media', 'links', 'polls'];

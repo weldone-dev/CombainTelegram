@@ -2,6 +2,7 @@ import {
   extractFirstUrl,
   normalizeUsername,
   parseChatInfoKind,
+  parseDeleteOptions,
   parseFolderId,
   parseLimit,
   parseMessageIds,
@@ -81,6 +82,40 @@ describe('folder and boolean params', () => {
     expect(parseOptionalBoolean(undefined, 'archived')).toBeUndefined();
     expect(() => parseOptionalBoolean('yes', 'archived')).toThrow(
       /must be a boolean/,
+    );
+  });
+});
+
+describe('delete chat params', () => {
+  it('deletes only on the current account side by default', () => {
+    expect(parseDeleteOptions()).toEqual({
+      revoke: false,
+      clearHistory: false,
+    });
+    expect(parseDeleteOptions({})).toEqual({
+      revoke: false,
+      clearHistory: false,
+    });
+  });
+
+  it('requires an explicit revoke=true for delete-for-everyone', () => {
+    expect(parseDeleteOptions({ revoke: 'true' })).toEqual({
+      revoke: true,
+      clearHistory: false,
+    });
+    expect(parseDeleteOptions({ revoke: '1', clearHistory: 'true' })).toEqual({
+      revoke: true,
+      clearHistory: true,
+    });
+    expect(parseDeleteOptions({ revoke: 'false' })).toEqual({
+      revoke: false,
+      clearHistory: false,
+    });
+  });
+
+  it('rejects non-boolean flags', () => {
+    expect(() => parseDeleteOptions({ revoke: 'yes' })).toThrow(
+      /revoke must be a boolean/,
     );
   });
 });
