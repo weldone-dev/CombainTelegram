@@ -14,6 +14,7 @@ import { apiError, conflict, notFound } from '../common/api-error.js';
 import { optionalString, requireString } from '../common/validation.js';
 import { setLogProxyId } from '../logs/log-context.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
+import { downloadFileBuffer } from '../messaging/telegram-download.js';
 import type { AccountView } from './account-view.js';
 import { serializeAccount } from './account-view.js';
 
@@ -395,7 +396,10 @@ export class AccountsService {
     }
 
     try {
-      const data = Buffer.from(await client.downloadAsBuffer(location));
+      const data = await downloadFileBuffer(
+        client,
+        location as unknown as Parameters<typeof downloadFileBuffer>[1],
+      );
       this.cacheAvatar(cacheKey, data);
       return { data, mime: 'image/jpeg' };
     } catch (error) {
