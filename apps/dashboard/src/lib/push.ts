@@ -34,7 +34,12 @@ export async function registerServiceWorker(): Promise<ServiceWorkerRegistration
     return null;
   }
   try {
-    return await navigator.serviceWorker.register(SW_URL, { scope: "/" });
+    const registration = await navigator.serviceWorker.register(SW_URL, {
+      scope: "/",
+    });
+    // Pick up a new SW even when the byte-identical check would be skipped.
+    void registration.update().catch(() => undefined);
+    return registration;
   } catch {
     return null;
   }
