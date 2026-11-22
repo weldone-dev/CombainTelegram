@@ -918,6 +918,7 @@ export function ChatWindow({
 
       <div
         ref={scrollRef}
+        data-transcript-scroll
         onScroll={handleScroll}
         className="flex-1 space-y-3 overflow-y-auto px-5 py-4"
       >
@@ -1548,9 +1549,17 @@ type MessageMenuAction = {
 };
 
 /**
+ * Vertical room the action dropdown needs below its trigger. Roughly its
+ * rendered height (up to eight 28px items plus padding and the border), used
+ * to decide whether it has to open upwards.
+ */
+const MESSAGE_MENU_CLEARANCE = 260;
+
+/**
  * Compact "⋯" toggle with the per-message action dropdown. Absolutely placed
  * in the bubble's top-right corner so opening it never shifts the layout; it
- * closes on an outside click, on Escape and after any action.
+ * opens upwards near the bottom of the transcript and closes on an outside
+ * click, on Escape and after any action.
  */
 function MessageActionsMenu({
   open,
@@ -1566,6 +1575,30 @@ function MessageActionsMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [dropUp, setDropUp] = useState(false);
+
+  /** True when the dropdown does not fit below the trigger in the transcript. */
+  const needsDropUp = useCallback(() => {
+    const trigger = toggleRef.current;
+    if (!trigger) return false;
+    const rect = trigger.getBoundingClientRect();
+    const viewport = rootRef.current?.closest<HTMLElement>(
+      "[data-transcript-scroll]",
+    );
+    const bottom = viewport
+      ? viewport.getBoundingClientRect().bottom
+      : window.innerHeight;
+    return bottom - rect.bottom < MESSAGE_MENU_CLEARANCE;
+  }, []);
+
+  // Re-measure while open: rotating a phone or resizing the window can move
+  // the transcript edge under an already open menu.
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => setDropUp(needsDropUp());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [open, needsDropUp]);
 
   // Move focus into the menu as soon as it opens so keyboard users can pick
   // an item; the toggle keeps `aria-expanded` in sync for screen readers.
@@ -1623,6 +1656,7 @@ function MessageActionsMenu({
         type="button"
         onClick={(event) => {
           event.stopPropagation();
+          if (!open) setDropUp(needsDropUp());
           onToggle();
         }}
         title="Действия с сообщением"
@@ -1639,7 +1673,9 @@ function MessageActionsMenu({
           role="menu"
           aria-label="Действия с сообщением"
           onKeyDown={onMenuKeyDown}
-          className="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 py-1 text-left shadow-2xl"
+          className={`absolute right-0 z-20 w-44 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 py-1 text-left shadow-2xl ${
+            dropUp ? "bottom-full mb-1" : "top-full mt-1"
+          }`}
         >
           {actions.map((action) => (
             <button
