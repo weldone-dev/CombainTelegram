@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   type NotificationsState,
   notificationsSupported,
@@ -43,19 +43,31 @@ export function AppShell({ children }: { children: ReactNode }) {
     setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1");
   }, []);
 
-  // The permission may have been granted or denied outside this tab, so the
-  // stored preference is reconciled with the live permission on mount.
-  useEffect(() => {
+  // The permission may have been granted or denied outside this tab (browser
+  // settings, another tab), so it is re-read on focus instead of being
+  // latched for the session.
+  const syncNotifications = useCallback(() => {
     if (!notificationsSupported()) {
       setNotifications("unavailable");
       return;
     }
     if (window.Notification.permission === "denied") {
+      writeNotificationsEnabled(false);
       setNotifications("unavailable");
       return;
     }
     setNotifications(readNotificationsEnabled() ? "on" : "off");
   }, []);
+
+  useEffect(() => {
+    syncNotifications();
+    window.addEventListener("focus", syncNotifications);
+    document.addEventListener("visibilitychange", syncNotifications);
+    return () => {
+      window.removeEventListener("focus", syncNotifications);
+      document.removeEventListener("visibilitychange", syncNotifications);
+    };
+  }, [syncNotifications]);
 
   const toggle = () => {
     setCollapsed((previous) => {
@@ -66,17 +78,21 @@ export function AppShell({ children }: { children: ReactNode }) {
   };
 
   const toggleNotifications = async () => {
-    if (notifications === "unavailable") return;
-    if (notifications === "on") {
-      writeNotificationsEnabled(false);
-      setNotifications("off");
+    if (!notificationsSupported()) {
+      setNotifications("unavailable");
       return;
     }
-    if (!notificationsSupported()) return;
+    // Re-check on every click: the user may have granted permission in the
+    // browser settings since the last render.
     let permission = window.Notification.permission;
-    if (permission === "default") {
+    if (permission === "default" && notifications !== "on") {
       // Permission is only ever requested from this user gesture.
       permission = await window.Notification.requestPermission();
+    }
+    if (notifications === "on") {
+      writeNotificationsEnabled(false);
+      setNotifications(permission === "granted" ? "off" : "unavailable");
+      return;
     }
     if (permission !== "granted") {
       writeNotificationsEnabled(false);
@@ -91,7 +107,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     notifications === "on"
       ? "Выключить уведомления"
       : notifications === "unavailable"
-        ? "Уведомления недоступны: нет разрешения браузера"
+        ? "Уведомления недоступны: разрешите их в настройках браузера"
         : "Включить уведомления";
 
   const pageTitle = PAGE_TITLES[pathname] ?? "CombainTelegram";
@@ -175,11 +191,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={() => void toggleNotifications()}
-              disabled={notifications === "unavailable"}
               title={notificationsLabel}
               aria-label={notificationsLabel}
               aria-pressed={notifications === "on"}
-              className={`rounded-md p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`rounded-md p-1.5 transition-colors ${
                 notifications === "on"
                   ? "text-sky-400 hover:bg-zinc-800 hover:text-sky-300"
                   : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"

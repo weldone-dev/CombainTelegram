@@ -74,10 +74,14 @@ export function ChatsPage() {
   const selectedChatRef = useRef<ChatView | null>(null);
   const chatsRef = useRef<ChatView[]>([]);
   chatsRef.current = chats;
+  const messagesRef = useRef<MessageView[]>([]);
+  messagesRef.current = messages;
   const selectedAccountIdRef = useRef<string | null>(null);
   selectedAccountIdRef.current = selectedAccountId;
   const selectedChatIdRef = useRef<number | null>(null);
   selectedChatIdRef.current = selectedChatId;
+  const chatsRequestRef = useRef(0);
+  const messagesRequestRef = useRef(0);
 
   // Remember the last opened account and honor ?account=<id> links from the
   // accounts page.
@@ -85,7 +89,12 @@ export function ChatsPage() {
     const fromQuery = new URLSearchParams(window.location.search).get(
       "account",
     );
-    const fromStorage = window.localStorage.getItem(LAST_ACCOUNT_KEY);
+    let fromStorage: string | null = null;
+    try {
+      fromStorage = window.localStorage.getItem(LAST_ACCOUNT_KEY);
+    } catch {
+      // Private mode or a blocked storage must not break the page.
+    }
     setSelectedAccountId(fromQuery ?? fromStorage);
   }, []);
 
@@ -101,20 +110,51 @@ export function ChatsPage() {
 
   useEffect(() => {
     if (!selectedAccountId) return;
-    window.localStorage.setItem(LAST_ACCOUNT_KEY, selectedAccountId);
+    try {
+      window.localStorage.setItem(LAST_ACCOUNT_KEY, selectedAccountId);
+    } catch {
+      // Preference persistence is best-effort.
+    }
   }, [selectedAccountId]);
 
   const markRead = useCallback(
     async (accountId: string, chatId: number, maxId?: number) => {
+      const before = chatsRef.current.find((chat) => chat.id === chatId);
+      const oldReadInboxMaxId = before?.readInboxMaxId ?? 0;
       try {
         await apiFetch(`/accounts/${accountId}/chats/${chatId}/read`, {
           method: "POST",
           body: maxId !== undefined ? { maxId } : {},
         });
+        if (
+          selectedAccountIdRef.current !== accountId ||
+          selectedChatIdRef.current !== chatId
+        ) {
+          return;
+        }
+        // A partial read only consumes messages up to `maxId`; the rest of
+        // the badge stays. A full read (`maxId` undefined) zeroes it.
+        const seen =
+          maxId === undefined
+            ? 0
+            : messagesRef.current.filter(
+                (message) =>
+                  message.id > oldReadInboxMaxId && message.id <= maxId,
+              ).length;
         setChats((previous) =>
-          previous.map((chat) =>
-            chat.id === chatId ? { ...chat, unreadCount: 0 } : chat,
-          ),
+          previous.map((chat) => {
+            if (chat.id !== chatId) return chat;
+            const readInboxMaxId =
+              maxId === undefined
+                ? Math.max(chat.readInboxMaxId, oldReadInboxMaxId)
+                : Math.max(chat.readInboxMaxId, maxId);
+            return {
+              ...chat,
+              readInboxMaxId,
+              unreadCount:
+                maxId === undefined ? 0 : Math.max(0, chat.unreadCount - seen),
+            };
+          }),
         );
       } catch {
         // Marking as read is best-effort.
@@ -128,6 +168,8 @@ export function ChatsPage() {
       accountId: string,
       options: { limit: number; folder: ChatFolderSelection },
     ) => {
+      const requestId = chatsRequestRef.current + 1;
+      chatsRequestRef.current = requestId;
       setChatsLoading(true);
       setChatsError(null);
       try {
@@ -135,6 +177,7 @@ export function ChatsPage() {
           limit: options.limit,
           folder: options.folder,
         });
+        if (chatsRequestRef.current !== requestId) return;
         setChats(list);
         setSelectedChatId((current) =>
           current !== null && list.some((chat) => chat.id === current)
@@ -142,10 +185,11 @@ export function ChatsPage() {
             : null,
         );
       } catch (error) {
+        if (chatsRequestRef.current !== requestId) return;
         setChats([]);
         setChatsError(errorMessage(error));
       } finally {
-        setChatsLoading(false);
+        if (chatsRequestRef.current === requestId) setChatsLoading(false);
       }
     },
     [],
@@ -165,6 +209,12 @@ export function ChatsPage() {
 
   const loadMessages = useCallback(
     async (accountId: string, chatId: number, newerThanId?: number) => {
+      const requestId = messagesRequestRef.current + 1;
+      messagesRequestRef.current = requestId;
+      // Never leave the previous chat's transcript under the new header while
+      // the history request is in flight.
+      setMessages([]);
+      setNextOffsetId(null);
       setMessagesLoading(true);
       setMessagesError(null);
       try {
@@ -176,14 +226,16 @@ export function ChatsPage() {
           `/accounts/${accountId}/chats/${chatId}/messages?${params.toString()}`,
           {},
         );
+        if (messagesRequestRef.current !== requestId) return;
         setMessages(history.messages);
         setNextOffsetId(history.nextOffsetId);
       } catch (error) {
+        if (messagesRequestRef.current !== requestId) return;
         setMessages([]);
         setNextOffsetId(null);
         setMessagesError(errorMessage(error));
       } finally {
-        setMessagesLoading(false);
+        if (messagesRequestRef.current === requestId) setMessagesLoading(false);
       }
     },
     [],
@@ -192,11 +244,19 @@ export function ChatsPage() {
   /** Silent refresh used when the Socket.IO connection is unavailable. */
   const refreshMessages = useCallback(
     async (accountId: string, chatId: number) => {
+      const requestId = messagesRequestRef.current;
       try {
         const history = await apiFetch<MessageHistoryView>(
           `/accounts/${accountId}/chats/${chatId}/messages?limit=50`,
           {},
         );
+        if (
+          selectedAccountIdRef.current !== accountId ||
+          selectedChatIdRef.current !== chatId ||
+          messagesRequestRef.current !== requestId
+        ) {
+          return;
+        }
         setMessages(history.messages);
         setNextOffsetId(history.nextOffsetId);
       } catch {
@@ -207,19 +267,25 @@ export function ChatsPage() {
   );
 
   const loadMore = useCallback(async () => {
-    if (
-      selectedAccountId === null ||
-      selectedChatId === null ||
-      nextOffsetId === null
-    ) {
+    const accountId = selectedAccountId;
+    const chatId = selectedChatId;
+    const offsetId = nextOffsetId;
+    if (accountId === null || chatId === null || offsetId === null) {
       return;
     }
     setLoadingMore(true);
     try {
       const history = await apiFetch<MessageHistoryView>(
-        `/accounts/${selectedAccountId}/chats/${selectedChatId}/messages?limit=50&offsetId=${nextOffsetId}`,
+        `/accounts/${accountId}/chats/${chatId}/messages?limit=50&offsetId=${offsetId}`,
         {},
       );
+      // The user may have switched chats while the older page was loading.
+      if (
+        selectedAccountIdRef.current !== accountId ||
+        selectedChatIdRef.current !== chatId
+      ) {
+        return;
+      }
       setMessages((previous) => {
         const existing = new Set(previous.map((message) => message.id));
         const older = history.messages.filter(
@@ -229,7 +295,12 @@ export function ChatsPage() {
       });
       setNextOffsetId(history.nextOffsetId);
     } catch (error) {
-      setMessagesError(errorMessage(error));
+      if (
+        selectedAccountIdRef.current === accountId &&
+        selectedChatIdRef.current === chatId
+      ) {
+        setMessagesError(errorMessage(error));
+      }
     } finally {
       setLoadingMore(false);
     }
@@ -238,11 +309,13 @@ export function ChatsPage() {
   const sendMessage = useCallback(
     async (text: string, replyToId?: number) => {
       if (selectedAccountId === null || selectedChatId === null) return;
+      const accountId = selectedAccountId;
+      const chatId = selectedChatId;
       const trimmed = text.trim();
       if (!trimmed) return;
       try {
         const message = await apiFetch<MessageView>(
-          `/accounts/${selectedAccountId}/chats/${selectedChatId}/messages`,
+          `/accounts/${accountId}/chats/${chatId}/messages`,
           {
             method: "POST",
             body:
@@ -251,6 +324,12 @@ export function ChatsPage() {
                 : { text: trimmed },
           },
         );
+        if (
+          selectedAccountIdRef.current !== accountId ||
+          selectedChatIdRef.current !== chatId
+        ) {
+          return;
+        }
         setMessages((previous) =>
           previous.some((item) => item.id === message.id)
             ? previous
@@ -258,7 +337,7 @@ export function ChatsPage() {
         );
         setChats((previous) =>
           previous.map((chat) =>
-            chat.id === selectedChatId
+            chat.id === chatId
               ? { ...chat, lastMessage: message, unreadCount: 0 }
               : chat,
           ),
@@ -275,6 +354,8 @@ export function ChatsPage() {
   const sendMedia = useCallback(
     async (file: File, caption: string, replyToId?: number) => {
       if (selectedAccountId === null || selectedChatId === null) return;
+      const accountId = selectedAccountId;
+      const chatId = selectedChatId;
       const form = new FormData();
       form.append("file", file);
       const trimmed = caption.trim();
@@ -282,9 +363,15 @@ export function ChatsPage() {
       if (replyToId !== undefined) form.append("replyToId", String(replyToId));
       try {
         const message = await apiFetch<MessageView>(
-          `/accounts/${selectedAccountId}/chats/${selectedChatId}/media`,
+          `/accounts/${accountId}/chats/${chatId}/media`,
           { method: "POST", formData: form },
         );
+        if (
+          selectedAccountIdRef.current !== accountId ||
+          selectedChatIdRef.current !== chatId
+        ) {
+          return;
+        }
         setMessages((previous) =>
           previous.some((item) => item.id === message.id)
             ? previous
@@ -292,7 +379,7 @@ export function ChatsPage() {
         );
         setChats((previous) =>
           previous.map((chat) =>
-            chat.id === selectedChatId
+            chat.id === chatId
               ? { ...chat, lastMessage: message, unreadCount: 0 }
               : chat,
           ),
@@ -309,12 +396,14 @@ export function ChatsPage() {
   const forwardMessages = useCallback(
     async (toChatId: number, messageIds: number[]) => {
       if (selectedAccountId === null || selectedChatId === null) return;
+      const accountId = selectedAccountId;
+      const chatId = selectedChatId;
       try {
         const result = await apiFetch<ForwardResult>(
-          `/accounts/${selectedAccountId}/chats/${toChatId}/forward`,
+          `/accounts/${accountId}/chats/${toChatId}/forward`,
           {
             method: "POST",
-            body: { fromChatId: selectedChatId, messageIds },
+            body: { fromChatId: chatId, messageIds },
           },
         );
         showNotice(
@@ -341,6 +430,12 @@ export function ChatsPage() {
             `/accounts/${accountId}/chats/${chatId}/messages/${messageId}`,
             { method: "DELETE" },
           );
+          if (
+            selectedAccountIdRef.current !== accountId ||
+            selectedChatIdRef.current !== chatId
+          ) {
+            continue;
+          }
           setMessages((previous) =>
             previous.filter((message) => message.id !== messageId),
           );
@@ -413,6 +508,7 @@ export function ChatsPage() {
   const handleSelectAccount = useCallback((accountId: string) => {
     setSelectedAccountId(accountId);
     setSelectedChatId(null);
+    messagesRequestRef.current += 1;
     setMessages([]);
     setNextOffsetId(null);
     setMessagesError(null);
@@ -423,6 +519,11 @@ export function ChatsPage() {
   }, []);
 
   const handleSelectChat = useCallback((chatId: number) => {
+    // Clear the previous transcript before the new history request starts.
+    messagesRequestRef.current += 1;
+    setMessages([]);
+    setNextOffsetId(null);
+    setMessagesError(null);
     setSelectedChatId(chatId);
   }, []);
 
@@ -461,7 +562,7 @@ export function ChatsPage() {
   const clearChatHistory = useCallback(
     async (chatId: number) => {
       if (!selectedAccountId) throw new Error("Аккаунт не выбран");
-      const result = await removeChat(selectedAccountId, chatId, {
+      await removeChat(selectedAccountId, chatId, {
         clearHistory: true,
       });
       setChats((previous) =>
@@ -472,26 +573,22 @@ export function ChatsPage() {
         ),
       );
       if (selectedChatIdRef.current === chatId) setMessages([]);
-      showNotice(
-        result.cleared !== null && result.cleared > 0
-          ? `История очищена (сообщений: ${result.cleared})`
-          : "История чата очищена",
-      );
+      showNotice("История очищена");
     },
     [selectedAccountId, showNotice],
   );
 
   const deleteChatRow = useCallback(
-    async (chatId: number) => {
+    async (chatId: number, everyone: boolean) => {
       if (!selectedAccountId) throw new Error("Аккаунт не выбран");
-      await removeChat(selectedAccountId, chatId, { revoke: true });
+      await removeChat(selectedAccountId, chatId, { revoke: everyone });
       setChats((previous) => previous.filter((chat) => chat.id !== chatId));
       if (selectedChatIdRef.current === chatId) {
         setSelectedChatId(null);
         setMessages([]);
         setNextOffsetId(null);
       }
-      showNotice("Чат удалён");
+      showNotice(everyone ? "Чат удалён у всех" : "Чат удалён у вас");
     },
     [selectedAccountId, showNotice],
   );
@@ -516,17 +613,24 @@ export function ChatsPage() {
     setChats((previous) => {
       const existing = previous.find((item) => item.id === chat.id);
       if (!existing) return [chat, ...previous];
+      // The peer lookup only knows the identity fields; dialog state
+      // (pin/mute/archive/read marker/last message) stays from the real row so
+      // resolving a known chat never resets its flags.
       return previous.map((item) =>
         item.id === chat.id
           ? {
               ...item,
-              ...chat,
-              lastMessage: chat.lastMessage ?? item.lastMessage,
-              unreadCount: Math.max(item.unreadCount, chat.unreadCount),
+              title: chat.title,
+              username: chat.username,
+              type: chat.type,
             }
           : item,
       );
     });
+    messagesRequestRef.current += 1;
+    setMessages([]);
+    setNextOffsetId(null);
+    setMessagesError(null);
     setSelectedChatId(chat.id);
   }, []);
 
@@ -552,6 +656,8 @@ export function ChatsPage() {
 
   useEffect(() => {
     if (!selectedAccountId) {
+      chatsRequestRef.current += 1;
+      messagesRequestRef.current += 1;
       setChats([]);
       setChatsError(null);
       setSelectedChatId(null);
@@ -571,6 +677,7 @@ export function ChatsPage() {
 
   useEffect(() => {
     if (selectedAccountId === null || selectedChatId === null) {
+      messagesRequestRef.current += 1;
       setMessages([]);
       setNextOffsetId(null);
       setMessagesError(null);
@@ -593,16 +700,22 @@ export function ChatsPage() {
 
         // Desktop notification: only for incoming messages and only while the
         // window is hidden or unfocused. The bell toggle is read from storage
-        // so changes made in the header apply immediately.
+        // so changes made in the header apply immediately. Muted chats never
+        // notify, matching the official clients.
         const hidden =
           document.visibilityState !== "visible" || !document.hasFocus();
-        if (!message.outgoing && hidden && notificationsReady()) {
-          const chatTitle =
-            data.accountId === selectedAccountIdRef.current
-              ? chatsRef.current.find((chat) => chat.id === data.chatId)?.title
-              : undefined;
+        const listedChat =
+          data.accountId === selectedAccountIdRef.current
+            ? chatsRef.current.find((chat) => chat.id === data.chatId)
+            : undefined;
+        if (
+          !message.outgoing &&
+          hidden &&
+          !listedChat?.muted &&
+          notificationsReady()
+        ) {
           showMessageNotification(
-            chatTitle ?? `Чат ${data.chatId}`,
+            listedChat?.title ?? `Чат ${data.chatId}`,
             message.senderName,
             message.text || (message.mediaType ? `[${message.mediaType}]` : ""),
             data.chatId,
@@ -736,6 +849,17 @@ export function ChatsPage() {
   const chatTyping =
     selectedChatId === null ? [] : (typing[String(selectedChatId)] ?? []);
 
+  // Stable identity: `ChatWindow` re-creates its IntersectionObserver when this
+  // changes, so it must not be a fresh inline arrow on every render.
+  const handleRead = useCallback(
+    (maxId: number) => {
+      if (selectedAccountId && selectedChatId !== null) {
+        void markRead(selectedAccountId, selectedChatId, maxId);
+      }
+    },
+    [selectedAccountId, selectedChatId, markRead],
+  );
+
   return (
     <div className="flex h-full min-h-0 overflow-x-auto">
       <AccountsSidebar
@@ -798,11 +922,7 @@ export function ChatsPage() {
         onDeleteMany={deleteMessages}
         onForward={forwardMessages}
         onTyping={() => void sendTyping()}
-        onRead={(maxId) => {
-          if (selectedAccountId && selectedChatId !== null) {
-            void markRead(selectedAccountId, selectedChatId, maxId);
-          }
-        }}
+        onRead={handleRead}
         onOpenChat={handleSelectChat}
       />
     </div>

@@ -165,7 +165,8 @@ export interface ChatSearchView {
 
 export interface ChatRemovedView {
   removed: boolean;
-  cleared: number | null;
+  /** Message count from `clearHistory` when the backend reports it. */
+  cleared?: number | null;
 }
 
 export interface ReadAllView {

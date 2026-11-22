@@ -16,6 +16,9 @@ export const CHAT_PAGE_SIZES = [50, 100, 200] as const;
 export const MAX_CHAT_LIMIT = 200;
 export const INITIAL_CHAT_LIMIT = 50;
 
+/** Upload limit enforced by the API (`PAYLOAD_TOO_LARGE` beyond this size). */
+export const MAX_MEDIA_UPLOAD_BYTES = 50 * 1024 * 1024;
+
 /** Next page size above `limit`, or null when the maximum is reached. */
 export function nextChatLimit(limit: number): number | null {
   return CHAT_PAGE_SIZES.find((size) => size > limit) ?? null;

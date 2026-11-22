@@ -135,6 +135,16 @@ const RU_ERRORS: Record<string, string> = {
   UNAUTHORIZED: "Нет доступа",
   PAYLOAD_TOO_LARGE: "Файл больше 50 МБ",
   MEDIA_NOT_FOUND: "В этом сообщении нет доступного фото или файла",
+  CHAT_WRITE_FORBIDDEN: "В этом чате нельзя отправлять сообщения",
+  CHAT_ADMIN_REQUIRED: "Для этого действия нужны права администратора",
+  CHAT_FORBIDDEN: "Доступ к чату запрещён",
+  MESSAGE_ID_INVALID: "Сообщение не найдено",
+  MESSAGE_EDIT_TIME_EXPIRED: "Время редактирования сообщения истекло",
+  USER_BANNED_IN_CHANNEL: "Вы заблокированы в этом канале",
+  PEER_ID_INVALID: "Чат или пользователь не найден",
+  CHAT_RESTRICTED: "Отправка сообщений ограничена в этом чате",
+  CHAT_SEND_MEDIA_FORBIDDEN: "В этот чат нельзя отправлять фото и файлы",
+  MEDIA_TOO_LARGE: "Файл слишком большой",
 };
 
 /** Human-readable Russian message for any thrown value. */

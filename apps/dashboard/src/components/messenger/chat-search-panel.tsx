@@ -126,7 +126,8 @@ export function ChatSearchPanel({
                 setPickedId(message.id);
                 onOpenChat(chatId);
               }}
-              title="Открыть это сообщение в чате"
+              title="Выбрать это сообщение в открытом чате"
+              aria-label="Выбрать это сообщение в открытом чате"
               className={`block w-full border-t border-zinc-800/60 px-3 py-2 text-left transition-colors hover:bg-zinc-800/60 ${
                 pickedId === message.id ? "bg-sky-500/10" : ""
               }`}
