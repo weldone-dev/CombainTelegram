@@ -541,6 +541,21 @@ export function ChatsPage() {
     [selectedAccountId, selectedChatId],
   );
 
+  const replaceMessage = useCallback((message: MessageView) => {
+    // Ignore a late response if the user has already switched chats.
+    if (selectedChatIdRef.current !== message.chatId) return;
+    setMessages((previous) =>
+      previous.map((item) => (item.id === message.id ? message : item)),
+    );
+    setChats((previous) =>
+      previous.map((chat) =>
+        chat.id === message.chatId && chat.lastMessage?.id === message.id
+          ? { ...chat, lastMessage: message }
+          : chat,
+      ),
+    );
+  }, []);
+
   const deleteMessage = useCallback(
     async (messageId: number, options: { revoke?: boolean } = {}) => {
       if (selectedAccountId === null || selectedChatId === null) return;
@@ -1096,6 +1111,7 @@ export function ChatsPage() {
             sendMedia(file, caption, replyToId)
           }
           onEdit={(messageId, text) => void editMessage(messageId, text)}
+          onMessageUpdated={replaceMessage}
           onDelete={(messageId) => void deleteMessage(messageId)}
           onDeleteMany={deleteMessages}
           onForward={forwardMessages}

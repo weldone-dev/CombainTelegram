@@ -119,6 +119,7 @@ export function ChatWindow({
   onSend,
   onSendMedia,
   onEdit,
+  onMessageUpdated,
   onDelete,
   onDeleteMany,
   onForward,
@@ -145,6 +146,8 @@ export function ChatWindow({
     replyToId?: number,
   ) => Promise<void>;
   onEdit: (messageId: number, text: string) => void;
+  /** Replaces one message in the transcript with the authoritative server copy. */
+  onMessageUpdated: (message: MessageView) => void;
   onDelete: (messageId: number, options?: { revoke?: boolean }) => void;
   onDeleteMany: (
     messageIds: number[],
@@ -187,11 +190,10 @@ export function ChatWindow({
   const [reactionPending, setReactionPending] = useState<Set<number>>(
     () => new Set(),
   );
-  const [reactionOverrides, setReactionOverrides] = useState<
-    Map<
-      number,
-      { base: MessageView["reactions"]; value: MessageReactionView[] }
-    >
+  // Optimistic chip, kept only while the request is in flight and dropped as
+  // soon as the authoritative message (API or realtime) replaces it.
+  const [reactionOptimistic, setReactionOptimistic] = useState<
+    Map<number, { message: MessageView; reactions: MessageReactionView[] }>
   >(() => new Map());
   const [emojiPickerFor, setEmojiPickerFor] = useState<number | null>(null);
   const [menuFor, setMenuFor] = useState<number | null>(null);
@@ -297,7 +299,7 @@ export function ChatWindow({
     setStatus(null);
     setEmojiPickerFor(null);
     setMenuFor(null);
-    setReactionOverrides(new Map());
+    setReactionOptimistic(new Map());
     setReactionPending(new Set());
     setPollOverrides(new Map());
     setVotingId(null);
@@ -662,9 +664,11 @@ export function ChatWindow({
   };
 
   const reactionsFor = (message: MessageView): MessageReactionView[] => {
-    const override = reactionOverrides.get(message.id);
-    // A refreshed message (realtime edit) wins over the local optimistic copy.
-    if (override && override.base === message.reactions) return override.value;
+    const optimistic = reactionOptimistic.get(message.id);
+    // A refreshed message (realtime edit) wins over the in-flight local chip.
+    if (optimistic && optimistic.message === message) {
+      return optimistic.reactions;
+    }
     return message.reactions ?? [];
   };
 
@@ -677,10 +681,10 @@ export function ChatWindow({
     );
     const target = chosen ? null : emoji;
     setEmojiPickerFor(null);
-    setReactionOverrides((previous) =>
+    setReactionOptimistic((previous) =>
       new Map(previous).set(message.id, {
-        base: message.reactions,
-        value: applyReactionChange(current, emoji, target !== null),
+        message,
+        reactions: applyReactionChange(current, emoji, target !== null),
       }),
     );
     setReactionPending((previous) => new Set(previous).add(message.id));
@@ -691,24 +695,18 @@ export function ChatWindow({
         message.id,
         target,
       );
-      if (updated) {
-        setReactionOverrides((previous) =>
-          new Map(previous).set(message.id, {
-            base: message.reactions,
-            value: updated.reactions ?? [],
-          }),
-        );
-      }
+      // The API response is authoritative: merge it by id exactly like the
+      // other message actions, so `reactions`/`chosen` match the server.
+      if (updated) onMessageUpdated(updated);
     } catch (caught) {
-      // Revert the optimistic chip and explain the failure.
-      setReactionOverrides((previous) =>
-        new Map(previous).set(message.id, {
-          base: message.reactions,
-          value: current,
-        }),
-      );
+      // Dropping the optimistic chip restores the exact previous message.
       setStatus(errorMessage(caught));
     } finally {
+      setReactionOptimistic((previous) => {
+        const next = new Map(previous);
+        next.delete(message.id);
+        return next;
+      });
       setReactionPending((previous) => {
         const next = new Set(previous);
         next.delete(message.id);
