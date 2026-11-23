@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  aiErrorMessage,
   type BotView,
   checkBot,
   deleteBot,
@@ -13,9 +14,16 @@ import {
   setBotSkills,
   updateBot,
 } from "../../lib/ai-api";
-import { errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
-import { Card, Field, inputClass, Pill, Toggle } from "./ai-ui";
+import {
+  Card,
+  Field,
+  GhostButton,
+  inputClass,
+  Pill,
+  PrimaryButton,
+  Toggle,
+} from "./ai-ui";
 import { useAppData } from "./app-data";
 
 function BotEditor({
@@ -25,6 +33,7 @@ function BotEditor({
   bot,
   skills,
   onSaved,
+  onDeleted,
 }: {
   title: string;
   description: string;
@@ -32,6 +41,7 @@ function BotEditor({
   bot: BotView | null;
   skills: SkillView[];
   onSaved: (bot: BotView) => void;
+  onDeleted: () => void;
 }) {
   const [token, setToken] = useState("");
   const [enabled, setEnabled] = useState(bot?.enabled ?? true);
@@ -50,18 +60,35 @@ function BotEditor({
     setToken("");
   }, [bot]);
 
+  const tokenValid =
+    token.trim() === "" || /^\d+:[A-Za-z0-9_-]{20,}$/.test(token.trim());
+
   const save = async () => {
+    const allowedIds = allowed
+      .split(/[\s,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const badAllowed = allowedIds.find((item) => !/^\d+$/.test(item));
+    if (badAllowed) {
+      setError(`Telegram id «${badAllowed}» должен состоять только из цифр`);
+      return;
+    }
+    if (!tokenValid) {
+      setError("Токен должен выглядеть как 123456789:AA…");
+      return;
+    }
+    if (!bot && !token.trim()) {
+      setError("Для нового бота нужен токен BotFather");
+      return;
+    }
     setBusy(true);
     setError(null);
     setStatus(null);
     try {
       const body: Record<string, unknown> = {
         enabled,
-        username: username || undefined,
-        allowedUserIds: allowed
-          .split(/[\s,]+/)
-          .map((item) => item.trim())
-          .filter((item) => /^\d+$/.test(item)),
+        username: username.trim(),
+        allowedUserIds: allowedIds,
         ...(token.trim() ? { token: token.trim() } : {}),
       };
       const saved = bot
@@ -79,16 +106,17 @@ function BotEditor({
         "Сохранено. Бот начнёт получать сообщения в течение 10 секунд.",
       );
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      setError(aiErrorMessage(saveError));
     } finally {
       setBusy(false);
     }
   };
 
   const verify = async () => {
-    if (!bot) return;
+    if (!bot || !bot.hasToken) return;
     setBusy(true);
     setError(null);
+    setStatus(null);
     try {
       const checked = await checkBot(bot.id);
       onSaved(checked);
@@ -96,21 +124,27 @@ function BotEditor({
         `Бот @${checked.username ?? "?"} отвечает. Long polling активен.`,
       );
     } catch (checkError) {
-      setError(errorMessage(checkError));
+      setError(aiErrorMessage(checkError));
     } finally {
       setBusy(false);
     }
   };
 
   const remove = async () => {
-    if (!bot || !window.confirm("Отвязать этого бота?")) return;
+    if (!bot) return;
+    if (!window.confirm("Отвязать этого бота? Сам бот в Telegram останется.")) {
+      return;
+    }
     setBusy(true);
+    setError(null);
+    setStatus(null);
     try {
       await deleteBot(bot.id);
-      onSaved({ ...bot, id: "", hasToken: false, username: null });
+      setToken("");
+      onDeleted();
       setStatus("Бот удалён из приложения (сам бот в Telegram остаётся).");
     } catch (removeError) {
-      setError(errorMessage(removeError));
+      setError(aiErrorMessage(removeError));
     } finally {
       setBusy(false);
     }
@@ -121,43 +155,40 @@ function BotEditor({
       title={title}
       description={description}
       actions={
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {bot && (
             <Pill tone={bot.hasToken ? "green" : "amber"}>
               {bot.hasToken ? "токен есть" : "нет токена"}
             </Pill>
           )}
-          {bot && (
-            <button
-              type="button"
-              onClick={() => void verify()}
-              disabled={busy}
-              className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-            >
+          {bot?.hasToken && (
+            <GhostButton onClick={() => void verify()} disabled={busy}>
               Проверить
-            </button>
+            </GhostButton>
           )}
-          <button
-            type="button"
+          <PrimaryButton
             onClick={() => void save()}
             disabled={busy || (!bot && !token.trim())}
-            className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
           >
-            Сохранить
-          </button>
+            {busy ? "Сохранение…" : "Сохранить"}
+          </PrimaryButton>
         </div>
       }
     >
       <div className="grid gap-3">
         <Field
           label="Токен BotFather"
-          hint="Создайте бота у @BotFather (/newbot) и вставьте токен. Токен хранится зашифрованным."
+          hint="Создайте бота у @BotFather (/newbot). Токен хранится зашифрованным и никогда не показывается обратно. Бот может писать только тем, кто сам начал с ним диалог."
         >
           <input
             type="password"
             value={token}
             onChange={(event) => setToken(event.target.value)}
-            className={inputClass}
+            autoComplete="off"
+            aria-invalid={!tokenValid}
+            className={`${inputClass} ${
+              tokenValid ? "" : "border-red-700 focus:border-red-500"
+            }`}
             placeholder={
               bot?.hasToken
                 ? "оставьте пустым, чтобы не менять"
@@ -200,11 +231,14 @@ function BotEditor({
               return (
                 <label
                   key={skill.slug}
-                  className="flex items-center gap-2 text-xs text-zinc-300"
+                  className={`flex min-w-0 items-center gap-2 text-xs ${
+                    skill.enabled ? "text-zinc-300" : "text-zinc-600 opacity-60"
+                  }`}
                 >
                   <input
                     type="checkbox"
                     checked={active}
+                    disabled={!skill.enabled}
                     onChange={(event) =>
                       setAttached((previous) =>
                         event.target.checked
@@ -212,10 +246,11 @@ function BotEditor({
                           : previous.filter((slug) => slug !== skill.slug),
                       )
                     }
+                    className="h-3.5 w-3.5 shrink-0 accent-sky-500"
                   />
-                  {skill.name}
-                  <span className="text-[10px] text-zinc-600">
-                    {skill.slug}
+                  <span className="truncate">{skill.name}</span>
+                  <span className="ml-auto truncate text-[10px] text-zinc-600">
+                    {skill.enabled ? skill.slug : "выключен"}
                   </span>
                 </label>
               );
@@ -226,30 +261,34 @@ function BotEditor({
       {(error || status) && (
         <div className="mt-3 space-y-2">
           {error && (
-            <div className="rounded-md border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-xs text-red-300">
+            <div
+              role="alert"
+              className="break-words rounded-md border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-xs text-red-300"
+            >
               {error}
             </div>
           )}
           {status && (
-            <div className="rounded-md border border-emerald-900/60 bg-emerald-950/40 px-2 py-1.5 text-xs text-emerald-300">
+            <div
+              aria-live="polite"
+              className="break-words rounded-md border border-emerald-900/60 bg-emerald-950/40 px-2 py-1.5 text-xs text-emerald-300"
+            >
               {status}
             </div>
           )}
         </div>
       )}
       {bot?.lastError && (
-        <p className="mt-2 text-[11px] text-red-400">
+        <p className="mt-2 break-words text-[11px] text-red-400">
           Последняя ошибка: {bot.lastError}
         </p>
       )}
       {bot && (
-        <button
-          type="button"
-          onClick={() => void remove()}
-          className="mt-3 text-[11px] text-red-400 hover:text-red-300"
-        >
-          Отвязать бота
-        </button>
+        <div className="mt-3">
+          <GhostButton onClick={() => void remove()} disabled={busy} danger>
+            Отвязать бота
+          </GhostButton>
+        </div>
       )}
     </Card>
   );
@@ -273,7 +312,7 @@ export function BotsPanel() {
       setShared(botList.shared);
       setSkills(skillList.skills);
     } catch (loadError) {
-      setError(errorMessage(loadError));
+      setError(aiErrorMessage(loadError));
     }
   }, []);
 
@@ -282,9 +321,12 @@ export function BotsPanel() {
   }, [load]);
 
   return (
-    <div className="space-y-4">
+    <div className="min-w-0 space-y-4">
       {error && (
-        <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+        <div
+          role="alert"
+          className="break-words rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+        >
           {error}
         </div>
       )}
@@ -322,6 +364,10 @@ export function BotsPanel() {
         skills={skills}
         onSaved={(next) => {
           setShared(next);
+          void load();
+        }}
+        onDeleted={() => {
+          setShared(null);
           void load();
         }}
       />
@@ -371,6 +417,10 @@ function AccountBotCard({
       skills={skills}
       onSaved={(next) => {
         setDraft(next);
+        onSaved();
+      }}
+      onDeleted={() => {
+        setDraft(null);
         onSaved();
       }}
     />

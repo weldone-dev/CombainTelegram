@@ -1,12 +1,12 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   type AgentSettings,
   type AgentTraceEntry,
+  aiErrorMessage,
   chatWithAi,
 } from "../../lib/ai-api";
-import { errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
 import { useAppData } from "./app-data";
 
@@ -17,6 +17,22 @@ interface ChatMessage {
   trace?: AgentTraceEntry[];
 }
 
+function traceTitle(entry: AgentTraceEntry): string {
+  const details = [
+    `шаг ${entry.step}`,
+    `${entry.durationMs} мс`,
+    entry.error ? `ошибка: ${entry.error}` : "",
+    entry.dryRun ? "dry-run: изменение не ушло в Telegram" : "",
+  ].filter(Boolean);
+  let args = "";
+  try {
+    args = JSON.stringify(entry.args ?? {});
+  } catch {
+    args = "";
+  }
+  return [entry.tool, ...details, args].filter(Boolean).join(" · ");
+}
+
 export function AgentChatPanel({
   settings,
 }: {
@@ -24,15 +40,30 @@ export function AgentChatPanel({
 }) {
   const { accounts } = useAppData();
   const [accountId, setAccountId] = useState("");
+  const [chatId, setChatId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
+  const parsedChatId = Number(chatId.trim());
+  const chatIdValid =
+    chatId.trim() === "" ||
+    (Number.isSafeInteger(parsedChatId) && parsedChatId !== 0);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll when transcript or busy state changes
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [messages, busy]);
+
   const send = async () => {
     const prompt = input.trim();
     if (!prompt || busy) return;
+    if (!chatIdValid) {
+      setError("Chat id — только целое число (например 123456789) или пусто");
+      return;
+    }
     setError(null);
     setBusy(true);
     const userMessage: ChatMessage = {
@@ -40,23 +71,22 @@ export function AgentChatPanel({
       role: "user",
       content: prompt,
     };
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
+    // The new prompt is sent once, in `prompt`; `messages` carries only the
+    // history before it.
+    const history = messages
+      .filter(
+        (message) => message.role === "user" || message.role === "assistant",
+      )
+      .slice(-12)
+      .map((message) => ({ role: message.role, content: message.content }));
+    setMessages((previous) => [...previous, userMessage]);
     setInput("");
     try {
       const reply = await chatWithAi({
         prompt,
         accountId: accountId || null,
-        messages: nextMessages
-          .filter(
-            (message) =>
-              message.role === "user" || message.role === "assistant",
-          )
-          .slice(-12)
-          .map((message) => ({
-            role: message.role,
-            content: message.content,
-          })),
+        chatId: chatId.trim() === "" ? null : parsedChatId,
+        messages: history,
       });
       setMessages((previous) => [
         ...previous,
@@ -68,22 +98,22 @@ export function AgentChatPanel({
         },
       ]);
     } catch (sendError) {
-      setError(errorMessage(sendError));
+      setError(aiErrorMessage(sendError));
     } finally {
       setBusy(false);
-      requestAnimationFrame(() => {
-        endRef.current?.scrollIntoView({ behavior: "smooth" });
-      });
     }
   };
 
+  const canSend = Boolean(input.trim()) && !busy && chatIdValid;
+
   return (
-    <div className="flex h-[calc(100dvh-9.5rem)] min-h-[420px] flex-col rounded-xl border border-zinc-800 bg-zinc-900/60">
+    <div className="flex min-h-[420px] min-w-0 flex-1 flex-col rounded-xl border border-zinc-800 bg-zinc-900/60">
       <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-2">
         <select
           value={accountId}
           onChange={(event) => setAccountId(event.target.value)}
-          className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-sky-500"
+          aria-label="Аккаунт для запроса"
+          className="min-w-0 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30"
         >
           <option value="">Все аккаунты</option>
           {accounts.map((account) => (
@@ -92,10 +122,27 @@ export function AgentChatPanel({
             </option>
           ))}
         </select>
+        <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-zinc-500">
+          <span className="shrink-0">Chat id</span>
+          <input
+            value={chatId}
+            onChange={(event) => setChatId(event.target.value)}
+            inputMode="numeric"
+            placeholder="необязательно"
+            aria-invalid={!chatIdValid}
+            className={`w-32 min-w-0 rounded-md border bg-zinc-800 px-2 py-1 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:ring-2 focus:ring-sky-500/30 ${
+              chatIdValid
+                ? "border-zinc-700 focus:border-sky-500"
+                : "border-red-700 focus:border-red-500"
+            }`}
+          />
+        </label>
         <span className="text-[11px] text-zinc-500">
-          {settings?.dryRun
-            ? "dryRun: изменения не уходят в Telegram"
-            : "dryRun выключен"}
+          {settings
+            ? settings.dryRun
+              ? "dryRun: изменения не уходят в Telegram"
+              : "dryRun выключен"
+            : "Настройки загружаются…"}
         </span>
         <button
           type="button"
@@ -103,13 +150,19 @@ export function AgentChatPanel({
             setMessages([]);
             setError(null);
           }}
-          className="ml-auto rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800"
+          disabled={busy}
+          className="ml-auto rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 disabled:opacity-40"
         >
           Новый диалог
         </button>
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
+        {!chatIdValid && (
+          <p className="rounded-md border border-red-900/60 bg-red-950/30 px-2 py-1.5 text-[11px] text-red-300">
+            Chat id должен быть целым числом или пустым.
+          </p>
+        )}
         {messages.length === 0 && (
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4 text-sm text-zinc-400">
             <p className="mb-2 font-medium text-zinc-200">
@@ -129,7 +182,7 @@ export function AgentChatPanel({
             className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
           >
             <div
-              className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
+              className={`max-w-[85%] min-w-0 break-words rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
                 message.role === "user"
                   ? "bg-sky-600/90 text-white"
                   : "border border-zinc-800 bg-zinc-950/70 text-zinc-200"
@@ -137,32 +190,42 @@ export function AgentChatPanel({
             >
               {message.content}
               {message.trace && message.trace.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1 border-t border-zinc-800 pt-2">
-                  {message.trace.map((entry, index) => (
-                    <span
-                      key={`${entry.tool}-${index}`}
-                      title={
-                        entry.error ?? (entry.dryRun ? "dry-run" : "выполнено")
-                      }
-                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                        entry.error
-                          ? "bg-red-950/60 text-red-300"
+                <div className="mt-2 border-t border-zinc-800 pt-2">
+                  <p className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                    Инструменты
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {message.trace.map((entry, index) => (
+                      <span
+                        key={`${entry.tool}-${index}`}
+                        title={traceTitle(entry)}
+                        className={`max-w-full break-all rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                          entry.error
+                            ? "bg-red-950/60 text-red-300"
+                            : entry.dryRun
+                              ? "bg-amber-950/50 text-amber-300"
+                              : "bg-zinc-800 text-zinc-400"
+                        }`}
+                      >
+                        {entry.tool}
+                        {entry.error
+                          ? " · ошибка"
                           : entry.dryRun
-                            ? "bg-amber-950/50 text-amber-300"
-                            : "bg-zinc-800 text-zinc-400"
-                      }`}
-                    >
-                      {entry.tool}
-                      {entry.error ? " ✕" : entry.dryRun ? " dry" : " ✓"}
-                    </span>
-                  ))}
+                            ? " · dry-run"
+                            : " · ок"}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
           </div>
         ))}
         {busy && (
-          <div className="flex items-center gap-2 text-xs text-zinc-500">
+          <div
+            className="flex items-center gap-2 text-xs text-zinc-500"
+            aria-live="polite"
+          >
             <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />
             Агент думает…
           </div>
@@ -171,7 +234,10 @@ export function AgentChatPanel({
       </div>
 
       {error && (
-        <div className="mx-3 mb-2 rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <div
+          role="alert"
+          className="mx-3 mb-2 break-words rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-300"
+        >
           {error}
         </div>
       )}
@@ -187,10 +253,11 @@ export function AgentChatPanel({
             }
           }}
           rows={2}
+          aria-label="Сообщение агенту"
           placeholder="Напишите задачу агенту… Enter — отправить, Shift+Enter — новая строка"
-          className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500"
+          className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30"
         />
-        <div className="mt-2 flex items-center justify-between">
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] text-zinc-500">
             {settings?.model
               ? `модель ${settings.model}`
@@ -199,10 +266,10 @@ export function AgentChatPanel({
           <button
             type="button"
             onClick={() => void send()}
-            disabled={busy || !input.trim()}
-            className="rounded-md bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+            disabled={!canSend}
+            className="rounded-md bg-sky-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Отправить
+            {busy ? "Отправка…" : "Отправить"}
           </button>
         </div>
       </div>

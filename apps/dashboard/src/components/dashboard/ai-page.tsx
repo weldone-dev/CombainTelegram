@@ -5,6 +5,7 @@ import {
   type AiCapabilities,
   type AiCapability,
   type AiSettings,
+  aiErrorMessage,
   getAiSettings,
   getAiTools,
   mcpEndpoint,
@@ -14,7 +15,6 @@ import {
   updateAiPolicy,
   updateAiSettings,
 } from "../../lib/ai-api";
-import { errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
 import { AgentChatPanel } from "./ai-agent-chat";
 import { AutomationsPanel } from "./ai-automations";
@@ -89,7 +89,7 @@ export function AiPage() {
       setSettings(nextSettings);
       setTools(nextTools.tools);
     } catch (loadError) {
-      setError(errorMessage(loadError));
+      setError(aiErrorMessage(loadError));
     } finally {
       if (!silent) setLoading(false);
     }
@@ -100,14 +100,15 @@ export function AiPage() {
   }, [load]);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+    <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-zinc-800 px-4 py-2">
         {TABS.map((item) => (
           <button
             key={item.id}
             type="button"
             onClick={() => setTab(item.id)}
-            className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+            aria-pressed={tab === item.id}
+            className={`rounded-md px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 ${
               tab === item.id
                 ? "bg-sky-500/15 font-medium text-sky-300"
                 : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
@@ -138,7 +139,11 @@ export function AiPage() {
           <p className="text-sm text-zinc-500">Загрузка…</p>
         ) : (
           <>
-            {tab === "agent" && <AgentChatPanel settings={settings} />}
+            {tab === "agent" && (
+              <div className="flex h-full min-h-0 flex-col">
+                <AgentChatPanel settings={settings} />
+              </div>
+            )}
             {tab === "souls" && <SoulsPanel />}
             {tab === "skills" && <SkillsPanel />}
             {tab === "automations" && <AutomationsPanel />}
@@ -199,6 +204,7 @@ function SettingsPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [token, setToken] = useState(settings.mcp.token);
+  const [tokenVisible, setTokenVisible] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
 
   useEffect(() => {
@@ -217,16 +223,26 @@ function SettingsPanel({
   }, [settings]);
 
   const saveProvider = async () => {
+    const temperatureValue = Number(temperature);
+    const stepsValue = Number(maxSteps);
+    if (!Number.isFinite(temperatureValue) || !temperature.trim()) {
+      setError("Температура должна быть числом от 0 до 2");
+      return;
+    }
+    if (!Number.isSafeInteger(stepsValue) || stepsValue < 1) {
+      setError("Максимум шагов агента — целое число от 1");
+      return;
+    }
     setBusy(true);
     setError(null);
     setStatus(null);
     try {
       const next = await updateAiSettings({
-        baseUrl,
-        model,
-        fastModel,
-        temperature: Number(temperature),
-        maxSteps: Number(maxSteps),
+        baseUrl: baseUrl.trim(),
+        model: model.trim(),
+        fastModel: fastModel.trim(),
+        temperature: temperatureValue,
+        maxSteps: stepsValue,
         dryRun,
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
       });
@@ -234,7 +250,7 @@ function SettingsPanel({
       setApiKey("");
       setStatus("Настройки модели сохранены");
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      setError(aiErrorMessage(saveError));
     } finally {
       setBusy(false);
     }
@@ -257,7 +273,7 @@ function SettingsPanel({
       onChange(next);
       setStatus("Разрешения сохранены");
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      setError(aiErrorMessage(saveError));
     } finally {
       setBusy(false);
     }
@@ -271,21 +287,33 @@ function SettingsPanel({
       const result = await testAi();
       setStatus(`Модель ответила: ${result.text.slice(0, 200)}`);
     } catch (testError) {
-      setError(errorMessage(testError));
+      setError(aiErrorMessage(testError));
     } finally {
       setTestBusy(false);
     }
   };
 
   const rotate = async () => {
+    if (
+      !window.confirm(
+        "Перевыпустить MCP-токен? Подключённые клиенты потеряют доступ, пока вы не вставите им новый токен.",
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setError(null);
+    setStatus(null);
     try {
       const next = await rotateMcpToken();
       setToken(next.token);
+      // Keep the parent copy in sync so switching tabs does not show the old
+      // token again.
+      onChange({ ...settings, mcp: { ...settings.mcp, token: next.token } });
+      setTokenVisible(true);
       setStatus("MCP-токен обновлён. Старые клиенты потеряют доступ.");
     } catch (rotateError) {
-      setError(errorMessage(rotateError));
+      setError(aiErrorMessage(rotateError));
     } finally {
       setBusy(false);
     }
@@ -313,7 +341,9 @@ function SettingsPanel({
   }, [tools]);
 
   return (
-    <div className="grid max-w-5xl gap-4">
+    <div className="grid min-w-0 max-w-5xl gap-4">
+      <ErrorBanner message={error} />
+      <OkBanner message={status} />
       <Card
         title="Модель"
         description="OpenAI-совместимый провайдер. Ключ хранится в .env или зашифрован в базе; в интерфейсе показывается только хвост."
@@ -390,13 +420,9 @@ function SettingsPanel({
           <Toggle
             checked={dryRun}
             onChange={setDryRun}
-            label="dryRun — не отправлять в Telegram"
-            hint="Инструменты отправки/редактирования/удаления только симулируются. Автоответ души работает отдельно и не зависит от этого флага."
+            label="dryRun — примерка без действий в Telegram"
+            hint="Инструменты отправки, редактирования и удаления только имитируются: в ответе инструмента будет dryRun: true. Автоответ души работает отдельно и от этого флага не зависит."
           />
-        </div>
-        <div className="mt-3 space-y-2">
-          {status && <OkBanner message={status} />}
-          {error && <ErrorBanner message={error} />}
         </div>
       </Card>
 
@@ -427,48 +453,56 @@ function SettingsPanel({
         </div>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <div>
-            <p className="mb-1 text-xs text-zinc-400">Аккаунты</p>
+          <fieldset className="min-w-0">
+            <legend className="mb-1 text-xs text-zinc-400">Аккаунты</legend>
             <div className="space-y-1.5 rounded-md border border-zinc-800 p-2">
               {accounts.length === 0 && (
                 <p className="text-xs text-zinc-500">Нет аккаунтов</p>
               )}
               {accounts.map((account) => {
-                const checked =
-                  allowAccountIds.length === 0 ||
-                  allowAccountIds.includes(account.id);
+                // An empty list means "all accounts"; expand it before toggling
+                // so unchecking one account actually excludes it.
+                const effective =
+                  allowAccountIds.length === 0
+                    ? accounts.map((item) => item.id)
+                    : allowAccountIds;
+                const checked = effective.includes(account.id);
+                const lastChecked = checked && effective.length === 1;
                 return (
                   <label
                     key={account.id}
-                    className="flex items-center gap-2 text-xs text-zinc-300"
+                    title={
+                      lastChecked
+                        ? "Пустой список значит «все аккаунты», поэтому последний снять нельзя"
+                        : undefined
+                    }
+                    className={`flex min-w-0 items-center gap-2 text-xs ${
+                      lastChecked ? "text-zinc-500" : "text-zinc-300"
+                    }`}
                   >
                     <input
                       type="checkbox"
                       checked={checked}
+                      disabled={lastChecked}
                       onChange={(event) => {
-                        const others = allowAccountIds.filter(
-                          (id) => id !== account.id,
-                        );
                         setAllowAccountIds(
                           event.target.checked
-                            ? [...others, account.id]
-                            : others.length > 0
-                              ? others
-                              : [],
+                            ? [...new Set([...effective, account.id])]
+                            : effective.filter((id) => id !== account.id),
                         );
                       }}
-                      className="h-3.5 w-3.5 accent-sky-500"
+                      className="h-3.5 w-3.5 shrink-0 accent-sky-500"
                     />
-                    {accountName(account)}
+                    <span className="truncate">{accountName(account)}</span>
                   </label>
                 );
               })}
             </div>
             <p className="mt-1 text-[11px] text-zinc-500">
-              Пусто = все аккаунты.
+              Пусто = все аккаунты, поэтому последний отмеченный снять нельзя.
             </p>
-          </div>
-          <div className="space-y-2">
+          </fieldset>
+          <div className="min-w-0 space-y-2">
             <Field label="Разрешённые чаты (id через запятую)">
               <input
                 value={allowChats}
@@ -503,8 +537,13 @@ function SettingsPanel({
         title="MCP-сервер"
         description="Streamable HTTP, JSON-RPC 2.0. Подключите Claude Desktop, Codex, Orca или свой агент."
         actions={
-          <div className="flex gap-2">
-            <GhostButton onClick={copyToken}>Скопировать токен</GhostButton>
+          <div className="flex flex-wrap gap-2">
+            <GhostButton onClick={() => void copyToken()}>
+              Скопировать токен
+            </GhostButton>
+            <GhostButton onClick={() => setTokenVisible((value) => !value)}>
+              {tokenVisible ? "Скрыть токен" : "Показать токен"}
+            </GhostButton>
             <GhostButton onClick={() => void rotate()} disabled={busy} danger>
               Перевыпустить
             </GhostButton>
@@ -512,14 +551,27 @@ function SettingsPanel({
         }
       >
         <div className="space-y-2">
-          <Field label="Endpoint">
-            <input readOnly value={endpoint} className={inputClass} />
-          </Field>
-          <Field label="Bearer token">
+          <Field
+            label="Endpoint"
+            hint="Адрес API-сервера из NEXT_PUBLIC_API_URL; этот же origin использует дашборд."
+          >
             <input
               readOnly
+              value={endpoint}
+              onFocus={(event) => event.currentTarget.select()}
+              className={inputClass}
+            />
+          </Field>
+          <Field
+            label="Bearer token"
+            hint="Передаётся в заголовке Authorization: Bearer …. Не публикуйте его."
+          >
+            <input
+              readOnly
+              type={tokenVisible ? "text" : "password"}
               value={token}
               onFocus={(event) => event.currentTarget.select()}
+              autoComplete="off"
               className={`${inputClass} font-mono text-xs`}
             />
           </Field>
@@ -530,7 +582,7 @@ function SettingsPanel({
     "combain-telegram": {
       "type": "http",
       "url": "${endpoint}",
-      "headers": { "Authorization": "Bearer ${token.slice(0, 8)}…" }
+      "headers": { "Authorization": "Bearer <токен из поля выше>" }
     }
   }
 }`}</pre>
@@ -540,7 +592,7 @@ function SettingsPanel({
         <button
           type="button"
           onClick={() => setToolsOpen((value) => !value)}
-          className="mt-3 text-xs text-sky-400 hover:text-sky-300"
+          className="mt-3 rounded text-xs text-sky-400 hover:text-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
         >
           {toolsOpen
             ? "Скрыть инструменты"

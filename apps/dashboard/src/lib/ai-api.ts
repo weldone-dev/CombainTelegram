@@ -1,4 +1,10 @@
-import { apiFetch } from "./api";
+import {
+  API_URL,
+  ApiError,
+  apiFetch,
+  errorCodeText,
+  errorMessage,
+} from "./api";
 
 export type AiCapability =
   | "read"
@@ -190,6 +196,45 @@ export interface BotView {
   lastPolledAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+const AI_ERRORS: Record<string, string> = {
+  INVALID_PROMPT: "Пустой запрос: напишите сообщение агенту",
+  INVALID_CHAT: "Нужен корректный chat id",
+  INVALID_FACT: "Факт не может быть пустым",
+  INVALID_NAME: "Укажите название",
+  INVALID_SLUG: "Slug: латиница, цифры, дефис или подчёркивание",
+  INVALID_INSTRUCTIONS: "Инструкции скилла не могут быть пустыми",
+  INVALID_ACTION: "Неизвестное действие автоматизации",
+  SKILL_EXISTS: "Скилл с таким slug уже существует",
+  SKILL_NOT_FOUND: "Скилл не найден",
+  SYSTEM_SKILL:
+    "Встроенный скилл нельзя удалить — выключите или отредактируйте его",
+  AUTOMATION_NOT_FOUND: "Автоматизация не найдена",
+  BOT_NOT_FOUND: "Бот не найден",
+  BOT_TOKEN_MISSING: "У бота ещё нет токена — вставьте токен BotFather",
+  BOT_TOKEN_REJECTED: "Telegram не принял токен бота",
+  INVALID_BOT_TOKEN: "Токен должен выглядеть как 123456789:AA…",
+};
+
+/**
+ * Russian message for AI calls. `errorMessage` falls back to the raw code for
+ * unmapped codes; AI endpoints either return descriptive Russian text in the
+ * body (AI_FAILED) or an English one, so localise the known codes first.
+ */
+export function aiErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const retry = error.body.retryAfter
+      ? ` (повторите через ${error.body.retryAfter} с)`
+      : "";
+    const localised = AI_ERRORS[error.code];
+    if (localised) return `${localised}${retry}`;
+    const mapped = errorCodeText(error.code);
+    const text =
+      mapped === error.code && error.body.message ? error.body.message : mapped;
+    return `${text}${retry}`;
+  }
+  return errorMessage(error);
 }
 
 export function getAiSettings(): Promise<AiSettings> {
@@ -437,9 +482,11 @@ export function rotateMcpToken(): Promise<{ token: string }> {
   return apiFetch("/ai/mcp/rotate", { method: "POST", body: {} });
 }
 
-/** Absolute MCP URL for copy/paste into a client config. */
+/**
+ * Absolute MCP URL for copy/paste into a client config. Uses the same API
+ * origin as every other request (`NEXT_PUBLIC_API_URL`, `localhost:3001` by
+ * default), so the dashboard never advertises a dead endpoint.
+ */
 export function mcpEndpoint(): string {
-  if (typeof window === "undefined") return "/mcp";
-  const api = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:3001";
-  return `${api.replace(/\/+$/, "")}/mcp`;
+  return `${API_URL}/mcp`;
 }

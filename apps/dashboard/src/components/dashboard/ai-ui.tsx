@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 
 export const inputClass =
-  "mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-sky-500";
+  "mt-1 w-full min-w-0 rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30";
 
 export const textareaClass = `${inputClass} min-h-24 resize-y font-normal`;
 
@@ -18,14 +18,17 @@ export function Field({
   children: ReactNode;
   className?: string;
 }) {
+  // A real `<label>` associates the caption with the single control inside.
+  // Callers must not put buttons or other controls inside `children`.
   return (
-    <div className={`block text-xs text-zinc-400 ${className}`}>
+    // biome-ignore lint/a11y/noLabelWithoutControl: children is always one control
+    <label className={`block min-w-0 text-xs text-zinc-400 ${className}`}>
       <span className="block">{label}</span>
       {children}
       {hint && (
         <span className="mt-1 block text-[11px] text-zinc-500">{hint}</span>
       )}
-    </div>
+    </label>
   );
 }
 
@@ -44,19 +47,23 @@ export function Card({
 }) {
   return (
     <section
-      className={`rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 ${className}`}
+      className={`min-w-0 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 ${className}`}
     >
       {(title || actions) && (
         <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-          <div>
+          <div className="min-w-0 flex-1">
             {title && (
-              <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>
+              <h2 className="break-words text-sm font-semibold text-zinc-100">
+                {title}
+              </h2>
             )}
             {description && (
-              <p className="mt-1 text-xs text-zinc-500">{description}</p>
+              <p className="mt-1 break-words text-xs text-zinc-500">
+                {description}
+              </p>
             )}
           </div>
-          {actions}
+          {actions && <div className="min-w-0">{actions}</div>}
         </div>
       )}
       {children}
@@ -137,7 +144,7 @@ export function PrimaryButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
+      className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
@@ -160,7 +167,7 @@ export function GhostButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-40 ${
+      className={`rounded-md border px-2.5 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 ${
         danger
           ? "border-red-900/60 text-red-300 hover:bg-red-950/40"
           : "border-zinc-700 text-zinc-300 hover:bg-zinc-800"
@@ -174,7 +181,10 @@ export function GhostButton({
 export function ErrorBanner({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div className="mb-3 rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
+    <div
+      role="alert"
+      className="mb-3 break-words rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+    >
       {message}
     </div>
   );
@@ -183,7 +193,10 @@ export function ErrorBanner({ message }: { message: string | null }) {
 export function OkBanner({ message }: { message: string | null }) {
   if (!message) return null;
   return (
-    <div className="mb-3 rounded-md border border-emerald-900/60 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300">
+    <div
+      aria-live="polite"
+      className="mb-3 break-words rounded-md border border-emerald-900/60 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300"
+    >
       {message}
     </div>
   );
