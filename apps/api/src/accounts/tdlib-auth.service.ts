@@ -40,6 +40,10 @@ const SWEEP_INTERVAL_MS = 60 * 1000;
 const FIRST_PROGRESS_TIMEOUT_MS = 10_000;
 const MAX_CODE_ATTEMPTS = 3;
 const MAX_PASSWORD_ATTEMPTS = 3;
+/** TDLib can hang on a throttled QR export; never block the state chain. */
+const QR_REQUEST_TIMEOUT_MS = 20_000;
+/** A login attempt that never left `starting` is failed after this. */
+const START_WATCHDOG_MS = 60_000;
 /** One TDLib session per account: a re-migration replaces it. */
 const TDLIB_DEVICE_ID = 'tdlib';
 
@@ -575,6 +579,18 @@ export class TdlibAuthService implements OnModuleDestroy {
     };
 
     this.attempts.set(id, attempt);
+
+    // A throttled TDLib can stay silent; surface it instead of spinning forever.
+    setTimeout(() => {
+      if (attempt.status === 'starting' && !attempt.finalized) {
+        void this.failAttempt(attempt, {
+          code: 'TDLIB_TIMEOUT',
+          message: 'TDLib did not start in time',
+          status: 504,
+        });
+      }
+    }, START_WATCHDOG_MS).unref?.();
+
     client.onAuthorizationState((state) => {
       attempt.stateChain = attempt.stateChain
         .then(() => this.handleState(attempt, state))
@@ -646,7 +662,17 @@ export class TdlibAuthService implements OnModuleDestroy {
           this.resolveFirstProgress(attempt);
           await attempt.client.setAuthenticationPhoneNumber(attempt.phone);
         } else {
-          await attempt.client.requestQrCodeAuthentication();
+          // Telegram can throttle QR token exports: TDLib then never answers
+          // and would block the state chain forever.
+          await Promise.race([
+            attempt.client.requestQrCodeAuthentication(),
+            new Promise<never>((_, reject) => {
+              setTimeout(
+                () => reject(new Error('TDLib QR request timed out')),
+                QR_REQUEST_TIMEOUT_MS,
+              ).unref?.();
+            }),
+          ]);
         }
         return;
 
