@@ -262,7 +262,7 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       const message = (error as Error).message;
       await this.automations.finishRun(run.id, {
-        status: 'error',
+        status: 'failed',
         error: message,
       });
       await this.automations
