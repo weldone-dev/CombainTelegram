@@ -168,22 +168,6 @@ const discussionRoot = {
   id: 900,
   chat: { id: DISCUSSION_CHAT_ID, type: 'chat', displayName: 'Comments' },
 };
-const commentMessage = {
-  id: 901,
-  text: 'первый комментарий',
-  date: new Date('2026-11-20T10:00:00.000Z'),
-  isOutgoing: false,
-  sender: {
-    id: 777,
-    type: 'user',
-    displayName: 'Bob',
-    username: 'bob',
-  },
-  chat: { id: DISCUSSION_CHAT_ID, type: 'chat', displayName: 'Comments' },
-  replyToMessage: null,
-  media: null,
-  raw: { _: 'message' },
-};
 
 describe('MessagingService channel thread routing', () => {
   it('serves comments from TDLib without touching mtcute', async () => {
@@ -216,10 +200,9 @@ describe('MessagingService channel thread routing', () => {
     expect(resolveSession).not.toHaveBeenCalled();
   });
 
-  it('falls back to mtcute when TDLib thread reading throws', async () => {
+  it('surfaces the TDLib thread error instead of replaying the message id', async () => {
     const getDiscussionMessage = vi.fn(async () => discussionRoot);
-    const searchMessages = vi.fn(async () => [commentMessage]);
-    const { accounts } = fakeAccounts({ getDiscussionMessage, searchMessages });
+    const { accounts, resolveSession } = fakeAccounts({ getDiscussionMessage });
     const { td } = fakeTd({
       getMessageThread: vi.fn(async () => {
         throw new Error('TDLib does not know this message id');
@@ -227,25 +210,23 @@ describe('MessagingService channel thread routing', () => {
     });
     const service = new MessagingService(accounts, td);
 
-    const thread = await service.getMessageThread(
-      USER_ID,
-      ACCOUNT_ID,
-      String(CHAT_ID),
-      '42',
-    );
-
-    expect(getDiscussionMessage).toHaveBeenCalledWith({
-      chatId: CHAT_ID,
-      message: 42,
+    await expect(
+      service.getMessageThread(
+        USER_ID,
+        ACCOUNT_ID,
+        String(CHAT_ID),
+        '42',
+      ),
+    ).rejects.toMatchObject({
+      status: 502,
+      response: { code: 'TELEGRAM_ERROR' },
     });
-    expect(thread.discussionChatId).toBe(DISCUSSION_CHAT_ID);
-    expect(thread.comments.map((comment) => comment.id)).toEqual([901]);
+    expect(getDiscussionMessage).not.toHaveBeenCalled();
+    expect(resolveSession).not.toHaveBeenCalled();
   });
 
-  it('falls back to mtcute when TDLib commenting throws', async () => {
-    const getDiscussionMessage = vi.fn(async () => discussionRoot);
-    const sendText = vi.fn(async () => commentMessage);
-    const { accounts } = fakeAccounts({ getDiscussionMessage, sendText });
+  it('surfaces the TDLib commenting error instead of replaying the message id', async () => {
+    const { accounts, resolveSession } = fakeAccounts({});
     const { td } = fakeTd({
       sendComment: vi.fn(async () => {
         throw new Error('TDLib cannot send here');
@@ -253,18 +234,15 @@ describe('MessagingService channel thread routing', () => {
     });
     const service = new MessagingService(accounts, td);
 
-    const created = await service.sendComment(
-      USER_ID,
-      ACCOUNT_ID,
-      String(CHAT_ID),
-      '42',
-      { text: 'привет' },
-    );
-
-    expect(sendText).toHaveBeenCalledWith(DISCUSSION_CHAT_ID, 'привет', {
-      replyTo: discussionRoot.id,
+    await expect(
+      service.sendComment(USER_ID, ACCOUNT_ID, String(CHAT_ID), '42', {
+        text: 'привет',
+      }),
+    ).rejects.toMatchObject({
+      status: 502,
+      response: { code: 'TELEGRAM_ERROR' },
     });
-    expect(created).toMatchObject({ id: 901, text: 'первый комментарий' });
+    expect(resolveSession).not.toHaveBeenCalled();
   });
 });
 
@@ -276,6 +254,52 @@ const infoPeer = {
   photo: null,
   inputPeer: { _: 'inputPeerUser', userId: CHAT_ID, accessHash: 1n },
 };
+
+describe('MessagingService id-scoped routing', () => {
+  it('does not replay a failed TDLib reaction through mtcute', async () => {
+    const sendReaction = vi.fn(async () => sentMessage);
+    const { accounts, resolveSession } = fakeAccounts({ sendReaction });
+    const { td } = fakeTd({
+      sendReaction: vi.fn(async () => {
+        throw new Error("The reaction isn't available for the message");
+      }),
+    });
+    const service = new MessagingService(accounts, td);
+
+    await expect(
+      service.sendReaction(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77', {
+        emoji: '👍',
+      }),
+    ).rejects.toMatchObject({
+      status: 502,
+      response: { code: 'TELEGRAM_ERROR' },
+    });
+    expect(sendReaction).not.toHaveBeenCalled();
+    expect(resolveSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the mtcute fallback for chat-scoped calls', async () => {
+    const readHistory = vi.fn(async () => undefined);
+    const { accounts, resolveSession } = fakeAccounts({ readHistory });
+    const { td } = fakeTd({
+      markRead: vi.fn(async () => {
+        throw new Error('TDLib is down');
+      }),
+    });
+    const service = new MessagingService(accounts, td);
+
+    const view = await service.markRead(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      { maxId: '5' },
+    );
+
+    expect(view).toEqual({ read: true, maxId: 5 });
+    expect(readHistory).toHaveBeenCalledWith(CHAT_ID, { maxId: 5 });
+    expect(resolveSession).toHaveBeenCalled();
+  });
+});
 
 describe('MessagingService chat-info and text routing', () => {
   it('serves chat info media from TDLib with its message ids', async () => {

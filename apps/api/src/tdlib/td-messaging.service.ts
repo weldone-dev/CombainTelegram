@@ -17,6 +17,7 @@ import type {
 import { PrismaService } from '../prisma/prisma.service.js';
 import { TelegramConfigService } from '../telegram/telegram.config.js';
 import { apiError, notFound } from '../common/api-error.js';
+import { emitLog } from '../logs/log-sink.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
 import { resolveActiveSession } from '../accounts/active-session.js';
 import type { ChatInfoView, ChatPeerView } from '../messaging/chat-info.js';
@@ -81,6 +82,11 @@ const SEND_WAIT_TIMEOUT_MS = 30_000;
 /** Upper bound for waiting on a speech-recognition update. */
 const SPEECH_WAIT_TIMEOUT_MS = 30_000;
 const READ_ALL_BATCH_SIZE = 10;
+/**
+ * Second refetch delay when TDLib's cached message still shows the reaction
+ * state from before the add/remove (the cache catches up just after the call).
+ */
+const REACTION_REFRESH_RETRY_MS = 150;
 
 /** Per-message download payload handed back to `MessagingService` for caching. */
 export interface TdDownloadPayload {
@@ -156,8 +162,8 @@ export type TdTypingStatus =
 
 /**
  * One account's TDLib facade. `MessagingService` calls exactly these methods
- * when a TDLib session is live; any throw is logged there and the mtcute path
- * runs instead.
+ * when a TDLib session is live. A throw is logged there: chat-scoped methods
+ * fall back to mtcute, message-id-scoped ones surface the mapped error.
  */
 export interface TdMessenger {
   listChats(query: TdListChatsQuery): Promise<ChatView[]>;
@@ -339,6 +345,53 @@ function speechApiError(code: string): Error {
         502,
       );
   }
+}
+
+/** Chosen reactions of a TDLib message, as a stable comparable signature. */
+function chosenReactionSignature(raw: message): string {
+  const reactions = raw.interaction_info?.reactions?.reactions ?? [];
+  return reactions
+    .filter((reaction) => reaction.is_chosen)
+    .map((reaction) =>
+      reaction.type._ === 'reactionTypeEmoji'
+        ? `emoji:${reaction.type.emoji}`
+        : reaction.type._,
+    )
+    .sort()
+    .join('|');
+}
+
+/**
+ * TDLib refuses with "The reaction isn't available for the message" when its
+ * cached copy predates the reaction set the server knows. Refetching the
+ * message once makes the add succeed.
+ */
+function isReactionUnavailableError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /reaction/i.test(text) && /availab/i.test(text);
+}
+
+/** TDLib reaction failures are logged and then propagated to the caller. */
+function logReactionFailure(
+  operation: 'add' | 'remove',
+  chatId: number,
+  messageId: number,
+  error: unknown,
+): void {
+  emitLog({
+    level: 'error',
+    source: 'messaging',
+    action: 'tdlib.messaging.sendReaction',
+    message: `TDLib could not ${operation === 'remove' ? 'remove' : 'add'} the reaction: ${(error as Error)?.message ?? 'unknown error'}`,
+    status: 'failed',
+    chatId,
+    errorCode: 'TDLIB_REACTION_FAILED',
+    details: {
+      operation,
+      messageId,
+      error: (error as Error)?.message ?? String(error),
+    },
+  });
 }
 
 /**
@@ -1651,41 +1704,110 @@ export class TdSessionMessenger implements TdMessenger {
         (reaction) => reaction.is_chosen,
       ) ?? [];
 
+    // Asking for the emoji that is already chosen is a no-op.
+    if (
+      emoji !== null &&
+      chosen.some(
+        (reaction) =>
+          reaction.type._ === 'reactionTypeEmoji' &&
+          reaction.type.emoji === emoji,
+      )
+    ) {
+      return this.sentMessage(chatId, current);
+    }
+
+    // `emoji: null` removes the current reaction, a non-null emoji replaces
+    // it. Paid reactions belong to Telegram and stay untouched.
+    let mutated = false;
     for (const reaction of chosen) {
-      const same =
-        emoji !== null &&
-        reaction.type._ === 'reactionTypeEmoji' &&
-        reaction.type.emoji === emoji;
-      if (same) return this.sentMessage(chatId, current);
       if (reaction.type._ === 'reactionTypePaid') continue;
-      await this.client.api
-        .removeMessageReaction({
+      try {
+        await this.client.api.removeMessageReaction({
           chat_id: chatId,
           message_id: messageId,
           reaction_type: reaction.type,
-        })
-        .catch(() => undefined);
+        });
+        mutated = true;
+      } catch (error) {
+        // Swallowing this used to leave the old emoji in place while the
+        // caller believed the reaction had changed.
+        logReactionFailure('remove', chatId, messageId, error);
+        throw error;
+      }
     }
 
     if (emoji !== null) {
-      await this.client.api.addMessageReaction({
-        chat_id: chatId,
-        message_id: messageId,
-        reaction_type: { _: 'reactionTypeEmoji', emoji },
-        is_big: false,
-        update_recent_reactions: true,
-      });
+      const add = () =>
+        this.client.api.addMessageReaction({
+          chat_id: chatId,
+          message_id: messageId,
+          reaction_type: { _: 'reactionTypeEmoji', emoji },
+          is_big: false,
+          update_recent_reactions: true,
+        });
+      try {
+        await add();
+        mutated = true;
+      } catch (error) {
+        if (!isReactionUnavailableError(error)) {
+          logReactionFailure('add', chatId, messageId, error);
+          throw error;
+        }
+        // TDLib's cached copy of the message predates the reactions the
+        // server knows about; one refresh lets the same add through.
+        await this.client.api.getMessage({
+          chat_id: chatId,
+          message_id: messageId,
+        });
+        try {
+          await add();
+          mutated = true;
+        } catch (retryError) {
+          logReactionFailure('add', chatId, messageId, retryError);
+          throw retryError;
+        }
+      }
     }
 
-    try {
-      const updated = await this.client.api.getMessage({
-        chat_id: chatId,
-        message_id: messageId,
-      });
-      return this.sentMessage(chatId, updated);
-    } catch {
-      return null;
+    if (!mutated) return this.sentMessage(chatId, current);
+
+    return this.refreshedReactionView(
+      chatId,
+      messageId,
+      chosenReactionSignature(current),
+    );
+  }
+
+  /**
+   * Refetch a message after a reaction change. TDLib updates its cache
+   * asynchronously, so the first read can still report the previous
+   * `is_chosen` state; one more read after a short delay settles it.
+   */
+  private async refreshedReactionView(
+    chatId: number,
+    messageId: number,
+    previousSignature: string,
+  ): Promise<MessageView | null> {
+    const read = async (): Promise<message | null> => {
+      try {
+        return await this.client.api.getMessage({
+          chat_id: chatId,
+          message_id: messageId,
+        });
+      } catch {
+        // The reaction was accepted; only the re-fetch is best effort.
+        return null;
+      }
+    };
+
+    let updated = await read();
+    if (updated && chosenReactionSignature(updated) === previousSignature) {
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, REACTION_REFRESH_RETRY_MS),
+      );
+      updated = await read();
     }
+    return updated ? this.sentMessage(chatId, updated) : null;
   }
 
   async editMessage(

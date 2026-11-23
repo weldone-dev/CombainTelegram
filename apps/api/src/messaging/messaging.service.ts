@@ -400,6 +400,7 @@ export class MessagingService {
    * A mapped domain error from TDLib (e.g. transcription failed) must reach the
    * client: replaying a TDLib message id through mtcute would mix id spaces.
    * Transport failures and "chat not known to TDLib" stay on the fallback path.
+   * Used by chat-scoped calls, whose ids both engines understand.
    */
   private rethrowDomainError(error: unknown): void {
     if (!(error instanceof HttpException)) return;
@@ -413,6 +414,30 @@ export class MessagingService {
     }
   }
 
+  /**
+   * Fail honestly for a message-id-scoped call.
+   *
+   * A TDLib message id lives in TDLib's id space. Replaying it through mtcute
+   * would either hit a different message or answer `MESSAGE_ID_INVALID`, and
+   * that misleading error is exactly what the user saw for reactions. The
+   * chat-scoped methods may still fall back because chat ids are peer ids both
+   * engines know; id-scoped ones surface the mapped Telegram error instead.
+   */
+  private rethrowTdFailure(
+    action: string,
+    context: {
+      userId?: string;
+      accountId?: string;
+      sessionId?: string;
+      chatId?: number;
+    },
+    error: unknown,
+  ): never {
+    this.logTdFailure(action, context, error, false);
+    if (error instanceof HttpException) throw error;
+    raiseTelegramError(error);
+  }
+
   /** Structured log line for a TDLib failure before the mtcute fallback. */
   private logTdFailure(
     action: string,
@@ -423,12 +448,15 @@ export class MessagingService {
       chatId?: number;
     },
     error: unknown,
+    fallback = true,
   ): void {
     emitLog({
       level: 'warn',
       source: 'messaging',
       action: `tdlib.messaging.${action}`,
-      message: `TDLib ${action} failed, using mtcute: ${(error as Error)?.message ?? 'unknown error'}`,
+      message: fallback
+        ? `TDLib ${action} failed, using mtcute: ${(error as Error)?.message ?? 'unknown error'}`
+        : `TDLib ${action} failed: ${(error as Error)?.message ?? 'unknown error'}`,
       status: 'failed',
       userId: context.userId,
       accountId: context.accountId,
@@ -968,8 +996,8 @@ export class MessagingService {
    * Comment thread of a channel post.
    *
    * A live TDLib session answers through its `getMessageThread` and the
-   * linked discussion group's history; any failure falls through to the
-   * mtcute path below.
+   * linked discussion group's history. A TDLib failure is surfaced: the
+   * message id is TDLib's, so replaying it through mtcute would be dishonest.
    *
    * mtcute 0.32 has no `threadId` option on `getHistory`; the linked
    * discussion thread is read with `searchMessages({ threadId })` instead.
@@ -1003,7 +1031,7 @@ export class MessagingService {
           offsetId,
         });
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'getMessageThread',
           { userId, accountId, sessionId, chatId },
           error,
@@ -1078,7 +1106,7 @@ export class MessagingService {
       try {
         return await td.sendComment(chatId, messageId, text);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'sendComment',
           { userId, accountId, sessionId, chatId },
           error,
@@ -1350,7 +1378,7 @@ export class MessagingService {
         this.rememberDownload(tdCacheKey, entry);
         return this.toDownloadView(entry, requestedName);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'downloadMedia',
           { userId, accountId, sessionId, chatId },
           error,
@@ -1521,7 +1549,7 @@ export class MessagingService {
       try {
         return await td.sendReaction(chatId, messageId, emoji ?? null);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'sendReaction',
           { userId, accountId, sessionId, chatId },
           error,
@@ -1570,7 +1598,7 @@ export class MessagingService {
       try {
         return await td.votePoll(chatId, messageId, options);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'votePoll',
           { userId, accountId, sessionId, chatId },
           error,
@@ -1621,12 +1649,11 @@ export class MessagingService {
       try {
         return await td.translateMessage(chatId, messageId, to);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'translateMessage',
           { userId, accountId, sessionId, chatId },
           error,
         );
-        this.rethrowDomainError(error);
       }
     }
     const { client } = await this.accounts.resolveSession(
@@ -1684,12 +1711,11 @@ export class MessagingService {
       try {
         return await td.transcribeVoice(chatId, messageId);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'transcribeVoice',
           { userId, accountId, sessionId, chatId },
           error,
         );
-        this.rethrowDomainError(error);
       }
     }
     const { client } = await this.accounts.resolveSession(
@@ -1911,7 +1937,7 @@ export class MessagingService {
       try {
         return await td.editMessage(chatId, messageId, text);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'editMessage',
           { userId, accountId, sessionId, chatId },
           error,
@@ -1957,7 +1983,7 @@ export class MessagingService {
       try {
         return await td.deleteMessage(chatId, messageId, revoke);
       } catch (error) {
-        this.logTdFailure(
+        this.rethrowTdFailure(
           'deleteMessage',
           { userId, accountId, sessionId, chatId },
           error,
