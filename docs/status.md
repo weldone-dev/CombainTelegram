@@ -22,9 +22,14 @@ Updated: 2026-11-23. This file is the single place to check progress.
       Android profile, `TELEGRAM_ENGINE` / `TDLIB_DATA_DIR` settings.
 - [x] `attachTdlibSession` (account + TDLib session persistence), `engine` in
       session views.
+- [x] TDLib login/migration HTTP API (`tdlib-auth` worker, merged).
+- [x] **Live migration of the real account**: migration endpoint -> QR approved
+      by the existing session -> 2FA password -> `ready`. Result: one `tdlib`
+      session + the untouched mtcute session, cloud password stored encrypted.
+- [x] TDLib session reopens from its encrypted database after a process
+      restart (`getMe` confirms the same user).
 
 ## In progress (Orca workers)
-- [ ] `tdlib-auth` — login/migration HTTP API, password prompt + encrypted store.
 - [x] `tdlib-ui` — no device picker, QR/code/password flow, migration card,
       engine badge. Merged.
 - [ ] `tdlib-messaging` — TDLib chats/history/send/media/files behind a switch,
