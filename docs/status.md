@@ -32,8 +32,17 @@ Updated: 2026-11-23. This file is the single place to check progress.
 ## In progress (Orca workers)
 - [x] `tdlib-ui` — no device picker, QR/code/password flow, migration card,
       engine badge. Merged.
-- [ ] `tdlib-messaging` — TDLib chats/history/send/media/files behind a switch,
-      automatic fallback to mtcute.
+- [x] `tdlib-messaging` — TDLib chats/history/send/media/files behind a switch,
+      automatic fallback to mtcute. Merged.
+- [ ] `tdlib-realtime` — realtime events from TDLib (message ids must match
+      the TDLib transcript).
+
+## Live checks already passed
+- Chats list from TDLib (with last messages, pinned/folder order).
+- Message history from TDLib; newest at the bottom.
+- Chat avatar and media/photo download through TDLib (CDN path).
+- Sending a text message through TDLib to `@username_dev` only.
+- Every failure above falls back to mtcute and is logged.
 
 ## Next
 - [ ] Merge workers, wire modules, restart dev servers.
