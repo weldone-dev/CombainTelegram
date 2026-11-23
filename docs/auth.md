@@ -239,6 +239,30 @@ Reference: tdesktop `storage/storage_domain.cpp` (key file/passcode) and 64Gram
 - Do not claim to be an official Telegram app: no official logo, no "Telegram"
   in the product name without "Unofficial".
 
+## 4.1 TDLib login and tdata migration
+
+`tdata` is a Telegram Desktop storage format; TDLib has no API to import its
+auth key. The bridge keeps `tdata` usable anyway:
+
+1. `opentele2` + mtcute open the `tdata` session (official Desktop `api_id`).
+2. A new native TDLib client (official Android profile by default) calls
+   `requestQrCodeAuthentication` and gets `tg://login?token=...`.
+3. The mtcute session immediately approves it with raw `auth.acceptLoginToken`.
+   This works for an imported `tdata` and for any existing account.
+4. If TDLib asks for the cloud password, the stored one is used or the UI asks;
+   it is sealed with AES-256-GCM and never logged.
+5. The TDLib auth key is stored in its own encrypted database under
+   `TDLIB_DATA_DIR/sessions/<deviceId>`; the account gets a second session row
+   with `engine = "tdlib"`.
+
+The mtcute/Desktop session is not logged out. That keeps an escape hatch and
+avoids signing the user out of Telegram Desktop; it can be removed manually in
+Telegram's Devices menu.
+
+The phone-code path (`setAuthenticationPhoneNumber`) is implemented for new
+accounts. Forwarding the code from the `777000` service chat proved unreliable:
+Telegram sends that code by SMS, so QR is the primary flow.
+
 ## 5. Security requirements
 
 1. Session keys encrypted with AES-256-GCM (see architecture doc).
@@ -251,6 +275,9 @@ Reference: tdesktop `storage/storage_domain.cpp` (key file/passcode) and 64Gram
    anything looks wrong.
 7. Terminating a session (`auth.logOut`) is explicit and confirmed; local detach
    is the default delete action.
+8. The cloud password is stored only to answer `authorizationStateWaitPassword`
+   (AAD `cloud:<accountId>`), can be deleted from the UI, and must never be
+   written to logs or error messages.
 
 ## 6. ToS constraints (affect what we build)
 

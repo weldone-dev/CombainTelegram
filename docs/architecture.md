@@ -519,37 +519,67 @@ in-process (rxjs Subject), so a multi-node deployment needs Redis pub/sub.
 
 Never send session keys, auth keys, phone codes or passwords over WS.
 
-## 8. TDLib migration (POC)
+## 8. TDLib engine (native)
 
-The runtime still uses mtcute everywhere; a TDLib move is only being probed.
-`apps/api/scripts/tdlib-qr-poc.ts` proves the bridge that would let an existing
-mtcute session authorize a new TDLib client without a second login:
+The working session is native TDLib (`tdlib-native` + prebuilt `libtdjson`),
+while mtcute remains available as the fallback engine. `TELEGRAM_ENGINE`
+(`auto` by default) decides: an account with a live `engine = "tdlib"` session
+is served by TDLib, everything else by mtcute. Every TDLib call is wrapped:
+on error the request is logged (`tdlib.messaging.*`) and retried with mtcute,
+so a TDLib problem degrades instead of breaking the UI.
 
-1. boot a Nest application context read-only and open the stored session with
-   `AccountsService.resolveSession(DEFAULT_USER_ID, accountId)`;
-2. start `tdlib-native` (with `TDLibAddon`) on the `opentele2`
-   `profile('TelegramDesktop')` credentials and device fields, using a
-   throwaway database under the OS temp dir;
-3. request QR authentication in TDLib and read the `tg://login?token=...` link;
-4. accept that token on the existing mtcute session with
-   `auth.acceptLoginToken`, wait for `authorizationStateReady`, then print
-   `{ qrLink, authorized: true, tdlibUser }`.
+### Storage
+- One folder per session: `$TDLIB_DATA_DIR/sessions/<deviceId>/{db,files}`.
+- `TelegramSession.engine` chooses the engine; `tdlibPath` points at the folder
+  and `tdlibKeyEncrypted` holds the TDLib `database_encryption_key`, sealed by
+  `SessionCryptoService` (AAD `tdlib:<accountId>`, AES-256-GCM).
+- `TelegramAccount.cloudPassword*` stores the 2FA cloud password (AAD
+  `cloud:<accountId>`); it is only used to answer `authorizationStateWaitPassword`
+  automatically. It never appears in logs.
+- `TdClientManagerService` opens a client lazily per session, applies the
+  session proxy through `addProxy` and reuses it until logout/removal.
 
-Run it with a stored account id:
+### Login and migration
+TDLib cannot import an MTProto auth key from `tdata`, so an existing session
+authorizes the new TDLib client through QR:
 
-```sh
-cd apps/api
-bun run tdlib:poc --account <TelegramAccount id> --help   # usage, no connection
-bun run tdlib:poc --account <TelegramAccount id>          # live QR flow
-```
+1. TDLib calls `requestQrCodeAuthentication` and exposes
+   `tg://login?token=...`.
+2. The existing mtcute session (the imported `tdata` one) calls raw
+   `auth.acceptLoginToken` with that token — no code, no SMS.
+3. TDLib may ask for the cloud password; the stored one is submitted, or the UI
+   asks and stores it.
+4. On `authorizationStateReady` the attempt folder is renamed to its permanent
+   session folder and an `engine = "tdlib"` row is attached.
 
-`TD_ACCOUNT_ID`, `TD_POC_DIR` and `TD_POC_TIMEOUT_MS` mirror the flags
-(`--account`, `--dir`, `--timeout <seconds>`); `--keep` preserves the TDLib
-database for inspection. The script writes no account data, does not touch
-`LogsService`, and is not imported by the app: **this does not change runtime
-behaviour**. Note that TDLib 1.8.70 dropped the `language_code`
-`setTdlibParameters` field, so only `system_language_code` comes from the
-profile.
+The old mtcute session is **never logged out**: it stays as a fallback and the
+user can remove it in Telegram at any time. The phone-code path
+(`setAuthenticationPhoneNumber`) exists for brand-new accounts; the
+`777000` bridge is unreliable because Telegram often sends that code by SMS.
+
+`POST /accounts/:id/tdlib/migrate` runs the flow for an existing account
+(the QR is approved automatically). `POST /tdlib/auth/start` handles new
+accounts (`qr` or `phone`), with `/code` and `/password` steps. Attempts live
+in memory for 10 minutes.
+
+### Messaging and realtime
+- `TdChatRegistry` maps TDLib `chat_id` ↔ marked peer ids (user, `-group`,
+  `-100…channel`) and keeps chat snapshots fresh from `updateChat*`.
+- `td-message-view.ts` maps TDLib messages/content to the existing
+  `MessageView`/`ChatView` DTOs, so the dashboard is engine-agnostic.
+- Sends wait for `updateMessageSendSucceeded` so the API returns the final
+  server message id (the temporary id cannot be edited or deleted later).
+- `TdFilesService` downloads through TDLib, which follows CDN redirects itself
+  (the reason for the migration: mtcute cannot open CDN DCs ≥ 200).
+- `TdUpdatesService` republishes TDLib updates as the same `message.new` /
+  `message.edited` / `message.deleted` / `message.read` / `chat.typing` events.
+  For an account with a TDLib session, `UpdatesService` skips its mtcute
+  sessions entirely: a message may not be announced twice with different ids.
+
+### Diagnostic scripts
+`apps/api/scripts/tdlib-qr-poc.ts` and `tdlib-code-poc.ts` prove the bridge
+outside the runtime (`bun run tdlib:poc --account <id>`), including the
+QR + 2FA flow and the phone-code flow. They write no account data.
 
 ## 9. Phases
 
