@@ -31,6 +31,11 @@ interface Pending {
 const BATCH_MS = 1500;
 const MAX_AGE_MS = 120_000;
 
+/** Autopilot only ever works in `draft` or `auto`; anything else is off. */
+function isAutopilotMode(mode: string): boolean {
+  return mode === 'draft' || mode === 'auto';
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.min(15_000, ms)));
 }
@@ -108,7 +113,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (Number(account.tgUserId) === chatId) return; // Saved Messages
 
     const soul = await this.souls.model(accountId);
-    if (!soul || soul.mode === 'off') return;
+    if (!soul || !isAutopilotMode(soul.mode)) return;
     if (!this.souls.allowsChat(soul, chatId)) return;
 
     const key = `${accountId}:${chatId}:${message.id}`;
@@ -156,7 +161,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     const chatKey = `${accountId}:${chatId}`;
     if (this.busy.has(chatKey)) return;
     const soul = await this.souls.model(accountId);
-    if (!soul || soul.mode === 'off') return;
+    if (!soul || !isAutopilotMode(soul.mode)) return;
     if (!this.souls.allowsChat(soul, chatId)) return;
     const settings = parseSoulSettings(soul.settings);
 

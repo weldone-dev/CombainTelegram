@@ -116,7 +116,7 @@ export class AgentService {
     if (input.systemExtra) systemParts.push(`\n${input.systemExtra}`);
 
     const toolsFilter =
-      input.tools && input.tools.length > 0
+      input.tools !== undefined
         ? input.tools
         : skillTools.length > 0
           ? skillTools
