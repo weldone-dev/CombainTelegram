@@ -20,6 +20,11 @@ export interface AccountView {
   firstName: string;
   lastName: string | null;
   username: string | null;
+  /**
+   * Decrypted phone number. The app is local and single-user, so the full
+   * number is safe to return; `phoneMasked` stays for older clients.
+   */
+  phone: string | null;
   phoneMasked: string | null;
   isActive: boolean;
   /** Pinned transport session, or `null` when the fallback order applies. */
@@ -56,6 +61,7 @@ export function serializeAccount(
     firstName: account.firstName,
     lastName: account.lastName,
     username: account.username,
+    phone: phone ?? null,
     phoneMasked: phone ? maskPhone(phone) : null,
     isActive: account.isActive,
     activeSessionId: account.activeSessionId ?? null,

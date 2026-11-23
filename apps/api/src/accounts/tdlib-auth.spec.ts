@@ -25,6 +25,7 @@ const ACCOUNT_VIEW = {
   firstName: 'Test',
   lastName: null,
   username: null,
+  phone: null,
   phoneMasked: null,
   isActive: true,
   createdAt: new Date(0).toISOString(),

@@ -8,6 +8,7 @@ import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import {
   PROXY_KINDS,
   ProxyTransportService,
+  normalizeKind,
 } from '../telegram/proxy-transport.service.js';
 import type { ProxyKind } from '../telegram/proxy-transport.service.js';
 import { apiError, conflict, notFound } from '../common/api-error.js';
@@ -15,10 +16,18 @@ import {
   optionalString,
   requireString,
 } from '../common/validation.js';
-import type { ProxyTestResult, ProxyView } from './proxy-view.js';
+import { emitLog } from '../logs/log-sink.js';
+import type {
+  ProxyCheckResult,
+  ProxyTestResult,
+  ProxyView,
+} from './proxy-view.js';
 import { serializeProxy } from './proxy-view.js';
+import { ProxyProbeService } from './proxy-probe.service.js';
 
 const CONNECT_TIMEOUT_MS = 8_000;
+/** How long the last exit-node result is served before probing again. */
+export const PROXY_CHECK_TTL_MS = 5 * 60 * 1000;
 
 export interface ProxyCreateDto {
   name?: unknown;
@@ -49,11 +58,19 @@ interface NormalizedProxyInput {
 @Injectable()
 export class ProxiesService {
   private readonly logger = new Logger(ProxiesService.name);
+  private readonly checks = new Map<
+    string,
+    { result: ProxyCheckResult; at: number }
+  >();
+  private readonly inflight = new Map<string, Promise<ProxyCheckResult>>();
+  /** Bumped on update/delete so a slow probe cannot cache stale settings. */
+  private readonly revisions = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly crypto: SessionCryptoService,
     private readonly transports: ProxyTransportService,
+    private readonly probe: ProxyProbeService,
   ) {}
 
   async list(userId: string): Promise<ProxyView[]> {
@@ -148,6 +165,7 @@ export class ProxiesService {
         where: { id: existing.id },
         data,
       })) as ProxyModel;
+      this.invalidateCheck(existing.id);
       return serializeProxy(proxy);
     } catch (error) {
       this.rethrowUnique(error, data.name ?? existing.name, userId);
@@ -158,6 +176,7 @@ export class ProxiesService {
   async remove(userId: string, id: string): Promise<{ removed: boolean }> {
     const existing = await this.requireOwned(userId, id);
     await this.prisma.proxy.delete({ where: { id: existing.id } });
+    this.invalidateCheck(existing.id);
     return { removed: true };
   }
 
@@ -206,6 +225,36 @@ export class ProxiesService {
   }
 
   /**
+   * Real exit-node check: one HTTP request through the proxy to an IP echo.
+   * `ok` means the request succeeded and `exitIp` is what the echo saw, not the
+   * proxy host. Results are cached for 5 minutes and one probe per proxy id
+   * runs at a time.
+   */
+  async check(userId: string, id: string): Promise<ProxyCheckResult> {
+    const proxy = await this.requireOwned(userId, id);
+    if (!proxy.enabled) {
+      throw conflict('PROXY_DISABLED', 'This proxy is disabled');
+    }
+
+    const cached = this.checks.get(proxy.id);
+    if (cached && Date.now() - cached.at < PROXY_CHECK_TTL_MS) {
+      return cached.result;
+    }
+
+    const running = this.inflight.get(proxy.id);
+    if (running) return running;
+
+    const revision = this.revisions.get(proxy.id) ?? 0;
+    const pending = this.runCheck(proxy, revision).finally(() => {
+      if (this.inflight.get(proxy.id) === pending) {
+        this.inflight.delete(proxy.id);
+      }
+    });
+    this.inflight.set(proxy.id, pending);
+    return pending;
+  }
+
+  /**
    * Transport for an auth attempt. `proxyId` is optional: without it the login
    * goes direct, exactly like before proxies existed.
    */
@@ -225,6 +274,128 @@ export class ProxiesService {
     })) as ProxyModel | null;
     if (!proxy) throw notFound('PROXY_NOT_FOUND', 'Proxy not found');
     return proxy;
+  }
+
+  private async runCheck(
+    proxy: ProxyModel,
+    revision: number,
+  ): Promise<ProxyCheckResult> {
+    const started = Date.now();
+    const checkedAt = new Date().toISOString();
+    const kind = normalizeKind(proxy.kind);
+
+    // MTProto is a Telegram-only transport: it cannot tunnel arbitrary HTTP,
+    // so there is no exit node to report.
+    if (kind === 'mtproto') {
+      const result: ProxyCheckResult = {
+        ok: false,
+        unsupported: true,
+        latencyMs: Date.now() - started,
+        checkedAt,
+      };
+      this.cacheResult(proxy, result, revision);
+      this.logCheck(proxy, result, 'ok');
+      return result;
+    }
+
+    try {
+      const credentials = this.transports.credentialsFor(proxy);
+      const outcome = await this.probe.probe({
+        kind,
+        host: credentials.host,
+        port: credentials.port,
+        username: credentials.username,
+        secret: credentials.secret,
+      });
+      const result: ProxyCheckResult = {
+        ok: true,
+        latencyMs: Date.now() - started,
+        checkedAt,
+        ...(outcome.exitIp ? { exitIp: outcome.exitIp } : {}),
+        ...(outcome.country ? { country: outcome.country } : {}),
+      };
+      this.cacheResult(proxy, result, revision);
+      this.logCheck(proxy, result, 'ok');
+      return result;
+    } catch {
+      const result: ProxyCheckResult = {
+        ok: false,
+        latencyMs: Date.now() - started,
+        checkedAt,
+        error: 'PROXY_CHECK_FAILED',
+      };
+      this.logCheck(proxy, result, 'failed');
+      // The underlying message may contain the proxy URL (credentials), so the
+      // public error stays generic.
+      throw apiError(
+        'PROXY_CHECK_FAILED',
+        'The proxy did not pass the exit-node check',
+        502,
+      );
+    }
+  }
+
+  private cacheResult(
+    proxy: ProxyModel,
+    result: ProxyCheckResult,
+    revision: number,
+  ): void {
+    if ((this.revisions.get(proxy.id) ?? 0) !== revision) return;
+    this.checks.set(proxy.id, { result, at: Date.now() });
+  }
+
+  /** Logs a probe without the secret: credentials never reach the log store. */
+  private logCheck(
+    proxy: ProxyModel,
+    result: ProxyCheckResult,
+    status: 'ok' | 'failed',
+  ): void {
+    const snapshot = {
+      id: proxy.id,
+      name: proxy.name,
+      kind: normalizeKind(proxy.kind),
+      host: proxy.host,
+      port: proxy.port,
+      username: proxy.username,
+      enabled: proxy.enabled,
+    };
+    const message = result.unsupported
+      ? `Proxy ${proxy.name}: exit-node check is unsupported for mtproto`
+      : result.ok
+        ? `Proxy ${proxy.name}: exit node ${result.exitIp ?? 'unknown'}`
+        : `Proxy ${proxy.name}: exit-node check failed`;
+
+    emitLog({
+      level: status === 'ok' ? 'info' : 'warn',
+      source: 'proxy',
+      action: 'proxy.check',
+      message,
+      status,
+      userId: proxy.userId,
+      proxyId: proxy.id,
+      proxyLabel: proxy.name,
+      proxySnapshot: snapshot,
+      durationMs: result.latencyMs,
+      ...(result.ok || result.unsupported
+        ? {}
+        : { errorCode: 'PROXY_CHECK_FAILED' }),
+      details: {
+        kind: snapshot.kind,
+        host: snapshot.host,
+        port: snapshot.port,
+        username: snapshot.username,
+        enabled: snapshot.enabled,
+        exitIp: result.exitIp ?? null,
+        country: result.country ?? null,
+        unsupported: result.unsupported === true,
+      },
+    });
+  }
+
+  private invalidateCheck(id: string): void {
+    this.checks.delete(id);
+    this.inflight.delete(id);
+    this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1);
   }
 
   private normalize(

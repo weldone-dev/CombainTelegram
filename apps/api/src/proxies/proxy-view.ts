@@ -19,6 +19,21 @@ export interface ProxyTestResult {
   latencyMs: number;
 }
 
+/**
+ * Result of a real exit-node probe: an HTTP request through the proxy to an IP
+ * echo service. `exitIp` is the address the outside world sees.
+ */
+export interface ProxyCheckResult {
+  ok: boolean;
+  latencyMs: number;
+  exitIp?: string;
+  country?: string;
+  /** `mtproto` proxies cannot tunnel plain HTTP(S). */
+  unsupported?: boolean;
+  error?: string;
+  checkedAt: string;
+}
+
 export function serializeProxy(proxy: ProxyModel): ProxyView {
   return {
     id: proxy.id,

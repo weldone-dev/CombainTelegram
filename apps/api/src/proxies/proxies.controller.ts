@@ -12,7 +12,11 @@ import type { UserModel } from '@repo/database';
 import { CurrentUser } from '../user-context/current-user.decorator.js';
 import { ProxiesService } from './proxies.service.js';
 import type { ProxyCreateDto, ProxyUpdateDto } from './proxies.service.js';
-import type { ProxyTestResult, ProxyView } from './proxy-view.js';
+import type {
+  ProxyCheckResult,
+  ProxyTestResult,
+  ProxyView,
+} from './proxy-view.js';
 
 @ApiTags('proxies')
 @Controller('proxies')
@@ -55,5 +59,13 @@ export class ProxiesController {
     @Param('id') id: string,
   ): Promise<ProxyTestResult> {
     return this.proxies.test(user.id, id);
+  }
+
+  @Post(':id/check')
+  check(
+    @CurrentUser() user: UserModel,
+    @Param('id') id: string,
+  ): Promise<ProxyCheckResult> {
+    return this.proxies.check(user.id, id);
   }
 }
