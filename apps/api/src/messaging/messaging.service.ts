@@ -1,4 +1,4 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { HttpException, Injectable, Optional } from '@nestjs/common';
 import {
   InputMedia,
   SearchFilters,
@@ -201,6 +201,17 @@ const AVATAR_CACHE_MAX_ENTRIES = 100;
 /** `limit` cap for the chat info tabs. */
 const CHAT_INFO_LIMIT = 50;
 
+/**
+ * Error codes produced by TDLib-domain validation (transcription, translation)
+ * that must be returned to the client instead of replayed through mtcute.
+ */
+const TD_DOMAIN_ERROR_CODES = new Set<string>([
+  'VALIDATION_ERROR',
+  'TRANSCRIPTION_UNAVAILABLE',
+  'TRANSCRIPTION_FAILED',
+  'PREMIUM_REQUIRED',
+]);
+
 /** `limit` cap for the comment thread drawer. */
 const THREAD_LIMIT = 100;
 
@@ -382,6 +393,23 @@ export class MessagingService {
     } catch (error) {
       this.logTdFailure(action, { userId, accountId, sessionId }, error);
       return null;
+    }
+  }
+
+  /**
+   * A mapped domain error from TDLib (e.g. transcription failed) must reach the
+   * client: replaying a TDLib message id through mtcute would mix id spaces.
+   * Transport failures and "chat not known to TDLib" stay on the fallback path.
+   */
+  private rethrowDomainError(error: unknown): void {
+    if (!(error instanceof HttpException)) return;
+    const body = error.getResponse();
+    const code =
+      body && typeof body === 'object'
+        ? (body as { code?: unknown }).code
+        : undefined;
+    if (typeof code === 'string' && TD_DOMAIN_ERROR_CODES.has(code)) {
+      throw error;
     }
   }
 
@@ -645,6 +673,24 @@ export class MessagingService {
     const limit = parseLimit(query.limit, CHAT_INFO_LIMIT);
     const offsetId = parseOffsetId(query.offsetId);
     const sessionId = parseOptionalSessionId(query.sessionId);
+    const td = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'getChatInfoMedia',
+    );
+    if (td) {
+      try {
+        return await td.getChatInfoMedia(chatId, { kind, limit, offsetId });
+      } catch (error) {
+        this.logTdFailure(
+          'getChatInfoMedia',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+        this.rethrowDomainError(error);
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -690,6 +736,24 @@ export class MessagingService {
   ): Promise<ChatInfoSimilarView> {
     const chatId = parseChatId(rawChatId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
+    const td = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'getChatInfoSimilar',
+    );
+    if (td) {
+      try {
+        return await td.getChatInfoSimilar(chatId);
+      } catch (error) {
+        this.logTdFailure(
+          'getChatInfoSimilar',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+        this.rethrowDomainError(error);
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1547,6 +1611,24 @@ export class MessagingService {
     const messageId = parseMessageId(rawMessageId);
     const to = parseTranslateLanguage(body.to);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'translateMessage',
+    );
+    if (td) {
+      try {
+        return await td.translateMessage(chatId, messageId, to);
+      } catch (error) {
+        this.logTdFailure(
+          'translateMessage',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+        this.rethrowDomainError(error);
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1592,6 +1674,24 @@ export class MessagingService {
     const chatId = parseChatId(rawChatId);
     const messageId = parseMessageId(rawMessageId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
+    const td = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'transcribeVoice',
+    );
+    if (td) {
+      try {
+        return await td.transcribeVoice(chatId, messageId);
+      } catch (error) {
+        this.logTdFailure(
+          'transcribeVoice',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+        this.rethrowDomainError(error);
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,

@@ -1,4 +1,5 @@
 import type { AccountsService } from '../accounts/accounts.service.js';
+import { apiError } from '../common/api-error.js';
 import type { ChatView } from '../messaging/message-view.js';
 import { MessagingService } from '../messaging/messaging.service.js';
 import type { TdMessagingService } from './td-messaging.service.js';
@@ -264,5 +265,117 @@ describe('MessagingService channel thread routing', () => {
       replyTo: discussionRoot.id,
     });
     expect(created).toMatchObject({ id: 901, text: 'первый комментарий' });
+  });
+});
+
+const infoPeer = {
+  id: CHAT_ID,
+  type: 'user',
+  displayName: 'Alice',
+  username: 'alice',
+  photo: null,
+  inputPeer: { _: 'inputPeerUser', userId: CHAT_ID, accessHash: 1n },
+};
+
+describe('MessagingService chat-info and text routing', () => {
+  it('serves chat info media from TDLib with its message ids', async () => {
+    const item = {
+      messageId: 500,
+      date: '2026-11-20T10:00:00.000Z',
+      text: 'photo',
+      media: null,
+      url: null,
+      poll: null,
+    };
+    const getChatInfoMedia = vi.fn(async () => ({
+      items: [item],
+      nextOffsetId: 500,
+    }));
+    const { accounts, resolveSession } = fakeAccounts({});
+    const { td } = fakeTd({ getChatInfoMedia });
+    const service = new MessagingService(accounts, td);
+
+    const view = await service.getChatInfoMedia(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      { kind: 'media', limit: '10', offsetId: '900' },
+    );
+
+    expect(view).toEqual({ items: [item], nextOffsetId: 500 });
+    expect(getChatInfoMedia).toHaveBeenCalledWith(CHAT_ID, {
+      kind: 'media',
+      limit: 10,
+      offsetId: 900,
+    });
+    expect(resolveSession).not.toHaveBeenCalled();
+  });
+
+  it('falls back to mtcute when TDLib media search throws', async () => {
+    const getPeer = vi.fn(async () => infoPeer);
+    const searchMessages = vi.fn(async () => []);
+    const { accounts, resolveSession } = fakeAccounts({
+      getPeer,
+      searchMessages,
+    });
+    const { td } = fakeTd({
+      getChatInfoMedia: vi.fn(async () => {
+        throw new Error('TDLib is not ready');
+      }),
+    });
+    const service = new MessagingService(accounts, td);
+
+    const view = await service.getChatInfoMedia(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      { kind: 'media' },
+    );
+
+    expect(view).toEqual({ items: [], nextOffsetId: null });
+    expect(resolveSession).toHaveBeenCalled();
+    expect(searchMessages).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: infoPeer }),
+    );
+  });
+
+  it('translates through TDLib, not the mtcute transcript', async () => {
+    const translateMessage = vi.fn(async () => ({ text: 'привет', to: 'ru' }));
+    const { accounts, resolveSession } = fakeAccounts({});
+    const { td } = fakeTd({ translateMessage });
+    const service = new MessagingService(accounts, td);
+
+    const view = await service.translateMessage(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+    );
+
+    expect(view).toEqual({ text: 'привет', to: 'ru' });
+    expect(translateMessage).toHaveBeenCalledWith(CHAT_ID, 77, 'ru');
+    expect(resolveSession).not.toHaveBeenCalled();
+  });
+
+  it('does not replay a TDLib transcription error against mtcute', async () => {
+    const { accounts, resolveSession } = fakeAccounts({});
+    const { td } = fakeTd({
+      transcribeVoice: vi.fn(async () => {
+        throw apiError(
+          'TRANSCRIPTION_FAILED',
+          'Telegram could not transcribe this voice message',
+          502,
+        );
+      }),
+    });
+    const service = new MessagingService(accounts, td);
+
+    await expect(
+      service.transcribeVoice(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77'),
+    ).rejects.toMatchObject({
+      status: 502,
+      response: { code: 'TRANSCRIPTION_FAILED' },
+    });
+    expect(resolveSession).not.toHaveBeenCalled();
   });
 });

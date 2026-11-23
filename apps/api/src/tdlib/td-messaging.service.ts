@@ -6,6 +6,8 @@ import type {
   chat,
   message,
   messageThreadInfo,
+  SearchMessagesFilter,
+  SpeechRecognitionResult,
   user,
 } from 'tdlib-native/types';
 import type {
@@ -31,15 +33,23 @@ import type {
   PeerLike,
 } from '../messaging/message-view.js';
 import type {
+  ChatInfoItemView,
+  ChatInfoMediaView,
+  ChatInfoPollView,
+  ChatInfoSimilarView,
   ChatSearchView,
   DeletedMessageView,
   ForwardView,
   GlobalSearchView,
   MessageHistoryView,
+  MessageTranscriptionView,
+  MessageTranslationView,
   ReadAllView,
   ReadView,
   SearchUserView,
+  SimilarChatView,
 } from '../messaging/messaging.service.js';
+import { extractFirstUrl } from '../messaging/params.js';
 import {
   MAX_MEDIA_THUMB_BYTES,
   isInlineSafeMime,
@@ -68,6 +78,8 @@ import {
 const MAX_READ_ALL_DIALOGS = 200;
 /** How long a send waits for TDLib to replace the temporary message id. */
 const SEND_WAIT_TIMEOUT_MS = 30_000;
+/** Upper bound for waiting on a speech-recognition update. */
+const SPEECH_WAIT_TIMEOUT_MS = 30_000;
 const READ_ALL_BATCH_SIZE = 10;
 
 /** Per-message download payload handed back to `MessagingService` for caching. */
@@ -121,6 +133,13 @@ export interface TdSearchGlobalQuery {
   limit: number;
 }
 
+/** One tab of the chat info panel, mirroring the mtcute query. */
+export interface TdChatInfoMediaQuery {
+  kind: 'media' | 'links' | 'polls';
+  limit: number;
+  offsetId?: number;
+}
+
 export interface TdForwardInput {
   fromChatId: number;
   messageIds: number[];
@@ -145,6 +164,20 @@ export interface TdMessenger {
   listFolders(): Promise<FolderView[]>;
   getChat(peerId: number): Promise<ChatPeerView>;
   getChatInfo(peerId: number): Promise<ChatInfoView>;
+  getChatInfoMedia(
+    peerId: number,
+    query: TdChatInfoMediaQuery,
+  ): Promise<ChatInfoMediaView>;
+  getChatInfoSimilar(peerId: number): Promise<ChatInfoSimilarView>;
+  translateMessage(
+    peerId: number,
+    messageId: number,
+    to: string,
+  ): Promise<MessageTranslationView>;
+  transcribeVoice(
+    peerId: number,
+    messageId: number,
+  ): Promise<MessageTranscriptionView>;
   listMessages(
     peerId: number,
     query: TdListMessagesQuery,
@@ -217,6 +250,95 @@ interface SupergroupInfo {
 interface ChatListRequest {
   chat_list?: ChatList | null;
   limit?: number;
+}
+
+/** TDLib message filter behind one chat-info tab. */
+function searchFilterForKind(
+  kind: TdChatInfoMediaQuery['kind'],
+): SearchMessagesFilter {
+  switch (kind) {
+    case 'media':
+      return { _: 'searchMessagesFilterPhotoAndVideo' };
+    case 'links':
+      return { _: 'searchMessagesFilterUrl' };
+    case 'polls':
+      return { _: 'searchMessagesFilterPoll' };
+  }
+}
+
+/** Speech-recognition payload of a voice/video note message, if any. */
+function speechResultOf(
+  content: message['content'],
+): SpeechRecognitionResult | null {
+  if (content._ === 'messageVoiceNote') {
+    return content.voice_note.speech_recognition_result ?? null;
+  }
+  if (content._ === 'messageVideoNote') {
+    return content.video_note.speech_recognition_result ?? null;
+  }
+  return null;
+}
+
+/**
+ * Chat-info item of an already mapped message. `messageId` comes from the same
+ * TDLib transcript as downloads, so the dashboard's `GET .../media` hits the
+ * right message.
+ */
+function toChatInfoItemFromTd(
+  view: MessageView,
+  kind: TdChatInfoMediaQuery['kind'],
+): ChatInfoItemView {
+  let poll: ChatInfoPollView | null = null;
+  if (kind === 'polls') {
+    const fallbackQuestion = view.text.trim() || 'Опрос';
+    poll = view.poll
+      ? {
+          question: view.poll.question.trim() || fallbackQuestion,
+          options: view.poll.answers
+            .map((answer) => answer.text)
+            .filter((answer) => answer.length > 0),
+          totalVoters: view.poll.voters,
+        }
+      : { question: fallbackQuestion, options: [], totalVoters: 0 };
+  }
+  return {
+    messageId: view.id,
+    date: view.date,
+    text: view.text,
+    media: view.media,
+    url: kind === 'links' ? extractFirstUrl(view.text) : null,
+    poll,
+  };
+}
+
+/** Same error contract as the mtcute transcription endpoint. */
+function speechApiError(code: string): Error {
+  switch (code) {
+    case 'MSG_VOICE_MISSING':
+      return apiError(
+        'TRANSCRIPTION_UNAVAILABLE',
+        'This message is not a voice note that can be transcribed',
+        400,
+      );
+    case 'MSG_VOICE_TOO_LONG':
+      return apiError(
+        'TRANSCRIPTION_UNAVAILABLE',
+        'This voice message is too long to transcribe',
+        400,
+      );
+    case 'PREMIUM_ACCOUNT_REQUIRED':
+      return apiError(
+        'PREMIUM_REQUIRED',
+        'Voice transcription requires a Telegram Premium account',
+        403,
+      );
+    default:
+      return apiError(
+        'TRANSCRIPTION_FAILED',
+        'Telegram could not transcribe this voice message',
+        502,
+      );
+  }
 }
 
 /**
@@ -654,6 +776,264 @@ export class TdSessionMessenger implements TdMessenger {
       canSendMessages: canSend,
       inviteLink,
     };
+  }
+
+  // ------------------------------------------------------------- chat info
+
+  /**
+   * One info-panel tab through TDLib's message search. A cold chat cache can
+   * answer with a short page (or none), so the request is retried briefly like
+   * `historyPage`; ids stay in TDLib space for the media download endpoint.
+   */
+  async getChatInfoMedia(
+    peerId: number,
+    query: TdChatInfoMediaQuery,
+  ): Promise<ChatInfoMediaView> {
+    const chatId = await this.registry.resolve(peerId);
+    const entry = await this.chatFor(chatId);
+    const filter = searchFilterForKind(query.kind);
+    const raws = await this.searchInfoPage(
+      chatId,
+      filter,
+      query.offsetId ?? 0,
+      query.limit,
+      query.offsetId,
+    );
+    const items = (await this.mapMessages(entry, raws)).map((view) =>
+      toChatInfoItemFromTd(view, query.kind),
+    );
+    return {
+      items,
+      nextOffsetId: items[items.length - 1]?.messageId ?? null,
+    };
+  }
+
+  /**
+   * `searchChatMessages` page of an info tab. The boundary message is filtered
+   * out when paginating, matching mtcute's "only messages earlier than offset"
+   * contract (TDLib may include `from_message_id` itself).
+   */
+  private async searchInfoPage(
+    chatId: number,
+    filter: SearchMessagesFilter,
+    fromMessageId: number,
+    limit: number,
+    offsetId?: number,
+  ): Promise<message[]> {
+    // Ask for one extra row so the boundary filter still fills a full page.
+    const requestLimit = offsetId ? limit + 1 : limit;
+    let best: message[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const result = await this.client.api.searchChatMessages({
+        chat_id: chatId,
+        query: '',
+        from_message_id: fromMessageId,
+        offset: 0,
+        limit: requestLimit,
+        filter,
+      });
+      const batch = (result.messages ?? []).filter((value) =>
+        offsetId ? value.id < offsetId : true,
+      );
+      if (batch.length > best.length) best = batch;
+      if (best.length >= limit) break;
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+    return best.slice(0, limit);
+  }
+
+  /**
+   * Similar channels of a channel, mapped to the same DTO as mtcute. TDLib
+   * rejects the call for non-channel peers, which is an empty tab, not an
+   * error.
+   */
+  async getChatInfoSimilar(peerId: number): Promise<ChatInfoSimilarView> {
+    const chatId = await this.registry.resolve(peerId);
+    const entry = await this.chatFor(chatId);
+    const type = entry.type;
+    if (type._ !== 'chatTypeSupergroup' || !type.is_channel) {
+      return { chats: [] };
+    }
+
+    let chatIds: number[];
+    try {
+      const result = await this.client.api.getChatSimilarChats({
+        chat_id: chatId,
+      });
+      chatIds = result.chat_ids ?? [];
+    } catch {
+      return { chats: [] };
+    }
+
+    const chats: SimilarChatView[] = [];
+    for (const id of chatIds) {
+      let similar: chat;
+      try {
+        similar = await this.chatFor(id);
+      } catch {
+        continue;
+      }
+      let markedId: number;
+      try {
+        markedId = this.peerIdOf(similar);
+      } catch {
+        continue;
+      }
+      const extras = await this.extrasFor(similar);
+      chats.push({
+        id: markedId,
+        title: similar.title,
+        username: extras.username,
+        memberCount: await this.memberCountOf(similar),
+      });
+    }
+    return { chats };
+  }
+
+  /** Member count of a supergroup/channel, or `null` when unavailable. */
+  private async memberCountOf(entry: chat): Promise<number | null> {
+    const type = entry.type;
+    if (type._ !== 'chatTypeSupergroup') return null;
+    try {
+      const full = await this.client.api.getSupergroupFullInfo({
+        supergroup_id: type.supergroup_id,
+      });
+      return full.member_count > 0 ? full.member_count : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ------------------------------------------------------------------ text
+
+  /** Translate a message's text/caption; returns the same DTO as mtcute. */
+  async translateMessage(
+    peerId: number,
+    messageId: number,
+    to: string,
+  ): Promise<MessageTranslationView> {
+    const chatId = await this.registry.resolve(peerId);
+    const result = await this.client.api.translateMessageText({
+      chat_id: chatId,
+      message_id: messageId,
+      to_language_code: to,
+      tone: '',
+    });
+    const text = result.text?.trim();
+    if (!text) {
+      throw apiError(
+        'VALIDATION_ERROR',
+        'This message has no text to translate',
+        400,
+      );
+    }
+    return { text: result.text, to };
+  }
+
+  /**
+   * Transcribe a voice/video note. `recognizeSpeech` returns `Ok` and TDLib
+   * pushes the result as `updateMessageContent`; a pending result is waited on
+   * (bounded) and reported as `pending: true` so the UI can retry, never as a
+   * raw TDLib error.
+   */
+  async transcribeVoice(
+    peerId: number,
+    messageId: number,
+  ): Promise<MessageTranscriptionView> {
+    const chatId = await this.registry.resolve(peerId);
+
+    let current: message | null = null;
+    try {
+      current = await this.client.api.getMessage({
+        chat_id: chatId,
+        message_id: messageId,
+      });
+    } catch {
+      // The recognition call below reports the canonical error.
+    }
+    const existing = current ? speechResultOf(current.content) : null;
+    if (existing?._ === 'speechRecognitionResultText') {
+      return { text: existing.text, pending: false };
+    }
+    if (existing?._ === 'speechRecognitionResultError') {
+      throw speechApiError(existing.error.message);
+    }
+
+    // Subscribe before asking Telegram so an immediate update is not missed.
+    const waiter = this.waitForSpeechResult(chatId, messageId, existing);
+    let returned: unknown;
+    try {
+      returned = await this.client.api.recognizeSpeech({
+        chat_id: chatId,
+        message_id: messageId,
+      });
+    } catch (error) {
+      waiter.cancel();
+      throw error;
+    }
+
+    // Older TDLib versions answer with the result instead of an update.
+    const direct = returned as SpeechRecognitionResult | null;
+    if (direct && typeof direct === 'object' && '_' in direct) {
+      if (direct._ === 'speechRecognitionResultText') {
+        waiter.cancel();
+        return { text: direct.text, pending: false };
+      }
+      if (direct._ === 'speechRecognitionResultError') {
+        waiter.cancel();
+        throw speechApiError(direct.error.message);
+      }
+    }
+
+    const result = await waiter.result;
+    switch (result._) {
+      case 'speechRecognitionResultText':
+        return { text: result.text, pending: false };
+      case 'speechRecognitionResultError':
+        throw speechApiError(result.error.message);
+      default:
+        return { text: result.partial_text ?? '', pending: true };
+    }
+  }
+
+  /**
+   * Resolves with the finished recognition result, or with the last pending
+   * one after {@link SPEECH_WAIT_TIMEOUT_MS}. Never rejects.
+   */
+  private waitForSpeechResult(
+    chatId: number,
+    messageId: number,
+    initial: SpeechRecognitionResult | null,
+  ): {
+    result: Promise<SpeechRecognitionResult>;
+    cancel: () => void;
+  } {
+    let cleanup = (): void => undefined;
+    const result = new Promise<SpeechRecognitionResult>((resolve) => {
+      let last: SpeechRecognitionResult = initial ?? {
+        _: 'speechRecognitionResultPending',
+        partial_text: '',
+      };
+      const finish = (value: SpeechRecognitionResult): void => {
+        cleanup();
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(last), SPEECH_WAIT_TIMEOUT_MS);
+      const unsubscribe = this.client.updates.subscribe((update) => {
+        if (update._ !== 'updateMessageContent') return;
+        if (update.chat_id !== chatId || update.message_id !== messageId)
+          return;
+        const next = speechResultOf(update.new_content);
+        if (!next) return;
+        last = next;
+        if (next._ !== 'speechRecognitionResultPending') finish(next);
+      });
+      cleanup = (): void => {
+        clearTimeout(timer);
+        unsubscribe();
+      };
+    });
+    return { result, cancel: () => cleanup() };
   }
 
   // --------------------------------------------------------------- messages
