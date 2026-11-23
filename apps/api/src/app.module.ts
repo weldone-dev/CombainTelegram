@@ -4,6 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AccountsModule } from './accounts/accounts.module.js';
+import { AiModule } from './ai/ai.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { LogsModule } from './logs/logs.module.js';
 import { LoggingInterceptor } from './logs/logging.interceptor.js';
@@ -31,6 +32,7 @@ import { UserContextModule } from './user-context/user-context.module.js';
     AuthModule,
     ProxiesModule,
     PushModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [

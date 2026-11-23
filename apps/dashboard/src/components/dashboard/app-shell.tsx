@@ -17,6 +17,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/proxies", label: "Прокси", icon: <ProxyIcon /> },
   { href: "/chats", label: "Чаты", icon: <ChatsIcon /> },
   { href: "/logs", label: "Логи", icon: <LogsIcon /> },
+  { href: "/ai", label: "AI", icon: <AiIcon /> },
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -24,6 +25,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/proxies": "Прокси",
   "/chats": "Чаты",
   "/logs": "Логи",
+  "/ai": "AI и души",
 };
 
 const COLLAPSE_KEY = "ct:sidebar-collapsed";
@@ -215,6 +217,24 @@ function ChatsIcon() {
       className="h-5 w-5"
     >
       <path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.4 8.9 8.9 0 0 1-3.8-.8L3 21l1.9-5.2a8.3 8.3 0 0 1-.9-3.8A8.4 8.4 0 0 1 12.5 3 8.4 8.4 0 0 1 21 11.5Z" />
+    </svg>
+  );
+}
+
+function AiIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-5 w-5"
+    >
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" />
+      <circle cx="12" cy="12" r="3.2" />
     </svg>
   );
 }
