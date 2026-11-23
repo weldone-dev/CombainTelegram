@@ -256,6 +256,7 @@ POST   /proxies                                    { name, kind, host, port, use
 PATCH  /proxies/:id                                partial update; secret:"" clears it
 DELETE /proxies/:id                                sessions fall back to no proxy (proxyId = null)
 POST   /proxies/:id/test                           TCP reachability probe (does not auth)
+POST   /proxies/:id/check                          real exit-node check via HTTPS IP echo (5 min cache)
 ```
 
 Assigning a proxy to an existing session closes its live client and reconnects
