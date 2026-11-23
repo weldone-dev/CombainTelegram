@@ -71,11 +71,16 @@ Updated: 2026-11-23. This file is the single place to check progress.
 - Dashboard: `tsc`, `biome`, `next build` green.
 - Worker worktrees and branches removed; only `main` remains.
 
+### Threads
+- [x] Channel comment threads on TDLib (`getMessageThread` /
+      `getMessageThreadHistory`), root filtered, paging, `sendComment`.
+      Live-verified on a real channel post (5 comments mapped).
+
 ## Still on mtcute (works only while the old session exists)
-`getChatInfoMedia`, `getChatInfoSimilar`, message threads/comments, translation,
-transcription, `resolveChat`, chat settings/delete, and the admin tools
-(members, bans, rights, invite links). These are the next porting batch; the old
-session is intentionally kept, so nothing is broken meanwhile.
+`getChatInfoMedia`, `getChatInfoSimilar`, translation, transcription,
+`resolveChat`, chat settings/delete, and the admin tools (members, bans, rights,
+invite links). `getChatInfoMedia`/translate/transcribe/similar are being ported
+now.
 
 ## Next
 - Port the remaining endpoints above to TDLib.
