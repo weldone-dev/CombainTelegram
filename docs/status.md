@@ -44,11 +44,27 @@ Updated: 2026-11-23. This file is the single place to check progress.
 - [x] Realtime from TDLib: new/edited/deleted/read/typing; mtcute events are
       skipped for accounts that have a TDLib session (no duplicate ids).
 
+### Sessions
+- [x] Per-account active session (`TelegramAccount.activeSessionId`): engine,
+      routing, messaging and realtime follow the selected session.
+- [x] `POST /accounts/:id/sessions/:sessionId/activate`.
+- [x] Add a session to an existing account (`/tdlib/auth/start` with
+      `accountId`), own label/proxy, stored 2FA password reused.
+- [x] Delete a session (local detach or server revoke) without touching other
+      sessions; clearing an active session falls back safely.
+- [x] Sessions UI: no bulk proxy, per-session proxy, activate/add/delete with
+      confirmation.
+
 ### Live checks
 - Chats list with last messages, pinned/folder order.
 - History, newest at the bottom; avatars; photo upload + download round-trip.
 - Send, edit, reaction, delete — all through TDLib.
 - Every TDLib failure falls back to mtcute and is logged (`tdlib.messaging.*`).
+- Switching the active session: mtcute ids (453/452/450) vs TDLib ids
+  (475004928/…) — routing follows the selection.
+- Adding a session live is pending: Telegram is throttling QR token exports
+  right now (a bare TDLib client gets no answer). The attempt now fails with a
+  clear status instead of hanging; retest when the throttle clears.
 
 ### Quality
 - API: 268 tests, `tsc`, `oxlint`, `nest build` green.
