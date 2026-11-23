@@ -18,6 +18,9 @@ const SW_URL = "/sw.js";
 const DISABLED_MESSAGE =
   "Push-уведомления не настроены на сервере: администратор должен задать VAPID-ключи";
 
+/** Same text the API-disabled flow throws, so callers can recognize it. */
+export const PUSH_DISABLED_MESSAGE = DISABLED_MESSAGE;
+
 /** True when this browser can do service workers and Web Push at all. */
 export function pushSupported(): boolean {
   return (
@@ -65,6 +68,23 @@ export async function getPushStatus(): Promise<PushStatus> {
     return subscription ? "subscribed" : "off";
   } catch {
     return "off";
+  }
+}
+
+/**
+ * Whether the API has VAPID keys configured. A deployment without them answers
+ * `PUSH_DISABLED`, which the menu shows as "не настроено на сервере".
+ */
+export async function pushConfiguredOnServer(): Promise<boolean | null> {
+  if (!pushSupported()) return false;
+  try {
+    const key = await apiFetch<{ publicKey: string }>("/push/key", {});
+    return Boolean(key.publicKey);
+  } catch (error) {
+    // `null` means "could not tell" (API unreachable), not "disabled".
+    return error instanceof ApiError && error.code === "PUSH_DISABLED"
+      ? false
+      : null;
   }
 }
 

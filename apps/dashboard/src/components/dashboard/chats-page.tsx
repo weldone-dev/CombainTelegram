@@ -31,6 +31,7 @@ import {
   SESSION_CHANGED_EVENT,
   type SessionChangedDetail,
 } from "../../lib/session-events";
+import { playChime, readSoundEnabled } from "../../lib/sound";
 import type {
   ChatFolderSelection,
   ChatPatch,
@@ -872,18 +873,22 @@ export function ChatsPage() {
           data.accountId === selectedAccountIdRef.current
             ? chatsRef.current.find((chat) => chat.id === data.chatId)
             : undefined;
-        if (
-          !message.outgoing &&
-          hidden &&
-          !listedChat?.muted &&
-          notificationsReady()
-        ) {
-          showMessageNotification(
-            listedChat?.title ?? `Чат ${data.chatId}`,
-            message.senderName,
-            message.text || (message.mediaType ? `[${message.mediaType}]` : ""),
-            data.chatId,
-          );
+        if (!message.outgoing && !listedChat?.muted) {
+          if (hidden && notificationsReady()) {
+            showMessageNotification(
+              listedChat?.title ?? `Чат ${data.chatId}`,
+              message.senderName,
+              message.text ||
+                (message.mediaType ? `[${message.mediaType}]` : ""),
+              data.chatId,
+            );
+          }
+          // Chime whenever the message is not already in front of the user:
+          // the window is hidden/unfocused or another chat is open.
+          const lookingAtChat =
+            data.accountId === selectedAccountIdRef.current &&
+            data.chatId === selectedChatIdRef.current;
+          if ((hidden || !lookingAtChat) && readSoundEnabled()) playChime();
         }
 
         if (data.accountId !== selectedAccountId) return;
