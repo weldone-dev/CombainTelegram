@@ -36,6 +36,8 @@ export class UpdatesService implements OnModuleDestroy {
   private readonly sessions = new Map<string, Map<string, SessionState>>();
   private readonly starting = new Map<string, Promise<void>>();
   private readonly dedupe = new EventDeduplicator();
+  /** Accounts already logged as "served by TDLib" at debug level. */
+  private readonly tdlibAccounts = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -114,6 +116,23 @@ export class UpdatesService implements OnModuleDestroy {
     });
 
     for (const account of accounts) {
+      // Once an account has a live TDLib session, history and message ids come
+      // from TDLib. mtcute updates for the same account would carry a different
+      // id space, so they are dropped entirely instead of racing the TDLib
+      // bridge (which emits the same events from `TdUpdatesService`).
+      const hasTdlib = account.sessions.some(
+        (session) => !session.revokedAt && session.engine === 'tdlib',
+      );
+      if (hasTdlib) {
+        if (!this.tdlibAccounts.has(account.id)) {
+          this.tdlibAccounts.add(account.id);
+          this.logger.debug(
+            `Skipping mtcute updates for account ${account.id}: it has a TDLib session`,
+          );
+        }
+        continue;
+      }
+
       for (const session of account.sessions) {
         if (session.revokedAt) continue;
         // TDLib sessions are not mtcute clients; realtime for them is handled

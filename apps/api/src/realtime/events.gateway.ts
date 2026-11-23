@@ -8,6 +8,7 @@ import { DefaultUserService } from '../user-context/default-user.service.js';
 import { emitLog } from '../logs/log-sink.js';
 import { RealtimeService } from './realtime.service.js';
 import { UpdatesService } from './updates.service.js';
+import { TdUpdatesService } from '../tdlib/td-updates.service.js';
 
 /**
  * `/events` namespace.
@@ -34,6 +35,7 @@ export class EventsGateway
     private readonly realtime: RealtimeService,
     private readonly users: DefaultUserService,
     private readonly updates: UpdatesService,
+    private readonly tdUpdates: TdUpdatesService,
   ) {}
 
   afterInit(): void {
@@ -58,6 +60,23 @@ export class EventsGateway
         source: 'realtime',
         action: 'realtime.updates.start',
         message: `Could not start updates for user ${user.id}: ${(error as Error).message}`,
+        status: 'failed',
+        userId: user.id,
+        details: { error: (error as Error).message },
+      });
+    }
+
+    try {
+      await this.tdUpdates.startForUser(user.id);
+    } catch (error) {
+      this.logger.warn(
+        `Could not start TDLib updates for user ${user.id}: ${(error as Error).message}`,
+      );
+      emitLog({
+        level: 'warn',
+        source: 'realtime',
+        action: 'realtime.tdlib.start',
+        message: `Could not start TDLib updates for user ${user.id}: ${(error as Error).message}`,
         status: 'failed',
         userId: user.id,
         details: { error: (error as Error).message },

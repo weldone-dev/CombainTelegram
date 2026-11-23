@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { ClientManagerService } from '../telegram/client-manager.service.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import { UpdatesService } from '../realtime/updates.service.js';
+import { TdUpdatesService } from '../tdlib/td-updates.service.js';
 import { apiError, conflict, notFound } from '../common/api-error.js';
 import { optionalString, requireString } from '../common/validation.js';
 import { setLogProxyId } from '../logs/log-context.js';
@@ -81,6 +82,7 @@ export class AccountsService {
     private readonly crypto: SessionCryptoService,
     private readonly tdClients: TdClientManagerService,
     @Optional() private readonly updates?: UpdatesService,
+    @Optional() private readonly tdUpdates?: TdUpdatesService,
   ) {}
 
   async list(userId: string): Promise<AccountView[]> {
@@ -331,6 +333,7 @@ export class AccountsService {
         await this.clients.closeSession(session.id);
       }
       await this.updates?.reconnectForUser(userId);
+      await this.tdUpdates?.reconnectForUser(userId);
     }
 
     const updated = await this.requireAccount(userId, accountId);
