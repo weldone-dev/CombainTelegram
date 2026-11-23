@@ -140,6 +140,7 @@ export class TdClientManagerService implements OnModuleDestroy {
 
   /** Creates a client for `dirs` but does not start it. */
   async create(dirs: TdlibDirectories): Promise<Client> {
+    await this.ensureDirectories(dirs);
     const adapter = await this.addon();
     const { Client: ClientCtor } = await import('tdlib-native');
     return new ClientCtor(adapter as never);

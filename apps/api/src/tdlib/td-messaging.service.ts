@@ -233,7 +233,9 @@ export class TdSessionMessenger implements TdMessenger {
 
   private async chatFor(chatId: number): Promise<chat> {
     const cached = this.registry.get(chatId);
-    if (cached) return cached;
+    // `last_message` may be unknown in a cached `updateNewChat` snapshot until
+    // `updateChatLastMessage` arrives, so a chat without it is refetched once.
+    if (cached && cached.last_message != null) return cached;
     const entry = await this.client.api.getChat({ chat_id: chatId });
     this.registry.put(entry);
     return entry;
@@ -340,6 +342,7 @@ export class TdSessionMessenger implements TdMessenger {
   private async warmMessages(messages: message[]): Promise<void> {
     const ids = new Set<number>();
     for (const entry of messages) {
+      if (!entry) continue;
       if (entry.sender_id?._ === 'messageSenderUser') {
         ids.add(entry.sender_id.user_id);
       }
@@ -418,7 +421,7 @@ export class TdSessionMessenger implements TdMessenger {
     await Promise.all(entries.map((entry) => this.extrasFor(entry)));
     const lastMessages = entries
       .map((entry) => entry.last_message)
-      .filter((value): value is message => value !== null);
+      .filter((value): value is message => value !== null && value !== undefined);
     await this.warmMessages(lastMessages);
 
     return entries.map((entry) =>

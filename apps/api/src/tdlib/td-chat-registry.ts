@@ -53,6 +53,35 @@ export class TdChatRegistry {
             ...update.chat_folders,
           );
           break;
+        case 'updateChatLastMessage':
+          this.patch(update.chat_id, {
+            last_message: update.last_message,
+            positions: update.positions,
+          });
+          break;
+        case 'updateChatPosition':
+          this.patchPosition(update.chat_id, update.position);
+          break;
+        case 'updateChatReadInbox':
+          this.patch(update.chat_id, {
+            last_read_inbox_message_id: update.last_read_inbox_message_id,
+            unread_count: update.unread_count,
+          });
+          break;
+        case 'updateChatNotificationSettings':
+          this.patch(update.chat_id, {
+            notification_settings: update.notification_settings,
+          });
+          break;
+        case 'updateChatTitle':
+          this.patch(update.chat_id, { title: update.title });
+          break;
+        case 'updateChatPhoto':
+          this.patch(update.chat_id, { photo: update.photo });
+          break;
+        case 'updateChatPermissions':
+          this.patch(update.chat_id, { permissions: update.permissions });
+          break;
         default:
           break;
       }
@@ -80,6 +109,26 @@ export class TdChatRegistry {
     this.byChatId.set(entry.id, entry);
     const peerId = peerIdFromTdChatType(entry.type);
     if (peerId !== null) this.byPeerId.set(peerId, entry.id);
+  }
+
+  /** Applies a partial TDLib update to an already known chat. */
+  private patch(chatId: number, fields: Partial<chat>): void {
+    const current = this.byChatId.get(chatId);
+    if (!current) return;
+    this.put({ ...current, ...fields } as chat);
+  }
+
+  /** Chat positions arrive one list at a time; merge by list type. */
+  private patchPosition(chatId: number, position: chat['positions'][number]): void {
+    const current = this.byChatId.get(chatId);
+    if (!current) return;
+    const positions = [...(current.positions ?? [])];
+    const index = positions.findIndex(
+      (item) => item.list._ === position.list._, 
+    );
+    if (index >= 0) positions[index] = position;
+    else positions.push(position);
+    this.put({ ...current, positions } as chat);
   }
 
   /** Cached TDLib chat object by its own `chat_id`. */

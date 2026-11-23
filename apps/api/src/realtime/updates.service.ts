@@ -116,6 +116,9 @@ export class UpdatesService implements OnModuleDestroy {
     for (const account of accounts) {
       for (const session of account.sessions) {
         if (session.revokedAt) continue;
+        // TDLib sessions are not mtcute clients; realtime for them is handled
+        // separately, so they must never reach ClientManagerService.
+        if (session.engine === 'tdlib') continue;
         if (userSessions.has(session.id)) continue;
 
         try {
