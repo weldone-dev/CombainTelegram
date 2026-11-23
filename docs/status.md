@@ -79,7 +79,7 @@ Updated: 2026-11-23. This file is the single place to check progress.
   browser denies Notification/push permission, so that part is environment-bound.
 
 ### Quality
-- API: 268 tests, `tsc`, `oxlint`, `nest build` green.
+- API: 364 tests, `tsc`, `oxlint`, `nest build` green.
 - Dashboard: `tsc`, `biome`, `next build` green.
 - Worker worktrees and branches removed; only `main` remains.
 
@@ -93,6 +93,54 @@ Updated: 2026-11-23. This file is the single place to check progress.
 - [x] `translate` on TDLib (`translateMessageText`), live-verified.
 - [x] `transcribe` on TDLib (`recognizeSpeech` + `updateMessageContent` wait).
 - [x] `info/similar` on TDLib (`getChatSimilarChats`).
+
+### AI layer
+Reference: `docs/ai.md`. Code: `apps/api/src/ai`, `mcp`, `bots`,
+`automations`; UI: `/ai`.
+
+- [x] DB: `Soul`, `SoulSkill`, `Skill`, `SoulTurn`, `SoulSummary`,
+      `SoulMemory`, `TelegramBot`, `BotSkill`, `BotTurn`, `Automation`,
+      `AutomationRun`, `AiSetting`, `AgentRun`; migrations `ai_souls`,
+      `ai_secrets`, `ai_api_key_envelope`.
+- [x] Souls: one persona per account, `off/draft/auto`, allowlist/limits,
+      lazy creation; DM autopilot replies only in allowlisted private chats
+      (draft emits `ai.draft`, auto sends and emits `ai.reply`).
+- [x] Memory: short-term `SoulTurn` buffer + rolling `SoulSummary` and
+      `SoulMemory` facts, keyword/importance/recency retrieval, manual and
+      automatic compaction (≥30 turns, oldest ≤60, keep newest 12).
+- [x] Skills: five seeded built-ins (`soul-creator`, `dm-assistant`,
+      `memory-curator`, `automation-builder`, `telegram-assistant`), tool
+      allowlists, UI/agent authoring, soul/bot attachment.
+- [x] Automations: `every`/`daily`/`incoming_message`/`manual` triggers,
+      `agent`/`send_message`/`summarize` actions, 15 s in-process scheduler,
+      run history, immediate HTTP Run.
+- [x] Bots: shared soul-creator bot (`accountId = null`) and one assistant bot
+      per account, BotFather token (validated with `getMe`, encrypted with
+      AAD `bot:<id>`), long polling every 10 s, owner-only access,
+      `/start /help /id /reset`.
+- [x] Agent: OpenAI-compatible chat completions, 38 tools in one registry,
+      `AgentRun` with trace, token counts and `source`
+      (`ui/mcp/dm/bot/automation/soul-creator/test`).
+- [x] MCP: stateless Streamable HTTP `POST /mcp`, Bearer token, `initialize`,
+      `ping`, `tools/list`, `tools/call`, `prompts/*`, `resources/*`;
+      same tool registry and policy as the agent.
+- [x] Dashboard `/ai`: Агент, Души с памятью, Скиллы, Автоматизации, Боты,
+      Настройки (model, API key, dryRun, capabilities, allowlists, MCP
+      endpoint/token/rotate, tool list).
+
+Live checks:
+- [x] Agent answered through `POST /ai/chat` after calling `accounts_list`
+      (2 steps: the tool call + the answer).
+- [x] MCP: `initialize`, `tools/list` (34 tools with default capabilities,
+      because `delete`/`policy` are off) and `tools/call accounts_list` over
+      `POST /mcp` with the Bearer token.
+- [x] dry-run send: `messages_send` returned
+      `{ "dryRun": true, "wouldCall": "messages_send", ... }`; nothing was sent.
+- [x] dry-run automation: a manual `send_message` automation ran and returned
+      `dryRun: would send to 777: …`; the run row was written.
+- [x] AI → Настройки renders (`/ai` answers 200; settings, permissions, MCP and
+      tool list load).
+- [x] API suite: 35 files, 364 tests passed.
 
 ## Still on mtcute (works only while the old session exists)
 `resolveChat`, chat settings/delete, and the admin tools (members, bans, rights,

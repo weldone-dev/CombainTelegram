@@ -69,6 +69,51 @@ socket.on('auth.qr.updated', ...); socket.on('auth.done', ...);
 `DEFAULT_USER_ID` selects the local user row (default `local`); it is created on
 demand. See `apps/api/.env.example`.
 
+## AI, souls and MCP
+
+The app has a local AI layer: an agent with 38 Telegram/app tools, one "soul"
+(persona + autopilot) per account, two-level memory, skills, automations, a
+shared soul-creator bot and one assistant bot per account, plus an MCP server for
+external clients. Everything shares one tool registry and one permission policy;
+`dryRun` is on by default, so writes are simulated.
+
+Configure an OpenAI-compatible provider in `apps/api/.env` or in
+AI → Настройки (the UI value wins; the key is encrypted at rest):
+
+```dotenv
+AI_BASE_URL=https://api.deepseek.com/v1
+AI_MODEL=deepseek-chat
+AI_FAST_MODEL=deepseek-chat
+AI_API_KEY=sk-...
+# optional: generated on first boot when empty
+MCP_TOKEN=
+```
+
+Open <http://localhost:3000/ai>: Агент, Души, Скиллы, Автоматизации, Боты and
+Настройки. The Настройки tab has the provider test button, permission toggles,
+chat/account allowlists and the MCP endpoint + token (copy/rotate).
+
+To connect an MCP client (Claude Desktop, Codex, Orca, a custom agent), use the
+Streamable HTTP URL and the Bearer token from AI → Настройки:
+
+```json
+{
+  "mcpServers": {
+    "combain-telegram": {
+      "type": "http",
+      "url": "http://127.0.0.1:3001/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+Safety defaults: `dryRun` on, `sendUnknown`/`delete`/`admin`/`policy` off, soul
+autopilot `off` with an empty allowlist, bots answer only the app's account
+owners (set an owner id when no account is attached), and API keys/bot tokens are
+encrypted and masked. The API is single-user and has no auth (only `/mcp` checks
+the Bearer token) — keep it on loopback. Details: [`docs/ai.md`](docs/ai.md).
+
 ## Scripts
 
 ```bash
@@ -93,9 +138,11 @@ upgrading both.
 ## Design
 
 - [`docs/architecture.md`](docs/architecture.md) — multi-account model, stack,
-  data model, API/WS surface, phases.
+  data model, API/WS surface, AI/MCP layer, phases.
 - [`docs/auth.md`](docs/auth.md) — phone, QR and tdata login flows, error map,
   session security.
+- [`docs/ai.md`](docs/ai.md) — souls, memory, skills, automations, bots, the
+  agent, MCP and its permission policy.
 - [`inspiration/README.md`](inspiration/README.md) — reference clients and the
   functional backlog.
 

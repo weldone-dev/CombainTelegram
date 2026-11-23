@@ -6,7 +6,9 @@ chats/messages REST, Socket.IO fan-out, Swagger, `.tar.gz` tdata). The app runs
 in **single-user mode**: there is no local registration or login — every request
 runs as `DEFAULT_USER_ID` (default `local`). The database is still SQLite (the
 Postgres move is deferred); Redis is not implemented yet — WS fan-out is
-in-process, so it assumes a single API node.
+in-process, so it assumes a single API node. The AI layer (souls, memory,
+skills, automations, bots, MCP) sits on top of the same account/messaging
+services; it is described in §9 and `docs/ai.md`.
 
 ## 1. Product requirements (hard)
 
@@ -506,9 +508,15 @@ sessions, phone numbers or tokens.
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | Web Push keys from `bunx web-push generate-vapid-keys`; missing = `503 PUSH_DISABLED` |
 | `VAPID_SUBJECT` | `mailto:admin@localhost` | contact address sent with each push |
 | `PORT` | `3001` | HTTP port |
+| `AI_BASE_URL` / `AI_MODEL` / `AI_FAST_MODEL` | – | OpenAI-compatible LLM endpoint and models (§9) |
+| `AI_API_KEY` | – | LLM key; a value saved in the UI wins and is encrypted |
+| `MCP_TOKEN` | generated | fixed MCP bearer token; when unset the app generates and stores one |
+| `TELEGRAM_BOT_API_BASE` | `https://api.telegram.org` | Bot API base used by bot long polling |
 
-`apps/api/.env.example` lists all of them. With `TELEGRAM_API_MODE=custom` and no
-credentials the app still boots; auth endpoints answer `503 NOT_CONFIGURED`.
+`apps/api/.env.example` lists the Telegram and Web Push variables; the AI
+variables are documented in §9 and `docs/ai.md`. With `TELEGRAM_API_MODE=custom`
+and no credentials the app still boots; auth endpoints answer
+`503 NOT_CONFIGURED`.
 
 WS namespace `/events` needs no token; sockets join `user:<id>`. Events:
 ```
@@ -595,7 +603,70 @@ The same bridge backs both onboarding and migration, so no separate proof
 scripts are kept: `POST /accounts/:id/tdlib/migrate` is the diagnostic path and
 is covered by the auth tests.
 
-## 9. Phases
+## 9. AI, souls and MCP layer
+
+One Nest module (`apps/api/src/ai/ai.module.ts`) owns the agent, the single tool
+registry, the permission policy, souls/memory/skills, and hosts the automation,
+bot and MCP controllers. Nothing in the AI layer opens a Telegram client of its
+own: account reads and writes go through `MessagingService`, which routes to the
+account's active engine (TDLib or mtcute). Bots additionally talk to the Bot API
+directly (long polling, no account session).
+
+```
+browser (/ai) ──REST──▶ AiModule
+                          ├─ AgentService ──▶ LlmService ──▶ OpenAI-compatible LLM
+                          │       └──▶ AgentToolsService (one registry, 38 tools)
+                          ├─ McpController ──POST /mcp──▶ AgentToolsService
+                          ├─ BotRunnerService ──▶ AgentService
+                          ├─ DmAutopilotService ──message.new──▶ AgentService
+                          └─ AutomationScheduler (15 s) ──▶ AutomationRunnerService
+                                                              ├──▶ AgentService
+                                                              └──▶ AiPolicyService
+
+AgentToolsService ──▶ AiPolicyService ──▶ MessagingService ──▶ TDLib / mtcute ──▶ Telegram
+Secrets: SessionCryptoService AES-256-GCM envelopes (AI key, MCP token, bot tokens)
+```
+
+- **One registry, one policy.** The UI agent, MCP `tools/call`, bots and
+  automations call `AgentToolsService.execute()`. It checks the tool's
+  capability and `sources` restriction, rejects another account from a scoped
+  surface, applies `dryRun` to Telegram writes, and audits every call. There is
+  no second code path that bypasses the policy; the automation runner's direct
+  send still calls `AiPolicyService` first.
+- **Agent loop.** `AgentService` builds the system prompt (base rules + soul
+  persona + summary/facts + skill instructions), filters tools by capability and
+  skill allowlists, then iterates LLM → tool calls until a text answer or the
+  step budget (default 6). Each run is persisted in `AgentRun` with source, trace
+  and token counts.
+- **Souls and autopilot.** `DmAutopilotService` subscribes to `message.new` at
+  boot, requires a private chat and a soul in `draft`/`auto`, checks the soul
+  allowlist and rate limits, and runs the agent without tools (`source = "dm"`).
+  `auto` sends the reply; `draft` only emits `ai.draft`. This path is explicitly
+  exempt from `dryRun`.
+- **Memory.** `MemoryService` keeps `SoulTurn` (short-term), `SoulSummary`
+  (rolling) and `SoulMemory` (facts). At ≥30 turns it compacts the oldest ≤60
+  through the fast model and keeps the newest 12 of that batch; retrieval is
+  keyword + importance + recency, no embeddings.
+- **Bots.** `BotRunnerService` supervises one long-polling loop per enabled
+  `TelegramBot` (10 s supervisor, `getUpdates`, no webhooks) and runs the same
+  agent with `source = bot`/`soul-creator`. Bot tokens are encrypted with AAD
+  `bot:<id>`; users are limited to the bot allowlist or the app's account owners.
+- **Automations.** A 15 s in-process ticker picks due `nextRunAt` rows;
+  `incoming_message` triggers are matched from the same `message.new` bus. Every
+  run lands in `AutomationRun`.
+- **MCP.** `McpController` is a stateless Streamable HTTP JSON-RPC endpoint at
+  `POST /mcp`, protected by a Bearer token (`AiSetting`, encrypted). It exposes
+  the same registry, prompts (skills) and resources; it has no session state and
+  no SSE stream.
+- **Secrets.** The provider key, MCP token and bot tokens use the existing
+  `SessionCryptoService` envelope (AAD `ai:api-key`, `ai:mcp-token`, `bot:<id>`),
+  are masked in responses and are never written to logs.
+- **Single node.** Scheduler, bot polling and autopilot are in-process, and the
+  database is SQLite, so the AI layer assumes one API instance.
+
+Full behaviour, REST surface and limitations: `docs/ai.md`.
+
+## 10. Phases
 
 0. **Spike** (1–2 days): a NestJS script proving phone login, QR login and
    tdata→session import against a test account, with `getMe()` after each.
@@ -610,7 +681,7 @@ is covered by the auth tests.
    avatars, realtime fan-out. **Implemented** (bounded in-memory cache).
 5. **Admin panel** workflows on top of the same API.
 
-## 10. Open decisions
+## 11. Open decisions
 
 - ~~Local users: e-mail/password vs external IdP~~ → the app is single-user now
   (`DEFAULT_USER_ID`); add real auth before any shared deployment.
