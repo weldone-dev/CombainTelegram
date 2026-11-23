@@ -55,6 +55,14 @@ Updated: 2026-11-23. This file is the single place to check progress.
 - [x] Sessions UI: no bulk proxy, per-session proxy, activate/add/delete with
       confirmation.
 
+### UI and notifications
+- [x] Account card shows the full phone (`AccountView.phone`), no mask.
+- [x] Proxy chip with hover/focus/tap popover: name, kind, `host:port`,
+      exit node IP + latency from `POST /proxies/:id/check` (5 min cache;
+      MTProto reports "exit node unknown").
+- [x] One notification menu (bell): notifications, sound, Web Push and a
+      `Проверить` test; Web Audio chime on incoming messages, no audio files.
+
 ### Live checks
 - Chats list with last messages, pinned/folder order.
 - History, newest at the bottom; avatars; photo upload + download round-trip.
@@ -65,6 +73,10 @@ Updated: 2026-11-23. This file is the single place to check progress.
 - Adding a session live is pending: Telegram is throttling QR token exports
   right now (a bare TDLib client gets no answer). The attempt now fails with a
   clear status instead of hanging; retest when the throttle clears.
+- Proxy exit node check: `Эстония/США` (http://192.168.31.216:3128) → exit
+  `48.102.209.54`, 400 ms.
+- Notification test button plays the chime ("Звук отправлен"); the embedded
+  browser denies Notification/push permission, so that part is environment-bound.
 
 ### Quality
 - API: 268 tests, `tsc`, `oxlint`, `nest build` green.
