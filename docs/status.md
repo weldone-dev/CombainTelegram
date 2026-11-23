@@ -51,7 +51,7 @@ Updated: 2026-11-23. This file is the single place to check progress.
 - Every TDLib failure falls back to mtcute and is logged (`tdlib.messaging.*`).
 
 ### Quality
-- API: 270 tests, `tsc`, `oxlint`, `nest build` green.
+- API: 268 tests, `tsc`, `oxlint`, `nest build` green.
 - Dashboard: `tsc`, `biome`, `next build` green.
 - Worker worktrees and branches removed; only `main` remains.
 
