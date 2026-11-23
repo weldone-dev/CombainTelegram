@@ -134,6 +134,14 @@ export class AccountsService {
 
     if (revoke) {
       for (const session of account.sessions) {
+        if (session.engine === 'tdlib') {
+          await this.revokeTdlibSession(session).catch((error: unknown) => {
+            this.logger.warn(
+              `TDLib logOut failed for session ${session.id}: ${(error as Error).message}`,
+            );
+          });
+          continue;
+        }
         const client = await this.clients
           .clientForSession(session)
           .catch((error: unknown) => {
@@ -152,7 +160,11 @@ export class AccountsService {
       }
     } else {
       await Promise.all(
-        account.sessions.map((session) => this.clients.closeSession(session.id)),
+        account.sessions.map((session) =>
+          session.engine === 'tdlib'
+            ? this.tdClients.close(session.id)
+            : this.clients.closeSession(session.id),
+        ),
       );
     }
 
@@ -165,8 +177,11 @@ export class AccountsService {
     accountId: string,
   ): Promise<TelegramSessionView[]> {
     const account = await this.requireAccount(userId, accountId);
+    const mtcuteSessions = account.sessions.filter(
+      (row) => row.engine !== 'tdlib',
+    );
     const session =
-      account.sessions.find((row) => !row.revokedAt) ?? account.sessions[0];
+      mtcuteSessions.find((row) => !row.revokedAt) ?? mtcuteSessions[0];
     if (!session) {
       throw conflict(
         'NO_SESSIONS',
@@ -225,6 +240,15 @@ export class AccountsService {
     }
 
     if (revoke) {
+      if (session.engine === 'tdlib') {
+        await this.revokeTdlibSession(session);
+        await this.prisma.telegramSession.delete({ where: { id: sessionId } });
+        const left = account.sessions.length - 1;
+        if (left <= 0) {
+          await this.prisma.telegramAccount.delete({ where: { id: account.id } });
+        }
+        return { removed: true, revoked: true, accountRemoved: left <= 0 };
+      }
       try {
         const client = await this.clients.clientForSession(session);
         const authorizations = await getSessions(asFlowClient(client));
@@ -243,7 +267,11 @@ export class AccountsService {
       }
     }
 
-    await this.clients.closeSession(sessionId);
+    if (session.engine === 'tdlib') {
+      await this.tdClients.close(sessionId);
+    } else {
+      await this.clients.closeSession(sessionId);
+    }
     await this.prisma.telegramSession.delete({ where: { id: sessionId } });
 
     const remaining = account.sessions.length - 1;
@@ -297,7 +325,11 @@ export class AccountsService {
         where: { id: session.id },
         data,
       });
-      await this.clients.closeSession(session.id);
+      if (session.engine === 'tdlib') {
+        await this.tdClients.close(session.id);
+      } else {
+        await this.clients.closeSession(session.id);
+      }
       await this.updates?.reconnectForUser(userId);
     }
 
@@ -340,8 +372,13 @@ export class AccountsService {
         );
       }
     } else {
-      const live = account.sessions.filter((row) => !row.revokedAt);
-      const candidates = live.length > 0 ? live : account.sessions;
+      // Only mtcute sessions can open an mtcute client; TDLib rows are used
+      // by TdClientManagerService and must never be picked here.
+      const mtcuteSessions = account.sessions.filter(
+        (row) => row.engine !== 'tdlib',
+      );
+      const live = mtcuteSessions.filter((row) => !row.revokedAt);
+      const candidates = live.length > 0 ? live : mtcuteSessions;
       session = candidates
         .slice()
         .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
@@ -440,6 +477,25 @@ export class AccountsService {
       throw notFound('ACCOUNT_NOT_FOUND', 'Telegram account not found');
     }
     return account;
+  }
+
+  /**
+   * Terminates one TDLib session on Telegram. This touches only that TDLib
+   * auth key: the account's mtcute/desktop session is never logged out here.
+   */
+  private async revokeTdlibSession(
+    session: TelegramSessionModel,
+  ): Promise<void> {
+    try {
+      const client = await this.tdClients.clientForSession(session);
+      await client.api.logOut({}).catch((error: unknown) => {
+        this.logger.warn(
+          `TDLib logOut failed for session ${session.id}: ${(error as Error).message}`,
+        );
+      });
+    } finally {
+      await this.tdClients.close(session.id);
+    }
   }
 
   private decryptPhone(account: TelegramAccountModel): string | null {

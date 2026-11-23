@@ -39,6 +39,8 @@ const SWEEP_INTERVAL_MS = 60 * 1000;
 const FIRST_PROGRESS_TIMEOUT_MS = 10_000;
 const MAX_CODE_ATTEMPTS = 3;
 const MAX_PASSWORD_ATTEMPTS = 3;
+/** One TDLib session per account: a re-migration replaces it. */
+const TDLIB_DEVICE_ID = 'tdlib';
 
 export type TdlibAuthStatus =
   | 'starting'
@@ -796,14 +798,16 @@ export class TdlibAuthService implements OnModuleDestroy {
       // TDLib keeps its database open while the client lives; close before
       // moving the folder. The attempt client is not in the manager's cache.
       await this.closeClient(attempt);
+      // A stable device id makes a repeated migration replace the account's
+      // previous TDLib session instead of stacking new rows (and folders).
       attempt.adoptedPath = await this.tdClients.adoptDirectory(
         attempt.dirs,
-        attempt.id,
+        TDLIB_DEVICE_ID,
       );
 
       const attached = await this.sessions.attachTdlibSession({
         userId: attempt.userId,
-        deviceId: attempt.id,
+        deviceId: TDLIB_DEVICE_ID,
         label: attempt.label,
         tgUser: {
           id: me.id,

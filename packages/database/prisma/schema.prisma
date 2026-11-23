@@ -72,7 +72,7 @@ model TelegramAccount {
   firstName      String
   lastName       String?
   username       String?
-  /// Cloud password (2FA), AES-256-GCM with AAD `account:<id>`; never logged.
+  /// Cloud password (2FA), sealed by SessionCryptoService (AAD `cloud:<id>`).
   cloudPasswordEncrypted Bytes?
   cloudPasswordNonce     Bytes?
   cloudPasswordTag       Bytes?

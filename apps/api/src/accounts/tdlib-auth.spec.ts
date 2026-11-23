@@ -321,8 +321,8 @@ describe('TdlibAuthService new-account QR flow', () => {
     expect(client.destroyed).toBe(1);
     expect(attach).toHaveBeenCalledWith(
       expect.objectContaining({
-        deviceId: view.attemptId,
-        tdlibPath: `/sessions/${view.attemptId}`,
+        deviceId: 'tdlib',
+        tdlibPath: '/sessions/tdlib',
         apiId: 1234,
         phone: '+15551234567',
       }),
@@ -385,8 +385,8 @@ describe('TdlibAuthService migration flow', () => {
     expect(ready.status).toBe('ready');
     expect(attach).toHaveBeenCalledWith(
       expect.objectContaining({
-        deviceId: view.attemptId,
-        tdlibPath: `/sessions/${view.attemptId}`,
+        deviceId: 'tdlib',
+        tdlibPath: '/sessions/tdlib',
       }),
     );
     // The old session is only used as approver, never logged out.
