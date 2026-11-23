@@ -289,8 +289,8 @@ export class MemoryService {
   }
 
   /**
-   * Compacts old turns into the rolling summary. Returns true when the buffer
-   * was small enough that nothing was done.
+   * Compacts old turns into the rolling summary. Returns false when the buffer
+   * is below the threshold or the compaction failed, and true when it ran.
    */
   async maybeCompact(accountId: string, chatId: number): Promise<boolean> {
     const count = await this.prisma.soulTurn.count({
