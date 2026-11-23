@@ -39,7 +39,7 @@ export function mediaUrl(
 }
 
 export interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   formData?: FormData;
 }
@@ -154,10 +154,15 @@ const RU_ERRORS: Record<string, string> = {
   MEDIA_PROCESS_FAILED: "Telegram не смог обработать это изображение",
 };
 
+/** Russian text for a stable API code; unknown codes pass through unchanged. */
+export function errorCodeText(code: string): string {
+  return RU_ERRORS[code] ?? code;
+}
+
 /** Human-readable Russian message for any thrown value. */
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    const text = RU_ERRORS[error.code] ?? error.message;
+    const text = errorCodeText(error.code);
     const retry = error.body.retryAfter
       ? ` (повторите через ${error.body.retryAfter} с)`
       : "";

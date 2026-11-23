@@ -1,14 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { apiFetch, errorMessage } from "../../lib/api";
 import { accountAvatarUrl } from "../../lib/avatar";
-import { accountName, sessionSummary } from "../../lib/format";
+import { accountName, activeSession, sessionSummary } from "../../lib/format";
 import type { AccountView, ProxyView } from "../../lib/types";
 import { Avatar } from "../avatar";
+import { EngineBadge } from "../engine-badge";
 import { SessionsModal } from "../messenger/sessions-modal";
 import { useAppData } from "./app-data";
+import { TdlibAccountPanel } from "./tdlib-account-panel";
 
 export function AccountsPage() {
   const {
@@ -26,6 +28,7 @@ export function AccountsPage() {
   const [sessionsAccount, setSessionsAccount] = useState<AccountView | null>(
     null,
   );
+  const [tdlibAccountId, setTdlibAccountId] = useState<string | null>(null);
   const [proxyList, setProxyList] = useState<ProxyView[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -135,62 +138,89 @@ export function AccountsPage() {
             </p>
           )}
 
-          {visible.map((account) => (
-            <div
-              key={account.id}
-              className="flex flex-wrap items-center gap-4 border-b border-zinc-800 px-4 py-3 transition-colors last:border-b-0 hover:bg-zinc-800/40"
-            >
-              <Avatar
-                src={accountAvatarUrl(account.id)}
-                label={accountName(account)}
-                className="h-11 w-11 text-sm"
-              />
+          {visible.map((account) => {
+            const active = activeSession(account);
+            return (
+              <Fragment key={account.id}>
+                <div className="flex flex-wrap items-center gap-4 border-b border-zinc-800 px-4 py-3 transition-colors last:border-b-0 hover:bg-zinc-800/40">
+                  <Avatar
+                    src={accountAvatarUrl(account.id)}
+                    label={accountName(account)}
+                    className="h-11 w-11 text-sm"
+                  />
 
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <p className="truncate text-sm font-medium text-zinc-100">
-                    {accountName(account)}
-                  </p>
-                  {account.isActive && (
-                    <span className="shrink-0 rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
-                      active
-                    </span>
-                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-medium text-zinc-100">
+                        {accountName(account)}
+                      </p>
+                      {account.isActive && (
+                        <span className="shrink-0 rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                          active
+                        </span>
+                      )}
+                      {active && <EngineBadge engine={active.engine} />}
+                    </div>
+                    <p className="truncate text-xs text-zinc-500">
+                      {account.username ? `@${account.username} · ` : ""}
+                      {account.phoneMasked ?? `ID ${account.tgUserId}`}
+                    </p>
+                    <p className="truncate text-xs text-zinc-500">
+                      {sessionSummary(account)}
+                    </p>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Link
+                      href={`/chats?account=${account.id}`}
+                      className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+                    >
+                      Чаты
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTdlibAccountId((current) =>
+                          current === account.id ? null : account.id,
+                        )
+                      }
+                      className={`rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
+                        tdlibAccountId === account.id
+                          ? "border-sky-500 text-sky-300"
+                          : "border-zinc-700 text-zinc-300 hover:border-zinc-500 hover:text-zinc-100"
+                      }`}
+                    >
+                      TDLib
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void openSessions(account)}
+                      className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+                    >
+                      Сессии и прокси
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void removeAccount(account)}
+                      disabled={deletingId === account.id}
+                      className="rounded-md border border-red-900/60 px-2.5 py-1.5 text-xs text-red-300 transition-colors hover:border-red-600 disabled:opacity-40"
+                    >
+                      {deletingId === account.id ? "Удаление…" : "Удалить"}
+                    </button>
+                  </div>
                 </div>
-                <p className="truncate text-xs text-zinc-500">
-                  {account.username ? `@${account.username} · ` : ""}
-                  {account.phoneMasked ?? `ID ${account.tgUserId}`}
-                </p>
-                <p className="truncate text-xs text-zinc-500">
-                  {sessionSummary(account)}
-                </p>
-              </div>
 
-              <div className="flex shrink-0 items-center gap-1.5">
-                <Link
-                  href={`/chats?account=${account.id}`}
-                  className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
-                >
-                  Чаты
-                </Link>
-                <button
-                  type="button"
-                  onClick={() => void openSessions(account)}
-                  className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
-                >
-                  Сессии и прокси
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void removeAccount(account)}
-                  disabled={deletingId === account.id}
-                  className="rounded-md border border-red-900/60 px-2.5 py-1.5 text-xs text-red-300 transition-colors hover:border-red-600 disabled:opacity-40"
-                >
-                  {deletingId === account.id ? "Удаление…" : "Удалить"}
-                </button>
-              </div>
-            </div>
-          ))}
+                {tdlibAccountId === account.id && (
+                  <TdlibAccountPanel
+                    account={account}
+                    onClose={() => setTdlibAccountId(null)}
+                    onMigrated={() => void reloadAccounts()}
+                    onNotice={showNotice}
+                  />
+                )}
+              </Fragment>
+            );
+          })}
         </div>
       </div>
 

@@ -1,9 +1,14 @@
+/** Transport that actually talks to Telegram for a session. */
+export type SessionEngine = "mtcute" | "tdlib";
+
 export interface SessionView {
   id: string;
   deviceId: string;
   label: string | null;
   platform: string;
   profile: string;
+  /** `mtcute` string session or a native `tdlib` database. */
+  engine: SessionEngine;
   proxyId: string | null;
   createdAt: string;
   lastUsedAt: string | null;
@@ -305,6 +310,34 @@ export interface TdataImportAccountView {
 
 export interface TdataImportView {
   accounts: TdataImportAccountView[];
+}
+
+/** Lifecycle of a TDLib auth or migration attempt. */
+export type AttemptStatus =
+  | "starting"
+  | "qr_pending"
+  | "awaiting_code"
+  | "awaiting_password"
+  | "ready"
+  | "failed"
+  | "expired";
+
+/** `POST /tdlib/auth/start` and `POST /accounts/:accountId/tdlib/migrate`. */
+export interface AttemptView {
+  attemptId: string;
+  status: AttemptStatus;
+  /** `tg://login?token=...`, present while a QR code is pending. */
+  qrLink?: string;
+  error?: string;
+  needsPassword?: boolean;
+  account?: AccountView;
+}
+
+export type TdlibAuthMethod = "qr" | "phone";
+
+/** `GET /accounts/:accountId/cloud-password`. */
+export interface CloudPasswordView {
+  stored: boolean;
 }
 
 export interface RealtimeMessageEvent {
