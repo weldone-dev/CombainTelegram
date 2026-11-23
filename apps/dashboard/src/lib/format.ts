@@ -1,4 +1,4 @@
-import type { AccountView } from "./types";
+import type { AccountView, SessionView } from "./types";
 
 export function accountName(account: AccountView): string {
   const name = [account.firstName, account.lastName]
@@ -95,6 +95,23 @@ export function sessionSummary(account: AccountView): string {
   ].join("/");
   const label = plural(count, "сессия", "сессии", "сессий");
   return `${count} ${label}${platforms ? ` · ${platforms}` : ""}`;
+}
+
+/**
+ * The session Telegram currently treats as the account transport: the live
+ * session used most recently. Used for the "active transport" badge.
+ */
+export function activeSession(account: AccountView): SessionView | null {
+  const live = account.sessions.filter((session) => !session.revokedAt);
+  const pool = live.length > 0 ? live : account.sessions;
+  if (pool.length === 0) return null;
+  const time = (session: SessionView): number => {
+    const value = Date.parse(session.lastUsedAt ?? session.createdAt);
+    return Number.isNaN(value) ? 0 : value;
+  };
+  return pool.reduce((best, session) =>
+    time(session) > time(best) ? session : best,
+  );
 }
 
 export function platformLabel(platform: string): string {

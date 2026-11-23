@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { apiFetch, errorMessage } from "../../lib/api";
-import { accountName } from "../../lib/format";
+import { accountName, activeSession } from "../../lib/format";
 import type { AccountView, ProxyView } from "../../lib/types";
+import { EngineBadge } from "../engine-badge";
 
 /**
  * Per-session proxy assignment. A Telegram account can have several sessions
@@ -25,6 +26,7 @@ export function SessionsModal({
   const [bulkProxyId, setBulkProxyId] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeId = activeSession(current)?.id;
 
   const assign = async (sessionId: string, proxyId: string) => {
     setBusySessionId(sessionId);
@@ -102,6 +104,13 @@ export function SessionsModal({
             </div>
           )}
 
+          <p className="mb-3 text-[11px] text-zinc-500">
+            Плашка <span className="font-medium text-zinc-300">TDLib</span> или{" "}
+            <span className="font-medium text-zinc-300">mtcute</span>{" "}
+            показывает, какой движок реально обслуживает сессию. Сессия с
+            зелёной рамкой — активный транспорт аккаунта.
+          </p>
+
           {proxies.length === 0 && (
             <p className="mb-4 rounded-md border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-300">
               Сначала добавьте хотя бы один прокси в разделе «Прокси».
@@ -135,57 +144,75 @@ export function SessionsModal({
           )}
 
           <div className="space-y-3">
-            {current.sessions.map((session) => (
-              <div
-                key={session.id}
-                className="rounded-md border border-zinc-800 bg-zinc-800/40 px-3 py-3"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-zinc-100">
-                      {session.label ?? session.deviceId}
-                    </p>
-                    <p className="truncate text-xs text-zinc-500">
-                      {session.profile} · {session.platform}
-                      {session.revokedAt ? " · отозвана" : ""}
-                    </p>
+            {current.sessions.map((session) => {
+              const isActive = !session.revokedAt && session.id === activeId;
+              return (
+                <div
+                  key={session.id}
+                  className={`rounded-md border px-3 py-3 ${
+                    isActive
+                      ? "border-emerald-500/60 bg-emerald-500/5"
+                      : "border-zinc-800 bg-zinc-800/40"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <p className="truncate text-sm font-medium text-zinc-100">
+                          {session.label ?? session.deviceId}
+                        </p>
+                        <EngineBadge
+                          engine={session.engine}
+                          active={isActive}
+                        />
+                        {isActive && (
+                          <span className="shrink-0 rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                            активный транспорт
+                          </span>
+                        )}
+                      </div>
+                      <p className="truncate text-xs text-zinc-500">
+                        {session.profile} · {session.platform}
+                        {session.revokedAt ? " · отозвана" : ""}
+                      </p>
+                    </div>
+                    {session.proxyId && (
+                      <span className="shrink-0 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
+                        через прокси
+                      </span>
+                    )}
                   </div>
-                  {session.proxyId && (
-                    <span className="shrink-0 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
-                      через прокси
-                    </span>
-                  )}
-                </div>
 
-                <label className="mt-2 block text-xs text-zinc-400">
-                  Прокси
-                  <select
-                    value={session.proxyId ?? ""}
-                    disabled={busySessionId === session.id}
-                    onChange={(event) =>
-                      void assign(session.id, event.target.value)
-                    }
-                    className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500 disabled:opacity-50"
-                  >
-                    <option value="">Напрямую (без прокси)</option>
-                    {proxies
-                      .filter(
-                        (proxy) =>
-                          proxy.enabled || proxy.id === session.proxyId,
-                      )
-                      .map((proxy) => (
-                        <option key={proxy.id} value={proxy.id}>
-                          {proxy.name} · {proxy.kind}://{proxy.host}:
-                          {proxy.port}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-                <p className="mt-1 text-[11px] text-zinc-500">
-                  Смена прокси перезапускает подключение этой сессии.
-                </p>
-              </div>
-            ))}
+                  <label className="mt-2 block text-xs text-zinc-400">
+                    Прокси
+                    <select
+                      value={session.proxyId ?? ""}
+                      disabled={busySessionId === session.id}
+                      onChange={(event) =>
+                        void assign(session.id, event.target.value)
+                      }
+                      className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500 disabled:opacity-50"
+                    >
+                      <option value="">Напрямую (без прокси)</option>
+                      {proxies
+                        .filter(
+                          (proxy) =>
+                            proxy.enabled || proxy.id === session.proxyId,
+                        )
+                        .map((proxy) => (
+                          <option key={proxy.id} value={proxy.id}>
+                            {proxy.name} · {proxy.kind}://{proxy.host}:
+                            {proxy.port}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    Смена прокси перезапускает подключение этой сессии.
+                  </p>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>

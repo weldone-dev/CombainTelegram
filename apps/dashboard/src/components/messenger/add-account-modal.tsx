@@ -3,21 +3,24 @@
 import { QRCodeSVG } from "qrcode.react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, errorMessage } from "../../lib/api";
+import { copyToClipboard } from "../../lib/clipboard";
 import { createDeviceId, getDeviceId } from "../../lib/device";
-import { accountName, formatTime } from "../../lib/format";
-import { subscribeRealtime } from "../../lib/realtime-bus";
+import { accountName } from "../../lib/format";
+import {
+  ATTEMPT_STATUS_LABELS,
+  attemptErrorText,
+  cancelTdlibAuth,
+  getTdlibAuth,
+  startTdlibAuth,
+  submitTdlibAuthCode,
+  submitTdlibAuthPassword,
+  TDLIB_POLL_INTERVAL_MS,
+} from "../../lib/tdlib-api";
 import type {
   AccountView,
-  PhoneCompletedView,
-  PhoneStartView,
-  PhoneVerifyView,
+  AttemptView,
   ProxyTestResult,
   ProxyView,
-  QrStartView,
-  QrStatusView,
-  RealtimeAuthDoneEvent,
-  RealtimeAuthFailedEvent,
-  RealtimeQrUpdatedEvent,
   TdataImportAccountView,
   TdataImportView,
   TdataUploadView,
@@ -25,8 +28,8 @@ import type {
 import { InfoHint } from "../info-hint";
 
 type Tab = "phone" | "qr" | "tdata";
-type PhoneStep = "input" | "code" | "password" | "signup" | "done";
-type QrStep = "idle" | "waiting" | "password" | "done" | "expired";
+type PhoneStep = "input" | "starting" | "code" | "password" | "done";
+type QrStep = "idle" | "starting" | "waiting" | "password" | "done" | "failed";
 type TdataStep = "idle" | "choose" | "done";
 
 const PROFILE_OPTIONS = [
@@ -40,30 +43,28 @@ const PROFILE_OPTIONS = [
   { key: "webogram", label: "Webogram" },
 ];
 
-/** QR login: the code is shown by this device and scanned by a phone. */
-const QR_PROFILE_KEYS = new Set([
-  "desktop",
-  "macos",
-  "web-a",
-  "web-k",
-  "webogram",
-]);
-
 const TAB_DESCRIPTIONS: Record<Tab, string> = {
   phone:
-    "Вход по номеру телефона: код придёт в приложение Telegram или по SMS. Здесь создаётся новая сессия (или обновляется существующая с тем же идентификатором).",
-  qr: "QR-код показывается на этом устройстве (обычно компьютер или веб), а сканируется телефоном, где вы уже вошли: Настройки → Устройства → Подключить устройство.",
+    "Вход по номеру телефона через TDLib: код придёт в приложение Telegram или по SMS. Если включена двухэтапная проверка, Telegram дополнительно попросит пароль.",
+  qr: "QR-код показывается на этом устройстве, а сканируется телефоном, где вы уже вошли: Настройки → Устройства → Подключить устройство. Если включена двухэтапная проверка, Telegram попросит пароль.",
   tdata:
     "Импорт готовой сессии из папки tdata Telegram Desktop. В режиме новой сессии профиль выбирается для новой сессии; в режиме общей сессии используется профиль Telegram Desktop из архива.",
 };
 
-const NEW_DEVICE_HINTS: Record<Tab, string> = {
-  phone:
-    "Создаёт новый идентификатор: Telegram добавит отдельную сессию, а не заменит текущую. Пример — вход в тот же аккаунт со второго устройства. Без галочки обновится существующая сессия этого приложения с тем же идентификатором.",
-  qr: "Галочка создаёт отдельную сессию для этого клиента. QR-код сканируется телефоном, где вы уже вошли в Telegram; без галочки обновится существующая сессия с тем же идентификатором.",
-  tdata:
-    "Для импорта tdata: с галочкой каждый выбранный аккаунт получает новую отдельную сессию, без галочки обновляется прежняя сессия с тем же идентификатором. В режиме общей сессии Desktop идентификатор относится к самому ключу Desktop.",
-};
+const TDATA_DEVICE_HINT =
+  "Для импорта tdata: с галочкой каждый выбранный аккаунт получает новую отдельную сессию, без галочки обновляется прежняя сессия с тем же идентификатором. В режиме общей сессии Desktop идентификатор относится к самому ключу Desktop.";
+
+/** How a pending TDLib attempt is described in the dialog. */
+function attemptHint(attempt: AttemptView | null): string {
+  if (!attempt) return "";
+  if (attempt.status === "awaiting_password" || attempt.needsPassword) {
+    return "Включена двухэтапная проверка. Введите пароль Telegram.";
+  }
+  if (attempt.status === "awaiting_code") {
+    return "Код отправлен. Введите его ниже.";
+  }
+  return ATTEMPT_STATUS_LABELS[attempt.status];
+}
 
 export function AddAccountModal({
   onClose,
@@ -92,20 +93,14 @@ export function AddAccountModal({
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [phonePassword, setPhonePassword] = useState("");
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
-  const [phoneAttemptId, setPhoneAttemptId] = useState<string | null>(null);
-  const [phoneCodeHint, setPhoneCodeHint] = useState<string | null>(null);
+  const [phoneAttempt, setPhoneAttempt] = useState<AttemptView | null>(null);
   const [phoneAccount, setPhoneAccount] = useState<AccountView | null>(null);
 
   const [qrStep, setQrStep] = useState<QrStep>("idle");
-  const [qrAttemptId, setQrAttemptId] = useState<string | null>(null);
-  const [qrUrl, setQrUrl] = useState("");
-  const [qrExpiresAt, setQrExpiresAt] = useState<string | null>(null);
-  const [qrStatus, setQrStatus] = useState("idle");
-  const [qrError, setQrError] = useState<string | null>(null);
+  const [qrAttempt, setQrAttempt] = useState<AttemptView | null>(null);
   const [qrPassword, setQrPassword] = useState("");
   const [qrAccount, setQrAccount] = useState<AccountView | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const [tdataStep, setTdataStep] = useState<TdataStep>("idle");
   const [tdataFile, setTdataFile] = useState<File | null>(null);
@@ -120,6 +115,10 @@ export function AddAccountModal({
   const [tdataResults, setTdataResults] = useState<TdataImportAccountView[]>(
     [],
   );
+
+  const phoneAttemptId = phoneAttempt?.attemptId ?? null;
+  const qrAttemptId = qrAttempt?.attemptId ?? null;
+  const qrStatus = qrAttempt?.status ?? null;
 
   useEffect(() => {
     const current = getDeviceId();
@@ -141,130 +140,105 @@ export function AddAccountModal({
     };
   }, []);
 
-  const applyQrStatus = useCallback(
-    (status: QrStatusView) => {
-      setQrStatus(status.status === "ok" ? "done" : status.status);
-      if (status.url) setQrUrl(status.url);
-      if (status.expiresAt) setQrExpiresAt(status.expiresAt);
-      if (status.error) setQrError(status.error);
-      if (status.status === "password_required") {
-        setQrStep("password");
-        return;
-      }
-      if (status.status === "ok" || status.status === "done") {
-        if (status.account) {
-          setQrAccount(status.account);
-          onAccountsAdded([status.account]);
+  const applyPhoneAttempt = useCallback(
+    (attempt: AttemptView) => {
+      setPhoneAttempt(attempt);
+      if (attempt.status === "ready") {
+        if (attempt.account) {
+          setPhoneAccount(attempt.account);
+          onAccountsAdded([attempt.account]);
         }
-        setQrStep("done");
+        setPhoneStep("done");
         return;
       }
-      if (status.status === "expired" || status.status === "failed") {
-        setQrStep("expired");
+      if (attempt.status === "awaiting_password" || attempt.needsPassword) {
+        setPhoneStep("password");
+        return;
       }
+      if (attempt.status === "awaiting_code") {
+        setPhoneStep("code");
+        return;
+      }
+      if (attempt.status === "failed" || attempt.status === "expired") {
+        setPhoneStep("input");
+        return;
+      }
+      setPhoneStep("starting");
     },
     [onAccountsAdded],
   );
 
-  // QR status polling is the fallback when the socket is unavailable.
-  useEffect(() => {
-    if (
-      qrAttemptId === null ||
-      (qrStep !== "waiting" && qrStep !== "password")
-    ) {
-      return;
-    }
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const status = await apiFetch<QrStatusView>(
-          `/auth/qr/${qrAttemptId}`,
-          {},
-        );
-        if (!cancelled) applyQrStatus(status);
-      } catch (pollError) {
-        if (!cancelled) setError(errorMessage(pollError));
+  const applyQrAttempt = useCallback(
+    (attempt: AttemptView) => {
+      setQrAttempt(attempt);
+      if (attempt.status === "ready") {
+        if (attempt.account) {
+          setQrAccount(attempt.account);
+          onAccountsAdded([attempt.account]);
+        }
+        setQrStep("done");
+        return;
       }
-    };
-    void poll();
+      if (attempt.status === "awaiting_password" || attempt.needsPassword) {
+        setQrStep("password");
+        return;
+      }
+      if (attempt.status === "failed" || attempt.status === "expired") {
+        setQrStep("failed");
+        return;
+      }
+      if (attempt.status === "qr_pending") {
+        setQrStep("waiting");
+        return;
+      }
+      setQrStep("starting");
+    },
+    [onAccountsAdded],
+  );
+
+  // TDLib may still be starting when `start` returns; the phone flow settles
+  // on `awaiting_code` within a poll or two.
+  useEffect(() => {
+    if (!phoneAttemptId || phoneAttempt?.status !== "starting") return;
+    let cancelled = false;
     const timer = setInterval(() => {
-      void poll();
-    }, 2500);
+      void getTdlibAuth(phoneAttemptId)
+        .then((attempt) => {
+          if (!cancelled) applyPhoneAttempt(attempt);
+        })
+        .catch((pollError: unknown) => {
+          if (!cancelled) setError(errorMessage(pollError));
+        });
+    }, TDLIB_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [qrAttemptId, qrStep, applyQrStatus]);
+  }, [phoneAttemptId, phoneAttempt?.status, applyPhoneAttempt]);
 
-  // Realtime QR + phone completion events.
+  // QR login polls its attempt every two seconds until it settles.
   useEffect(() => {
-    if (qrAttemptId === null) return;
-    return subscribeRealtime((event) => {
-      const payload = event.payload as { attemptId?: unknown } | null;
-      if (payload && payload.attemptId !== qrAttemptId) return;
-      if (event.event === "auth.qr.updated") {
-        const updated = event.payload as RealtimeQrUpdatedEvent;
-        setQrUrl(updated.url);
-        setQrExpiresAt(updated.expiresAt);
-        setQrStatus("pending");
-        return;
-      }
-      if (event.event === "auth.qr.scanned") {
-        setQrStatus("scanned");
-        return;
-      }
-      if (event.event === "auth.qr.password_required") {
-        setQrStatus("password_required");
-        setQrStep("password");
-        return;
-      }
-      if (event.event === "auth.done") {
-        const done = event.payload as RealtimeAuthDoneEvent;
-        setQrAccount(done.account);
-        setQrStatus("done");
-        setQrStep("done");
-        onAccountsAdded([done.account]);
-        return;
-      }
-      if (event.event === "auth.failed") {
-        const failed = event.payload as RealtimeAuthFailedEvent;
-        setQrError(failed.error);
-        setQrStatus("failed");
-        setQrStep("expired");
-      }
-    });
-  }, [qrAttemptId, onAccountsAdded]);
-
-  useEffect(() => {
-    if (phoneAttemptId === null) return;
-    return subscribeRealtime((event) => {
-      const payload = event.payload as { attemptId?: unknown } | null;
-      if (payload && payload.attemptId !== phoneAttemptId) return;
-      if (event.event === "auth.done") {
-        const done = event.payload as RealtimeAuthDoneEvent;
-        setPhoneAccount(done.account);
-        setPhoneStep("done");
-        onAccountsAdded([done.account]);
-      }
-      if (event.event === "auth.failed") {
-        const failed = event.payload as RealtimeAuthFailedEvent;
-        setError(`Ошибка входа: ${failed.error}`);
-        setPhoneAttemptId(null);
-        setPhoneStep("input");
-      }
-    });
-  }, [phoneAttemptId, onAccountsAdded]);
-
-  useEffect(() => {
-    if (tab === "qr" && !QR_PROFILE_KEYS.has(profile)) {
-      setProfile("desktop");
+    if (!qrAttemptId || !qrStatus) return;
+    if (qrStatus !== "qr_pending" && qrStatus !== "starting") {
+      return;
     }
-  }, [tab, profile]);
+    let cancelled = false;
+    const timer = setInterval(() => {
+      void getTdlibAuth(qrAttemptId)
+        .then((attempt) => {
+          if (!cancelled) applyQrAttempt(attempt);
+        })
+        .catch((pollError: unknown) => {
+          if (!cancelled) setError(errorMessage(pollError));
+        });
+    }, TDLIB_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [qrAttemptId, qrStatus, applyQrAttempt]);
 
-  const profileOptions =
-    tab === "qr"
-      ? PROFILE_OPTIONS.filter((option) => QR_PROFILE_KEYS.has(option.key))
-      : PROFILE_OPTIONS;
+  const profileOptions = PROFILE_OPTIONS;
   const tdataReuse = tab === "tdata" && reuseMode;
 
   const resetErrorFor = (nextTab: Tab) => {
@@ -308,22 +282,12 @@ export function AddAccountModal({
     setBusy(true);
     setError(null);
     try {
-      const result = await apiFetch<PhoneStartView>("/auth/phone/start", {
-        method: "POST",
-        body: {
-          phone,
-          deviceId: effectiveDeviceId(),
-          profile,
-          ...(proxyId ? { proxyId } : {}),
-        },
+      const attempt = await startTdlibAuth({
+        method: "phone",
+        phone: phone.trim(),
+        ...(proxyId ? { proxyId } : {}),
       });
-      setPhoneAttemptId(result.attemptId);
-      setPhoneCodeHint(
-        `Code sent (${result.codeType}${
-          result.nextType ? `, next: ${result.nextType}` : ""
-        }). Timeout ${result.timeout}s.`,
-      );
-      setPhoneStep("code");
+      applyPhoneAttempt(attempt);
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
@@ -336,19 +300,7 @@ export function AddAccountModal({
     setBusy(true);
     setError(null);
     try {
-      const result = await apiFetch<PhoneVerifyView>("/auth/phone/verify", {
-        method: "POST",
-        body: { attemptId: phoneAttemptId, code },
-      });
-      if (result.status === "ok") {
-        setPhoneAccount(result.account);
-        setPhoneStep("done");
-        onAccountsAdded([result.account]);
-      } else if (result.status === "password_required") {
-        setPhoneStep("password");
-      } else {
-        setPhoneStep("signup");
-      }
+      applyPhoneAttempt(await submitTdlibAuthCode(phoneAttemptId, code.trim()));
     } catch (verifyError) {
       setError(errorMessage(verifyError));
     } finally {
@@ -361,16 +313,9 @@ export function AddAccountModal({
     setBusy(true);
     setError(null);
     try {
-      const result = await apiFetch<PhoneCompletedView>(
-        "/auth/phone/password",
-        {
-          method: "POST",
-          body: { attemptId: phoneAttemptId, password: phonePassword },
-        },
+      applyPhoneAttempt(
+        await submitTdlibAuthPassword(phoneAttemptId, phonePassword),
       );
-      setPhoneAccount(result.account);
-      setPhoneStep("done");
-      onAccountsAdded([result.account]);
     } catch (passwordError) {
       setError(errorMessage(passwordError));
     } finally {
@@ -378,40 +323,15 @@ export function AddAccountModal({
     }
   };
 
-  const submitPhoneSignup = async () => {
-    if (!phoneAttemptId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const result = await apiFetch<PhoneCompletedView>("/auth/phone/signup", {
-        method: "POST",
-        body: {
-          attemptId: phoneAttemptId,
-          firstName,
-          lastName: lastName || undefined,
-        },
-      });
-      setPhoneAccount(result.account);
-      setPhoneStep("done");
-      onAccountsAdded([result.account]);
-    } catch (signupError) {
-      setError(errorMessage(signupError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const cancelPhone = useCallback(async () => {
-    if (!phoneAttemptId) return;
-    try {
-      await apiFetch("/auth/phone/cancel", {
-        method: "POST",
-        body: { attemptId: phoneAttemptId },
-      });
-    } catch {
-      // Abandoning an attempt must not surface a second error.
+    if (phoneAttemptId) {
+      try {
+        await cancelTdlibAuth(phoneAttemptId);
+      } catch {
+        // Abandoning an attempt must not surface a second error.
+      }
     }
-    setPhoneAttemptId(null);
+    setPhoneAttempt(null);
     setPhoneStep("input");
     setCode("");
     setPhonePassword("");
@@ -421,20 +341,13 @@ export function AddAccountModal({
     setBusy(true);
     setError(null);
     try {
-      const result = await apiFetch<QrStartView>("/auth/qr/start", {
-        method: "POST",
-        body: {
-          deviceId: effectiveDeviceId(),
-          profile,
-          ...(proxyId ? { proxyId } : {}),
-        },
+      const attempt = await startTdlibAuth({
+        method: "qr",
+        ...(proxyId ? { proxyId } : {}),
       });
-      setQrAttemptId(result.attemptId);
-      setQrUrl(result.url);
-      setQrExpiresAt(result.expiresAt);
-      setQrStatus("pending");
-      setQrError(null);
-      setQrStep("waiting");
+      setQrPassword("");
+      setLinkCopied(false);
+      applyQrAttempt(attempt);
     } catch (startError) {
       setError(errorMessage(startError));
     } finally {
@@ -447,10 +360,7 @@ export function AddAccountModal({
     setBusy(true);
     setError(null);
     try {
-      await apiFetch(`/auth/qr/${qrAttemptId}/password`, {
-        method: "POST",
-        body: { password: qrPassword },
-      });
+      applyQrAttempt(await submitTdlibAuthPassword(qrAttemptId, qrPassword));
     } catch (passwordError) {
       setError(errorMessage(passwordError));
     } finally {
@@ -459,19 +369,26 @@ export function AddAccountModal({
   };
 
   const cancelQr = useCallback(async () => {
-    if (!qrAttemptId) return;
-    try {
-      await apiFetch(`/auth/qr/${qrAttemptId}/cancel`, {
-        method: "POST",
-      });
-    } catch {
-      // Ignore cancel failures.
+    if (qrAttemptId) {
+      try {
+        await cancelTdlibAuth(qrAttemptId);
+      } catch {
+        // Ignore cancel failures.
+      }
     }
-    setQrAttemptId(null);
-    setQrUrl("");
-    setQrStatus("idle");
+    setQrAttempt(null);
+    setQrPassword("");
     setQrStep("idle");
   }, [qrAttemptId]);
+
+  const copyQrLink = async () => {
+    const link = qrAttempt?.qrLink;
+    if (!link) return;
+    const copied = await copyToClipboard(link);
+    if (!copied) return;
+    setLinkCopied(true);
+    window.setTimeout(() => setLinkCopied(false), 1500);
+  };
 
   const uploadTdata = async () => {
     if (!tdataFile) return;
@@ -556,6 +473,13 @@ export function AddAccountModal({
     onClose();
   };
 
+  const qrLink = qrAttempt?.qrLink ?? "";
+  const phoneAttemptError = attemptErrorText(phoneAttempt?.error);
+  const qrAttemptError = attemptErrorText(qrAttempt?.error);
+  const phonePending =
+    phoneStep === "starting" ||
+    (phoneStep === "code" && phoneAttempt?.status === "starting");
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
@@ -605,71 +529,72 @@ export function AddAccountModal({
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
           <div className="mb-4 grid gap-3 sm:grid-cols-2">
-            {tdataReuse ? (
-              <div className="block text-xs font-medium text-zinc-400">
-                Профиль устройства
-                <div className="mt-1 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-300">
-                  Telegram Desktop (из tdata)
-                </div>
-                <span className="mt-1 block text-[11px] font-normal text-zinc-500">
-                  В режиме общей сессии профиль берётся из самого архива.
-                </span>
-              </div>
-            ) : (
-              <label className="block text-xs font-medium text-zinc-400">
-                <span className="flex items-center gap-1.5">
+            {tab === "tdata" &&
+              (tdataReuse ? (
+                <div className="block text-xs font-medium text-zinc-400">
                   Профиль устройства
+                  <div className="mt-1 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-300">
+                    Telegram Desktop (из tdata)
+                  </div>
+                  <span className="mt-1 block text-[11px] font-normal text-zinc-500">
+                    В режиме общей сессии профиль берётся из самого архива.
+                  </span>
+                </div>
+              ) : (
+                <label className="block text-xs font-medium text-zinc-400">
+                  <span className="flex items-center gap-1.5">
+                    Профиль устройства
+                    <InfoHint placement="top">
+                      Профиль новой сессии, которую создаём из tdata. В режиме
+                      «использовать сессию Telegram Desktop» поле не
+                      применяется.
+                    </InfoHint>
+                  </span>
+                  <select
+                    value={profile}
+                    onChange={(event) => setProfile(event.target.value)}
+                    className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+                  >
+                    {profileOptions.map((option) => (
+                      <option key={option.key} value={option.key}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+
+            {tab === "tdata" && (
+              <div className="text-xs font-medium text-zinc-400">
+                <span className="flex items-center gap-1.5">
+                  Идентификатор устройства
                   <InfoHint placement="top">
-                    {tab === "qr"
-                      ? "Какое устройство показывает QR-код: компьютер или веб. Сам код сканируется телефоном. Профили телефонов здесь скрыты, чтобы не создавать путаницу."
-                      : tab === "tdata"
-                        ? "Профиль новой сессии, которую создаём из tdata. В режиме «использовать сессию Telegram Desktop» поле не применяется."
-                        : "Как Telegram увидит это устройство: компьютер, телефон или веб. Влияет на список устройств и параметры подключения."}
+                    Внутренний идентификатор этого клиента. Уникальный id =
+                    новая отдельная сессия в Telegram. Если войти снова с тем же
+                    id, обновится уже существующая сессия (полезно после
+                    истечения ключа), а не добавится ещё одна.
                   </InfoHint>
                 </span>
-                <select
-                  value={profile}
-                  onChange={(event) => setProfile(event.target.value)}
-                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
-                >
-                  {profileOptions.map((option) => (
-                    <option key={option.key} value={option.key}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-
-            <div className="text-xs font-medium text-zinc-400">
-              <span className="flex items-center gap-1.5">
-                Идентификатор устройства
-                <InfoHint placement="top">
-                  Внутренний идентификатор этого клиента. Уникальный id = новая
-                  отдельная сессия в Telegram. Если войти снова с тем же id,
-                  обновится уже существующая сессия (полезно после истечения
-                  ключа), а не добавится ещё одна.
-                </InfoHint>
-              </span>
-              <div className="mt-1 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-zinc-300">
-                <span className="block truncate font-mono text-xs">
-                  {deviceId || "…"}
-                </span>
-                <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-400">
-                  <label className="flex items-center gap-1.5">
-                    <input
-                      type="checkbox"
-                      checked={newDevice}
-                      onChange={(event) =>
-                        handleNewDeviceChange(event.target.checked)
-                      }
-                    />
-                    Новое устройство (добавить сессию)
-                  </label>
-                  <InfoHint>{NEW_DEVICE_HINTS[tab]}</InfoHint>
+                <div className="mt-1 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-zinc-300">
+                  <span className="block truncate font-mono text-xs">
+                    {deviceId || "…"}
+                  </span>
+                  <div className="mt-1 flex items-center gap-1.5 text-xs text-zinc-400">
+                    <label className="flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        checked={newDevice}
+                        onChange={(event) =>
+                          handleNewDeviceChange(event.target.checked)
+                        }
+                      />
+                      Новое устройство (добавить сессию)
+                    </label>
+                    <InfoHint>{TDATA_DEVICE_HINT}</InfoHint>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             <div className="block text-xs font-medium text-zinc-400 sm:col-span-2">
               <span className="flex items-center gap-1.5">
@@ -738,38 +663,62 @@ export function AddAccountModal({
                     Введите номер телефона Telegram. Код придёт в приложение
                     Telegram или по SMS.
                   </p>
+                  {phoneAttemptError && !error && (
+                    <p className="text-sm text-red-300">{phoneAttemptError}</p>
+                  )}
                   <input
                     value={phone}
                     onChange={(event) => setPhone(event.target.value)}
                     placeholder="+1 555 000 1234"
+                    inputMode="tel"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <button
                     type="button"
-                    onClick={startPhone}
+                    onClick={() => void startPhone()}
                     disabled={busy || !phone.trim()}
                     className="w-full rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
                   >
-                    Отправить код
+                    {busy ? "Отправка…" : "Отправить код"}
                   </button>
                 </>
               )}
 
+              {phoneStep === "starting" && (
+                <div className="space-y-3">
+                  <p className="text-sm text-zinc-400">
+                    {ATTEMPT_STATUS_LABELS[phoneAttempt?.status ?? "starting"]}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void cancelPhone()}
+                    className="w-full rounded-md border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:border-zinc-500"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              )}
+
               {phoneStep === "code" && (
                 <>
-                  <p className="text-sm text-zinc-400">{phoneCodeHint}</p>
+                  <p className="text-sm text-zinc-400">
+                    {phonePending
+                      ? ATTEMPT_STATUS_LABELS.starting
+                      : attemptHint(phoneAttempt)}
+                  </p>
                   <input
                     value={code}
                     onChange={(event) => setCode(event.target.value)}
                     placeholder="12345"
                     inputMode="numeric"
+                    autoComplete="one-time-code"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={verifyPhone}
-                      disabled={busy || !code.trim()}
+                      onClick={() => void verifyPhone()}
+                      disabled={busy || phonePending || !code.trim()}
                       className="flex-1 rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
                     >
                       Подтвердить код
@@ -782,6 +731,9 @@ export function AddAccountModal({
                       Отмена
                     </button>
                   </div>
+                  {phoneAttemptError && !error && (
+                    <p className="text-sm text-red-300">{phoneAttemptError}</p>
+                  )}
                 </>
               )}
 
@@ -795,12 +747,13 @@ export function AddAccountModal({
                     value={phonePassword}
                     onChange={(event) => setPhonePassword(event.target.value)}
                     placeholder="Пароль"
+                    autoComplete="current-password"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <div className="flex gap-2">
                     <button
                       type="button"
-                      onClick={submitPhonePassword}
+                      onClick={() => void submitPhonePassword()}
                       disabled={busy || !phonePassword}
                       className="flex-1 rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
                     >
@@ -814,41 +767,22 @@ export function AddAccountModal({
                       Отмена
                     </button>
                   </div>
+                  {phoneAttemptError && !error && (
+                    <p className="text-sm text-red-300">{phoneAttemptError}</p>
+                  )}
                 </>
               )}
 
-              {phoneStep === "signup" && (
-                <>
-                  <p className="text-sm text-zinc-400">
-                    Этот номер ещё не зарегистрирован в Telegram. Введите имя
-                    для регистрации.
-                  </p>
-                  <input
-                    value={firstName}
-                    onChange={(event) => setFirstName(event.target.value)}
-                    placeholder="Имя"
-                    className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
-                  />
-                  <input
-                    value={lastName}
-                    onChange={(event) => setLastName(event.target.value)}
-                    placeholder="Фамилия (необязательно)"
-                    className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={submitPhoneSignup}
-                    disabled={busy || !firstName.trim()}
-                    className="w-full rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
-                  >
-                    Зарегистрироваться
-                  </button>
-                </>
-              )}
-
-              {phoneStep === "done" && phoneAccount && (
+              {phoneStep === "done" && (
                 <div className="rounded-md border border-emerald-800 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300">
-                  Аккаунт <strong>{accountName(phoneAccount)}</strong> добавлен.
+                  {phoneAccount ? (
+                    <>
+                      Аккаунт <strong>{accountName(phoneAccount)}</strong>{" "}
+                      добавлен и работает на TDLib.
+                    </>
+                  ) : (
+                    "Аккаунт добавлен и работает на TDLib."
+                  )}
                 </div>
               )}
             </div>
@@ -864,62 +798,88 @@ export function AddAccountModal({
                   </p>
                   <button
                     type="button"
-                    onClick={startQr}
+                    onClick={() => void startQr()}
                     disabled={busy}
                     className="w-full rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
                   >
-                    Войти по QR
+                    {busy ? "Запуск…" : "Войти по QR"}
                   </button>
                 </>
               )}
 
-              {(qrStep === "waiting" || qrStep === "password") && (
+              {(qrStep === "starting" ||
+                qrStep === "waiting" ||
+                qrStep === "password") && (
                 <>
                   <div className="flex flex-col items-center gap-3">
-                    {qrUrl ? (
+                    {qrLink ? (
                       <div className="rounded-lg bg-white p-3">
-                        <QRCodeSVG value={qrUrl} size={220} />
+                        <QRCodeSVG value={qrLink} size={220} />
                       </div>
                     ) : (
-                      <div className="flex h-56 w-56 items-center justify-center rounded-lg bg-zinc-800 text-sm text-zinc-500">
-                        Генерация QR…
+                      <div className="flex h-56 w-56 items-center justify-center rounded-lg bg-zinc-800 text-center text-sm text-zinc-500">
+                        {qrStep === "starting"
+                          ? "Запускаем TDLib…"
+                          : "Получаем QR-код…"}
                       </div>
                     )}
+
+                    {qrLink && (
+                      <div className="w-full rounded-md border border-zinc-700 bg-zinc-800/60 px-2 py-2">
+                        <p className="text-[11px] text-zinc-500">
+                          Ссылка для ручного открытия
+                        </p>
+                        <div className="mt-1 flex items-start gap-2">
+                          <code className="min-w-0 flex-1 break-all font-mono text-[11px] leading-relaxed text-zinc-300">
+                            {qrLink}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={() => void copyQrLink()}
+                            className="shrink-0 rounded-md border border-zinc-600 px-2 py-1 text-[11px] text-zinc-300 transition-colors hover:border-zinc-400 hover:text-zinc-100"
+                          >
+                            {linkCopied ? "Скопировано" : "Копировать"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <p className="text-sm text-zinc-300">
                       Статус:{" "}
                       <span className="font-medium text-sky-400">
-                        {qrStatus}
+                        {attemptHint(qrAttempt)}
                       </span>
                     </p>
-                    {qrExpiresAt && (
-                      <p className="text-xs text-zinc-500">
-                        Истекает в {formatTime(qrExpiresAt)}
+                    {qrAttemptError && !error && (
+                      <p className="text-center text-xs text-red-300">
+                        {qrAttemptError}
                       </p>
-                    )}
-                    {qrError && (
-                      <p className="text-xs text-red-300">{qrError}</p>
                     )}
                   </div>
 
-                  {qrStep === "password" ? (
+                  {qrStep === "password" && (
                     <div className="space-y-2">
+                      <p className="text-sm text-zinc-400">
+                        Включена двухэтапная проверка. Введите пароль Telegram.
+                      </p>
                       <input
                         type="password"
                         value={qrPassword}
                         onChange={(event) => setQrPassword(event.target.value)}
                         placeholder="Пароль двухэтапной проверки"
+                        autoComplete="current-password"
                         className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                       />
                       <button
                         type="button"
-                        onClick={submitQrPassword}
+                        onClick={() => void submitQrPassword()}
                         disabled={busy || !qrPassword}
                         className="w-full rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
                       >
                         Подтвердить пароль
                       </button>
                     </div>
-                  ) : null}
+                  )}
 
                   <button
                     type="button"
@@ -935,8 +895,8 @@ export function AddAccountModal({
                 <div className="rounded-md border border-emerald-800 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300">
                   {qrAccount ? (
                     <>
-                      Аккаунт <strong>{accountName(qrAccount)}</strong>{" "}
-                      добавлен.
+                      Аккаунт <strong>{accountName(qrAccount)}</strong> добавлен
+                      и работает на TDLib.
                     </>
                   ) : (
                     "Аккаунт добавлен."
@@ -944,16 +904,16 @@ export function AddAccountModal({
                 </div>
               )}
 
-              {qrStep === "expired" && (
+              {qrStep === "failed" && (
                 <div className="space-y-3">
                   <p className="text-sm text-red-300">
-                    {qrError
-                      ? `Ошибка входа по QR: ${qrError}`
+                    {qrAttemptError
+                      ? `Ошибка входа по QR: ${qrAttemptError}`
                       : "QR-вход истёк или завершился ошибкой."}
                   </p>
                   <button
                     type="button"
-                    onClick={startQr}
+                    onClick={() => void startQr()}
                     disabled={busy}
                     className="w-full rounded-md bg-sky-500 px-3 py-2 text-sm font-medium text-white hover:bg-sky-400 disabled:opacity-40"
                   >
