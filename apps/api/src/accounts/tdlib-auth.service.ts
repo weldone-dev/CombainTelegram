@@ -1,4 +1,4 @@
-import { HttpException, Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger, Optional } from '@nestjs/common';
 import type { OnModuleDestroy } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
@@ -26,6 +26,7 @@ import {
 } from '../common/validation.js';
 import { emitLog } from '../logs/log-sink.js';
 import { TdlibAuthClientFactory } from './tdlib-auth.client.js';
+import { TdUpdatesService } from '../tdlib/td-updates.service.js';
 import type {
   TdlibAuthClient,
   TdlibAuthState,
@@ -262,6 +263,8 @@ export class TdlibAuthService implements OnModuleDestroy {
     private readonly tdClients: TdClientManagerService,
     private readonly factory: TdlibAuthClientFactory,
     private readonly proxies: ProxyTransportService,
+    /** Optional so unit tests can construct the service without RealtimeModule. */
+    @Optional() private readonly tdUpdates?: TdUpdatesService,
   ) {
     this.sweeper = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     this.sweeper.unref();
@@ -822,6 +825,7 @@ export class TdlibAuthService implements OnModuleDestroy {
         proxyId: attempt.proxyId,
       });
       attempt.attached = true;
+      void this.tdUpdates?.refreshForUser(attempt.userId);
 
       if (attempt.passwordToStore !== undefined) {
         await this.storeCloudPasswordQuiet(

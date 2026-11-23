@@ -11,6 +11,7 @@ import { TelegramConfigService } from '../telegram/telegram.config.js';
 import { apiError, notFound } from '../common/api-error.js';
 import { emitLog } from '../logs/log-sink.js';
 import { UpdatesService } from '../realtime/updates.service.js';
+import { TdUpdatesService } from '../tdlib/td-updates.service.js';
 import type { AccountView } from './account-view.js';
 import { serializeAccount } from './account-view.js';
 
@@ -84,6 +85,7 @@ export class AccountSessionsService {
      * for users that already have a live `/events` socket.
      */
     @Optional() private readonly updates?: UpdatesService,
+    @Optional() private readonly tdUpdates?: TdUpdatesService,
   ) {}
 
   async attachSession(input: AttachSessionInput): Promise<AttachedSession> {
@@ -243,6 +245,7 @@ export class AccountSessionsService {
     // A user that is already listening on /events should receive updates from
     // this account immediately, without having to reconnect the socket.
     void this.updates?.refreshForUser(input.userId);
+    void this.tdUpdates?.refreshForUser(input.userId);
 
     emitLog({
       level: 'info',
@@ -414,6 +417,7 @@ export class AccountSessionsService {
       : [...sessions, session];
 
     void this.updates?.refreshForUser(input.userId);
+    void this.tdUpdates?.refreshForUser(input.userId);
 
     emitLog({
       level: 'info',
