@@ -36,6 +36,8 @@ export function startTdlibAuth(input: {
   phone?: string;
   proxyId?: string;
   label?: string;
+  /** Adds the new session to this existing account instead of creating one. */
+  accountId?: string;
 }): Promise<AttemptView> {
   return apiFetch<AttemptView>("/tdlib/auth/start", {
     method: "POST",

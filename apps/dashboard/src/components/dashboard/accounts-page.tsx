@@ -230,6 +230,8 @@ export function AccountsPage() {
           proxies={proxyList}
           onClose={() => setSessionsAccount(null)}
           onUpdated={upsertAccount}
+          onNotice={showNotice}
+          onAccountRemoved={removeAccountLocally}
         />
       )}
     </div>
