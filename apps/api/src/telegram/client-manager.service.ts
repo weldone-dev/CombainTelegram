@@ -277,7 +277,22 @@ export class ClientManagerService implements OnModuleDestroy {
     };
   }
 
-  private decryptSession(session: TelegramSessionModel): SessionPayload {    let raw: string;
+  private decryptSession(session: TelegramSessionModel): SessionPayload {
+    if (
+      !session.cipher ||
+      !session.nonce ||
+      !session.tag ||
+      !session.dekWrapped ||
+      !session.dekNonce ||
+      !session.dekTag
+    ) {
+      throw apiError(
+        'SESSION_DECRYPT_FAILED',
+        'This session is not an mtcute session and has no stored payload',
+        500,
+      );
+    }
+    let raw: string;
     try {
       raw = this.crypto
         .decrypt(

@@ -72,6 +72,10 @@ model TelegramAccount {
   firstName      String
   lastName       String?
   username       String?
+  /// Cloud password (2FA), AES-256-GCM with AAD `account:<id>`; never logged.
+  cloudPasswordEncrypted Bytes?
+  cloudPasswordNonce     Bytes?
+  cloudPasswordTag       Bytes?
   deviceProfile  String           @default("{}")
   isActive       Boolean          @default(false)
   lastUsedAt     DateTime?
@@ -84,6 +88,8 @@ model TelegramAccount {
 
 /// One Telegram auth key = one device/session. An account can have several
 /// (e.g. desktop + phone) and each is a full mtcute client.
+/// `engine = "tdlib"` rows hold no mtcute payload: the auth key lives in the
+/// TDLib database under `tdlibPath`, sealed with `tdlibKey*`.
 model TelegramSession {
   id          String          @id @default(cuid())
   accountId   String
@@ -92,17 +98,25 @@ model TelegramSession {
   label       String?
   platform    String          @default("desktop")
   profile     String          @default("TelegramDesktop")
+  /// "mtcute" (string session) or "tdlib" (native TDLib database).
+  engine      String          @default("mtcute")
   dcId        Int
   apiId       Int
   proxyId     String?
   proxy       Proxy?          @relation(fields: [proxyId], references: [id], onDelete: SetNull)
   keyVersion  Int             @default(1)
-  cipher      Bytes
-  nonce       Bytes
-  tag         Bytes
-  dekWrapped  Bytes
-  dekNonce    Bytes
-  dekTag      Bytes
+  cipher      Bytes?
+  nonce       Bytes?
+  tag         Bytes?
+  dekWrapped  Bytes?
+  dekNonce    Bytes?
+  dekTag      Bytes?
+  /// Absolute directory of the TDLib `db`/`files` folders (engine = tdlib).
+  tdlibPath   String?
+  /// Envelope of the TDLib `database_encryption_key`.
+  tdlibKeyEncrypted Bytes?
+  tdlibKeyNonce     Bytes?
+  tdlibKeyTag       Bytes?
   revokedAt   DateTime?
   lastUsedAt  DateTime?
   createdAt   DateTime        @default(now())

@@ -1,5 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { TelegramClient } from '@mtcute/node';
+import { TdClientManagerService } from '../tdlib/td-client-manager.service.js';
 import type {
   TelegramAccountModel,
   TelegramSessionModel,
@@ -78,6 +79,7 @@ export class AccountsService {
     private readonly prisma: PrismaService,
     private readonly clients: ClientManagerService,
     private readonly crypto: SessionCryptoService,
+    private readonly tdClients: TdClientManagerService,
     @Optional() private readonly updates?: UpdatesService,
   ) {}
 

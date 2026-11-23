@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 
 export type ApiMode = 'official' | 'custom';
 export type ClientPlatform = 'desktop' | 'mobile' | 'web';
@@ -49,6 +49,10 @@ export class TelegramConfigService {
   readonly maxAccountsPerUser: number;
   readonly maxSessionsPerAccount: number;
   readonly tmpDir: string;
+  /** `auto` (TDLib when the account has a TDLib session) or forced engine. */
+  readonly engine: 'auto' | 'tdlib' | 'mtcute';
+  /** Persistent TDLib databases and files, one folder per session. */
+  readonly tdlibDataDir: string;
   readonly defaultUserId: string;
   readonly isConfigured: boolean;
 
@@ -86,6 +90,17 @@ export class TelegramConfigService {
     this.tmpDir = tmp
       ? resolve(tmp)
       : join(tmpdir(), 'combain-telegram');
+    const engine = text(config.get('TELEGRAM_ENGINE'));
+    this.engine =
+      engine === 'tdlib' || engine === 'mtcute' ? engine : 'auto';
+    const tdlibDir = text(config.get('TDLIB_DATA_DIR'));
+    this.tdlibDataDir = tdlibDir
+      ? resolve(tdlibDir)
+      : join(
+          process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'),
+          'combain-telegram',
+          'tdlib',
+        );
     this.defaultUserId = text(config.get('DEFAULT_USER_ID')) ?? 'local';
 
     this.isConfigured =

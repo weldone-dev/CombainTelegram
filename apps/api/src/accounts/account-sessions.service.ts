@@ -46,6 +46,20 @@ export interface AttachedSession {
   isNewSession: boolean;
 }
 
+export interface AttachTdlibSessionInput {
+  userId: string;
+  deviceId: string;
+  label?: string | null;
+  tgUser: TelegramUserInfo;
+  phone?: string | null;
+  /** Permanent folder of the TDLib database (already moved out of the attempt). */
+  tdlibPath: string;
+  /** Raw `database_encryption_key` of that folder; sealed before storage. */
+  databaseKey: string;
+  apiId: number;
+  proxyId?: string | null;
+}
+
 type AccountWithSessions = TelegramAccountModel & {
   sessions: TelegramSessionModel[];
 };
@@ -246,6 +260,175 @@ export class AccountSessionsService {
         proxyId: session.proxyId,
         platform: session.platform,
         profile: session.profile,
+        deviceId: input.deviceId,
+      },
+    });
+
+    return {
+      account: serializeAccount(account, allSessions, input.phone ?? null),
+      sessionId: session.id,
+      isNewAccount,
+      isNewSession: !existingSession,
+    };
+  }
+
+  /**
+   * Attaches a finished TDLib login as an account + session, or replaces the
+   * TDLib session of an account that already exists. No mtcute payload is
+   * written: the auth key lives in the TDLib database under `tdlibPath`.
+   */
+  async attachTdlibSession(input: AttachTdlibSessionInput): Promise<AttachedSession> {
+    const now = new Date();
+    const tgUserId = BigInt(input.tgUser.id);
+    if (input.proxyId) {
+      const proxy = await this.prisma.proxy.findFirst({
+        where: { id: input.proxyId, userId: input.userId },
+        select: { id: true },
+      });
+      if (!proxy) throw notFound('PROXY_NOT_FOUND', 'Proxy not found');
+    }
+
+    const existing = (await this.prisma.telegramAccount.findUnique({
+      where: { userId_tgUserId: { userId: input.userId, tgUserId } },
+      include: { sessions: true },
+    })) as AccountWithSessions | null;
+
+    let account: TelegramAccountModel;
+    let isNewAccount = false;
+    let sessions: TelegramSessionModel[];
+
+    if (existing) {
+      account = await this.prisma.telegramAccount.update({
+        where: { id: existing.id },
+        data: {
+          firstName: input.tgUser.firstName,
+          lastName: input.tgUser.lastName ?? null,
+          username: input.tgUser.username ?? null,
+          lastUsedAt: now,
+        },
+      });
+      sessions = existing.sessions;
+    } else {
+      const accountCount = await this.prisma.telegramAccount.count({
+        where: { userId: input.userId },
+      });
+      if (accountCount >= this.config.maxAccountsPerUser) {
+        throw apiError(
+          'ACCOUNT_LIMIT',
+          `This user already has the maximum of ${this.config.maxAccountsPerUser} Telegram accounts`,
+          409,
+        );
+      }
+      const activeCount = await this.prisma.telegramAccount.count({
+        where: { userId: input.userId, isActive: true },
+      });
+      account = await this.prisma.telegramAccount.create({
+        data: {
+          userId: input.userId,
+          tgUserId,
+          firstName: input.tgUser.firstName,
+          lastName: input.tgUser.lastName ?? null,
+          username: input.tgUser.username ?? null,
+          deviceProfile: JSON.stringify({
+            key: 'android',
+            platform: 'android',
+            engine: 'tdlib',
+            apiId: input.apiId,
+          }),
+          isActive: activeCount === 0,
+          lastUsedAt: now,
+        },
+      });
+      isNewAccount = true;
+      sessions = [];
+    }
+
+    const existingSession = sessions.find(
+      (session) => session.deviceId === input.deviceId,
+    );
+    if (!existingSession && sessions.length >= this.config.maxSessionsPerAccount) {
+      throw apiError(
+        'SESSION_LIMIT',
+        `This account already has the maximum of ${this.config.maxSessionsPerAccount} sessions`,
+        409,
+      );
+    }
+
+    const keyEnvelope = this.crypto.encrypt(
+      input.databaseKey,
+      `tdlib:${account.id}`,
+    );
+
+    const sessionData = {
+      engine: 'tdlib',
+      label: input.label ?? existingSession?.label ?? null,
+      platform: 'android',
+      profile: 'TelegramAndroid',
+      dcId: 0,
+      apiId: input.apiId,
+      proxyId: input.proxyId ?? existingSession?.proxyId ?? null,
+      keyVersion: keyEnvelope.keyVersion,
+      cipher: null,
+      nonce: null,
+      tag: null,
+      dekWrapped: null,
+      dekNonce: null,
+      dekTag: null,
+      tdlibPath: input.tdlibPath,
+      tdlibKeyEncrypted: this.crypto.serialize(keyEnvelope),
+      tdlibKeyNonce: keyEnvelope.nonce,
+      tdlibKeyTag: keyEnvelope.tag,
+      revokedAt: null,
+      lastUsedAt: now,
+    };
+
+    const session = await this.prisma.telegramSession.upsert({
+      where: {
+        accountId_deviceId: {
+          accountId: account.id,
+          deviceId: input.deviceId,
+        },
+      },
+      create: {
+        accountId: account.id,
+        deviceId: input.deviceId,
+        ...sessionData,
+      },
+      update: sessionData,
+    });
+
+    if (input.phone) {
+      const phoneEnvelope = this.crypto.encrypt(input.phone, `phone:${account.id}`);
+      await this.prisma.telegramAccount.update({
+        where: { id: account.id },
+        data: {
+          phoneEncrypted: this.crypto.serialize(phoneEnvelope),
+          phoneNonce: phoneEnvelope.nonce,
+          phoneTag: phoneEnvelope.tag,
+        },
+      });
+    }
+
+    const allSessions = existingSession
+      ? sessions.map((row) => (row.id === session.id ? session : row))
+      : [...sessions, session];
+
+    void this.updates?.refreshForUser(input.userId);
+
+    emitLog({
+      level: 'info',
+      source: 'auth',
+      action: 'auth.tdlib.attach',
+      message: `${isNewAccount ? 'Attached new TDLib account' : 'Attached TDLib session'} ${session.id}`,
+      status: 'ok',
+      userId: input.userId,
+      accountId: account.id,
+      sessionId: session.id,
+      proxyId: session.proxyId,
+      details: {
+        isNewAccount,
+        isNewSession: !existingSession,
+        engine: 'tdlib',
         deviceId: input.deviceId,
       },
     });

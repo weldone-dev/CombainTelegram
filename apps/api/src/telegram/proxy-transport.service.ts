@@ -70,6 +70,33 @@ export class ProxyTransportService {
     return proxyTransportFromUrl(this.urlFor(proxy));
   }
 
+  /**
+   * Plain connection details (with the decrypted secret) for transports that
+   * are not mtcute, such as TDLib's `addProxy`.
+   */
+  credentialsFor(proxy: ProxyModel): {
+    kind: ProxyKind;
+    host: string;
+    port: number;
+    username: string | null;
+    secret: string | null;
+  } {
+    if (!proxy.enabled) {
+      throw apiError(
+        'PROXY_DISABLED',
+        'The proxy assigned to this session is disabled',
+        409,
+      );
+    }
+    return {
+      kind: normalizeKind(proxy.kind),
+      host: proxy.host,
+      port: proxy.port,
+      username: proxy.username ?? null,
+      secret: this.decryptSecret(proxy),
+    };
+  }
+
   /** Rebuilds the proxy URL, including the decrypted secret when present. */
   urlFor(proxy: ProxyModel): string {
     const kind = normalizeKind(proxy.kind);

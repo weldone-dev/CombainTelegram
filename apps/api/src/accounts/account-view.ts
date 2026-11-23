@@ -6,6 +6,8 @@ export interface SessionView {
   label: string | null;
   platform: string;
   profile: string;
+  /** `mtcute` (string session) or `tdlib` (native TDLib database). */
+  engine: string;
   proxyId: string | null;
   createdAt: string;
   lastUsedAt: string | null;
@@ -33,6 +35,7 @@ export function serializeSession(session: TelegramSessionModel): SessionView {
     label: session.label,
     platform: session.platform,
     profile: session.profile,
+    engine: session.engine,
     proxyId: session.proxyId,
     createdAt: session.createdAt.toISOString(),
     lastUsedAt: session.lastUsedAt?.toISOString() ?? null,
