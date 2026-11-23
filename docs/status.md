@@ -76,11 +76,15 @@ Updated: 2026-11-23. This file is the single place to check progress.
       `getMessageThreadHistory`), root filtered, paging, `sendComment`.
       Live-verified on a real channel post (5 comments mapped).
 
+### Info panel, translation, transcription
+- [x] `info/media` (photos, links, polls) on TDLib — ids match media downloads.
+- [x] `translate` on TDLib (`translateMessageText`), live-verified.
+- [x] `transcribe` on TDLib (`recognizeSpeech` + `updateMessageContent` wait).
+- [x] `info/similar` on TDLib (`getChatSimilarChats`).
+
 ## Still on mtcute (works only while the old session exists)
-`getChatInfoMedia`, `getChatInfoSimilar`, translation, transcription,
 `resolveChat`, chat settings/delete, and the admin tools (members, bans, rights,
-invite links). `getChatInfoMedia`/translate/transcribe/similar are being ported
-now.
+invite links). None of these take a message id.
 
 ## Next
 - Port the remaining endpoints above to TDLib.
