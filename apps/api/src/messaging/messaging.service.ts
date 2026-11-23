@@ -903,6 +903,10 @@ export class MessagingService {
   /**
    * Comment thread of a channel post.
    *
+   * A live TDLib session answers through its `getMessageThread` and the
+   * linked discussion group's history; any failure falls through to the
+   * mtcute path below.
+   *
    * mtcute 0.32 has no `threadId` option on `getHistory`; the linked
    * discussion thread is read with `searchMessages({ threadId })` instead.
    * Comments come back **newest first** and `nextOffsetId` (mtcute's
@@ -922,6 +926,26 @@ export class MessagingService {
     const limit = parseLimit(query.limit, THREAD_LIMIT);
     const offsetId = parseOffsetId(query.offsetId);
     const sessionId = parseOptionalSessionId(query.sessionId);
+    const td = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'getMessageThread',
+    );
+    if (td) {
+      try {
+        return await td.getMessageThread(chatId, messageId, {
+          limit,
+          offsetId,
+        });
+      } catch (error) {
+        this.logTdFailure(
+          'getMessageThread',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -985,6 +1009,18 @@ export class MessagingService {
     const messageId = parseMessageId(rawMessageId);
     const text = parseMessageText(body.text);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendComment');
+    if (td) {
+      try {
+        return await td.sendComment(chatId, messageId, text);
+      } catch (error) {
+        this.logTdFailure(
+          'sendComment',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,

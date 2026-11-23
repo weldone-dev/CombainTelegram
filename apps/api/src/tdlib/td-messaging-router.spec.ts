@@ -161,3 +161,108 @@ describe('MessagingService TDLib routing', () => {
     expect(result).toHaveLength(1);
   });
 });
+
+const DISCUSSION_CHAT_ID = -1001234567890;
+const discussionRoot = {
+  id: 900,
+  chat: { id: DISCUSSION_CHAT_ID, type: 'chat', displayName: 'Comments' },
+};
+const commentMessage = {
+  id: 901,
+  text: 'первый комментарий',
+  date: new Date('2026-11-20T10:00:00.000Z'),
+  isOutgoing: false,
+  sender: {
+    id: 777,
+    type: 'user',
+    displayName: 'Bob',
+    username: 'bob',
+  },
+  chat: { id: DISCUSSION_CHAT_ID, type: 'chat', displayName: 'Comments' },
+  replyToMessage: null,
+  media: null,
+  raw: { _: 'message' },
+};
+
+describe('MessagingService channel thread routing', () => {
+  it('serves comments from TDLib without touching mtcute', async () => {
+    const threadView = {
+      chatId: CHAT_ID,
+      messageId: 42,
+      discussionChatId: DISCUSSION_CHAT_ID,
+      comments: [],
+      nextOffsetId: null,
+    };
+    const getMessageThread = vi.fn(async () => threadView);
+    const { accounts, resolveSession } = fakeAccounts({});
+    const { td, forAccount } = fakeTd({ getMessageThread });
+    const service = new MessagingService(accounts, td);
+
+    const thread = await service.getMessageThread(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '42',
+      { limit: '20', offsetId: '900' },
+    );
+
+    expect(thread).toEqual(threadView);
+    expect(forAccount).toHaveBeenCalledWith(USER_ID, ACCOUNT_ID, undefined);
+    expect(getMessageThread).toHaveBeenCalledWith(CHAT_ID, 42, {
+      limit: 20,
+      offsetId: 900,
+    });
+    expect(resolveSession).not.toHaveBeenCalled();
+  });
+
+  it('falls back to mtcute when TDLib thread reading throws', async () => {
+    const getDiscussionMessage = vi.fn(async () => discussionRoot);
+    const searchMessages = vi.fn(async () => [commentMessage]);
+    const { accounts } = fakeAccounts({ getDiscussionMessage, searchMessages });
+    const { td } = fakeTd({
+      getMessageThread: vi.fn(async () => {
+        throw new Error('TDLib does not know this message id');
+      }),
+    });
+    const service = new MessagingService(accounts, td);
+
+    const thread = await service.getMessageThread(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '42',
+    );
+
+    expect(getDiscussionMessage).toHaveBeenCalledWith({
+      chatId: CHAT_ID,
+      message: 42,
+    });
+    expect(thread.discussionChatId).toBe(DISCUSSION_CHAT_ID);
+    expect(thread.comments.map((comment) => comment.id)).toEqual([901]);
+  });
+
+  it('falls back to mtcute when TDLib commenting throws', async () => {
+    const getDiscussionMessage = vi.fn(async () => discussionRoot);
+    const sendText = vi.fn(async () => commentMessage);
+    const { accounts } = fakeAccounts({ getDiscussionMessage, sendText });
+    const { td } = fakeTd({
+      sendComment: vi.fn(async () => {
+        throw new Error('TDLib cannot send here');
+      }),
+    });
+    const service = new MessagingService(accounts, td);
+
+    const created = await service.sendComment(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '42',
+      { text: 'привет' },
+    );
+
+    expect(sendText).toHaveBeenCalledWith(DISCUSSION_CHAT_ID, 'привет', {
+      replyTo: discussionRoot.id,
+    });
+    expect(created).toMatchObject({ id: 901, text: 'первый комментарий' });
+  });
+});

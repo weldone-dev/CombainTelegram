@@ -1,7 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import type { OnModuleDestroy } from '@nestjs/common';
 import type { Client } from 'tdlib-native';
-import type { ChatList, chat, message, user } from 'tdlib-native/types';
+import type {
+  ChatList,
+  chat,
+  message,
+  messageThreadInfo,
+  user,
+} from 'tdlib-native/types';
 import type {
   TelegramAccountModel,
   TelegramSessionModel,
@@ -20,6 +26,7 @@ import type {
   ChatView,
   FolderView,
   MessagePollView,
+  MessageThreadView,
   MessageView,
   PeerLike,
 } from '../messaging/message-view.js';
@@ -104,6 +111,11 @@ export interface TdSearchMessagesQuery {
   offsetId?: number;
 }
 
+export interface TdMessageThreadQuery {
+  limit: number;
+  offsetId?: number;
+}
+
 export interface TdSearchGlobalQuery {
   q: string;
   limit: number;
@@ -142,6 +154,16 @@ export interface TdMessenger {
     query: TdSearchMessagesQuery,
   ): Promise<ChatSearchView>;
   searchGlobal(query: TdSearchGlobalQuery): Promise<GlobalSearchView>;
+  getMessageThread(
+    peerId: number,
+    messageId: number,
+    query: TdMessageThreadQuery,
+  ): Promise<MessageThreadView>;
+  sendComment(
+    peerId: number,
+    messageId: number,
+    text: string,
+  ): Promise<MessageView>;
   chatAvatar(peerId: number): Promise<AvatarImage | null>;
   downloadMedia(
     peerId: number,
@@ -396,6 +418,54 @@ export class TdSessionMessenger implements TdMessenger {
     return raws.map((raw) => this.mapMessage(entry, raw));
   }
 
+  /**
+   * Like `historyPage`, but for a discussion thread: TDLib may answer with only
+   * the newest comments until the thread cache fills, so a short page is
+   * retried briefly instead of showing a truncated thread.
+   */
+  private async threadHistoryPage(
+    chatId: number,
+    threadRootId: number,
+    fromMessageId: number,
+    limit: number,
+  ): Promise<message[]> {
+    let best: message[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const result = await this.client.api.getMessageThreadHistory({
+        chat_id: chatId,
+        message_id: threadRootId,
+        from_message_id: fromMessageId,
+        offset: 0,
+        limit,
+      });
+      const batch = result.messages ?? [];
+      if (batch.length > best.length) best = batch;
+      if (best.length >= limit) break;
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+    return best;
+  }
+
+  /**
+   * Linked discussion thread of a channel post, or `null` when the post has
+   * none. TDLib answers a post without comments with an error, and that is an
+   * empty thread, not a failed request.
+   */
+  private async threadInfo(
+    chatId: number,
+    messageId: number,
+  ): Promise<messageThreadInfo | null> {
+    try {
+      const thread = await this.client.api.getMessageThread({
+        chat_id: chatId,
+        message_id: messageId,
+      });
+      return thread.chat_id ? thread : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ------------------------------------------------------------------ chats
 
   private chatIdsForList(list: ChatList, limit: number): Promise<number[]> {
@@ -450,7 +520,9 @@ export class TdSessionMessenger implements TdMessenger {
     await Promise.all(entries.map((entry) => this.extrasFor(entry)));
     const lastMessages = entries
       .map((entry) => entry.last_message)
-      .filter((value): value is message => value !== null && value !== undefined);
+      .filter(
+        (value): value is message => value !== null && value !== undefined,
+      );
     await this.warmMessages(lastMessages);
 
     return entries.map((entry) =>
@@ -734,6 +806,129 @@ export class TdSessionMessenger implements TdMessenger {
     }
 
     return { chats: [...chats.values()], users: [...users.values()] };
+  }
+
+  // ----------------------------------------------------------------- threads
+
+  /**
+   * Comments of a channel post, read through the post's linked discussion
+   * group. The thread root (the auto-forwarded post) is not a comment and is
+   * dropped. A post without a discussion group is not an error: the payload
+   * carries `discussionChatId: null` and no comments.
+   */
+  async getMessageThread(
+    peerId: number,
+    messageId: number,
+    query: TdMessageThreadQuery,
+  ): Promise<MessageThreadView> {
+    const chatId = await this.registry.resolve(peerId);
+    const empty: MessageThreadView = {
+      chatId: peerId,
+      messageId,
+      discussionChatId: null,
+      comments: [],
+      nextOffsetId: null,
+    };
+
+    const thread = await this.threadInfo(chatId, messageId);
+    if (!thread) return empty;
+
+    const discussionChatId = thread.chat_id;
+    let discussion: chat;
+    try {
+      discussion = await this.client.api.getChat({ chat_id: discussionChatId });
+      // Sender/peer mapping reads chats from the registry.
+      this.registry.put(discussion);
+    } catch {
+      return empty;
+    }
+
+    const threadRootId = thread.message_thread_id;
+    const withoutRoot = (values: message[]): message[] =>
+      values.filter((value) => value.id !== threadRootId);
+
+    let raws: message[];
+    const offsetId = query.offsetId;
+    if (offsetId !== undefined) {
+      const result = await this.client.api.getMessageThreadHistory({
+        chat_id: discussionChatId,
+        message_id: threadRootId,
+        from_message_id: offsetId,
+        offset: 0,
+        limit: query.limit + 1,
+      });
+      raws = withoutRoot(result.messages ?? [])
+        .filter((value) => value.id < offsetId)
+        .slice(0, query.limit);
+    } else {
+      const found = withoutRoot(thread.messages ?? []);
+      const seen = new Set(found.map((value) => value.id));
+      if (found.length < query.limit) {
+        // Fetch older comments, starting at the oldest one already known.
+        const fromMessageId = found.reduce(
+          (oldest, value) => Math.min(oldest, value.id),
+          found[0]?.id ?? 0,
+        );
+        const older = await this.threadHistoryPage(
+          discussionChatId,
+          threadRootId,
+          fromMessageId,
+          query.limit,
+        );
+        for (const value of withoutRoot(older)) {
+          if (seen.has(value.id)) continue;
+          seen.add(value.id);
+          found.push(value);
+        }
+      }
+      raws = found.slice(0, query.limit);
+    }
+
+    return {
+      chatId: peerId,
+      messageId,
+      discussionChatId: this.peerIdOf(discussion),
+      comments: await this.mapMessages(discussion, raws),
+      nextOffsetId: raws[raws.length - 1]?.id ?? null,
+    };
+  }
+
+  /**
+   * Sends a comment into the post's linked discussion group. The thread root
+   * message is the reply target, which is how Telegram links a comment to the
+   * channel post.
+   */
+  async sendComment(
+    peerId: number,
+    messageId: number,
+    text: string,
+  ): Promise<MessageView> {
+    const chatId = await this.registry.resolve(peerId);
+    const thread = await this.threadInfo(chatId, messageId);
+    if (!thread) {
+      throw notFound('THREAD_NOT_FOUND', 'This message has no comment thread');
+    }
+
+    const sent = await this.client.api.sendMessage({
+      chat_id: thread.chat_id,
+      topic_id: null,
+      reply_to: {
+        _: 'inputMessageReplyToMessage',
+        message_id: thread.message_thread_id,
+        quote: null,
+        checklist_task_id: 0,
+        poll_option_id: '',
+      },
+      options: null,
+      reply_markup: null,
+      input_message_content: {
+        _: 'inputMessageText',
+        text: this.formattedText(text),
+        link_preview_options: null,
+        clear_draft: false,
+      },
+    });
+    return this.sentMessage(thread.chat_id, sent);
   }
 
   // ------------------------------------------------------------------ files
