@@ -25,8 +25,8 @@ Updated: 2026-11-23. This file is the single place to check progress.
 
 ## In progress (Orca workers)
 - [ ] `tdlib-auth` — login/migration HTTP API, password prompt + encrypted store.
-- [ ] `tdlib-ui` — no device picker, QR/code/password flow, migration card,
-      engine badge.
+- [x] `tdlib-ui` — no device picker, QR/code/password flow, migration card,
+      engine badge. Merged.
 - [ ] `tdlib-messaging` — TDLib chats/history/send/media/files behind a switch,
       automatic fallback to mtcute.
 
