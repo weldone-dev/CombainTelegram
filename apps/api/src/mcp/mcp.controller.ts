@@ -148,6 +148,21 @@ export class McpController {
     }
 
     try {
+      if (
+        method !== 'initialize' &&
+        method !== 'ping' &&
+        !method.startsWith('notifications/')
+      ) {
+        const policy = await this.config.policy();
+        if (!policy.capabilities.mcp) {
+          return rpcFail(
+            id,
+            -32001,
+            'MCP access is disabled in AI permissions.',
+          );
+        }
+      }
+
       switch (method) {
         case 'initialize': {
           const policy = await this.config.policy();

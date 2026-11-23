@@ -190,7 +190,9 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
             'Это автоматический запуск по расписанию. Действуй по инструкции и верни короткий отчёт.',
         });
         output = result.text;
-        if (chatId && action.sendOutput !== false && output.trim()) {
+        const shouldSend =
+          action.send !== false && action.sendOutput !== false;
+        if (chatId && shouldSend && output.trim()) {
           const decision = await this.policy.evaluate('send', {
             userId: user.id,
             accountId,

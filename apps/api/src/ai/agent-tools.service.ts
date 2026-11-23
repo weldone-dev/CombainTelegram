@@ -291,7 +291,11 @@ export class AgentToolsService {
       parameters: { type: 'object', properties: {} },
       handler: async (_args, ctx) => {
         const list = await this.accounts.list(ctx.userId);
-        return list.map((account) => ({
+        return list
+          .filter(
+            (account) => !ctx.accountId || account.id === ctx.accountId,
+          )
+          .map((account) => ({
           id: account.id,
           tgUserId: account.tgUserId,
           name: `${account.firstName}${account.lastName ? ` ${account.lastName}` : ''}`,
@@ -522,11 +526,11 @@ export class AgentToolsService {
           limit: { type: 'number', default: 30 },
         },
       },
-      handler: async (args) => {
+      handler: async (args, ctx) => {
         const page = await this.logs.query({
           q: text(args.query) || undefined,
           level: text(args.level) || undefined,
-          accountId: text(args.accountId) || undefined,
+          accountId: text(args.accountId, ctx.accountId ?? '') || undefined,
           limit: limit(args.limit, 30, 100),
         });
         return {
@@ -550,9 +554,11 @@ export class AgentToolsService {
       description: 'Souls (personas) of all accounts with autopilot mode.',
       capability: 'souls',
       parameters: { type: 'object', properties: {} },
-      handler: async () => {
+      handler: async (_args, ctx) => {
         const list = await this.souls.list();
-        return list.map((soul) => ({
+        return list
+          .filter((soul) => !ctx.accountId || soul.accountId === ctx.accountId)
+          .map((soul) => ({
           accountId: soul.accountId,
           name: soul.name,
           essence: soul.essence.slice(0, 300),
@@ -1025,7 +1031,12 @@ export class AgentToolsService {
         'Telegram bots configured in the app (shared soul-creator and per-account assistants). Tokens are never returned.',
       capability: 'bots',
       parameters: { type: 'object', properties: {} },
-      handler: async () => this.bots.list(),
+      handler: async (_args, ctx) => {
+        const list = await this.bots.list();
+        return list.filter(
+          (bot) => !ctx.accountId || bot.accountId === ctx.accountId,
+        );
+      },
     });
 
     this.register({
@@ -1044,6 +1055,12 @@ export class AgentToolsService {
         required: ['token'],
       },
       handler: async (args, ctx) => {
+        const token = text(args.token);
+        if (token) {
+          const me = await this.bots.identify(token);
+          if (!text(args.username)) args.username = me.username ?? undefined;
+          if (!text(args.title)) args.title = me.firstName;
+        }
         const accountId = text(args.accountId, ctx.accountId ?? '');
         if (accountId) {
           return this.bots.createForAccount(accountId, args);

@@ -178,7 +178,7 @@ export class BotRunnerService implements OnModuleInit, OnModuleDestroy {
     const chatId = message.chat.id;
     const senderId = message.from?.id ?? chatId;
     const allowed = await this.bots.allowedTgUserIds(bot);
-    if (allowed.length > 0 && !allowed.includes(String(senderId))) {
+    if (!allowed.includes(String(senderId))) {
       await api
         .sendMessage(
           chatId,

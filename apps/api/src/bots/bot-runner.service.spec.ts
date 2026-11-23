@@ -151,7 +151,7 @@ function createHarness() {
   };
 
   const bots = {
-    allowedTgUserIds: vi.fn(async () => [] as string[]),
+    allowedTgUserIds: vi.fn(async () => ['7', '42'] as string[]),
     setPolling: vi.fn(async () => undefined),
     pollable: vi.fn(async () => []),
   };

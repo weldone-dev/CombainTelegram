@@ -72,6 +72,17 @@ function words(value: string): string[] {
     .filter((word) => word.length >= 4);
 }
 
+function parseFacts(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function parseJsonBlock(raw: string): unknown {
   const cleaned = raw.replace(/```(?:json)?/gi, '').trim();
   const start = cleaned.indexOf('{');
@@ -363,6 +374,7 @@ export class MemoryService {
         ? parsed.summary.trim().slice(0, 4000)
         : current?.summary ?? '';
     const facts = Array.isArray(parsed?.facts) ? parsed.facts : [];
+    const factContents = current ? parseFacts(current.facts) : [];
     let factsAdded = 0;
     for (const item of facts.slice(0, 20)) {
       if (!item || typeof item !== 'object') continue;
@@ -376,6 +388,7 @@ export class MemoryService {
           importance: Number(fact.importance) || 2,
           source: 'summary',
         });
+        if (!factContents.includes(content)) factContents.push(content);
         factsAdded += 1;
       } catch {
         // Ignore a single malformed fact.
@@ -388,12 +401,12 @@ export class MemoryService {
         accountId,
         chatId: BigInt(chatId),
         summary: summaryText,
-        facts: JSON.stringify(facts.map((item) => String(item))),
+        facts: JSON.stringify(factContents),
         turnsThrough: through,
       },
       update: {
         summary: summaryText,
-        facts: JSON.stringify(facts.map((item) => String(item))),
+        facts: JSON.stringify(factContents),
         turnsThrough: through,
       },
     });

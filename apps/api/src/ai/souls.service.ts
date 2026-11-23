@@ -32,6 +32,46 @@ function clampInt(value: unknown, fallback: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Math.round(number)));
 }
 
+/** Merge only the keys present in the patch, keeping the rest intact. */
+function mergeSoulSettings(
+  current: SoulSettings,
+  patch: unknown,
+): SoulSettings {
+  const source =
+    patch && typeof patch === 'object'
+      ? (patch as Record<string, unknown>)
+      : {};
+  const next = { ...current };
+  if (typeof source.allowAllChats === 'boolean') {
+    next.allowAllChats = source.allowAllChats;
+  }
+  if (source.chatIds !== undefined) next.chatIds = numbers(source.chatIds);
+  if (source.excludeChatIds !== undefined) {
+    next.excludeChatIds = numbers(source.excludeChatIds);
+  }
+  if (source.replyDelayMs !== undefined) {
+    next.replyDelayMs = clampInt(
+      source.replyDelayMs,
+      current.replyDelayMs,
+      0,
+      120_000,
+    );
+  }
+  if (source.maxPerHour !== undefined) {
+    next.maxPerHour = clampInt(source.maxPerHour, current.maxPerHour, 0, 500);
+  }
+  if (source.maxPerChatPerDay !== undefined) {
+    next.maxPerChatPerDay = clampInt(
+      source.maxPerChatPerDay,
+      current.maxPerChatPerDay,
+      0,
+      5000,
+    );
+  }
+  if (typeof source.typing === 'boolean') next.typing = source.typing;
+  return next;
+}
+
 export function parseSoulSettings(raw: unknown): SoulSettings {
   const source =
     typeof raw === 'string'
@@ -140,10 +180,9 @@ export class SoulsService {
       data.mode = mode;
     }
     if (input.settings !== undefined) {
-      data.settings = JSON.stringify({
-        ...current.settings,
-        ...parseSoulSettings(input.settings),
-      });
+      data.settings = JSON.stringify(
+        mergeSoulSettings(current.settings, input.settings),
+      );
     }
     if (input.model !== undefined) data.model = optionalText(input.model);
     if (input.temperature !== undefined) {

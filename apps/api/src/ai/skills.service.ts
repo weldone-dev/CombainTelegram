@@ -100,7 +100,7 @@ const SOUL_CREATOR_PROMPT = `# Скилл: создание и редактир�
 6. Никогда не отправляй сообщения живым людям из этой роли. Твоя задача —
    редактировать конфигурацию, а не переписку.
 7. Если владелец просит изменить разрешения — покажи текущие через
-   permissions_get, предложи точный набор флагов и меняй только после
+   policy_get, предложи точный набор флагов и меняй только после
    подтверждения.
 8. Отвечай по-русски, коротко и по делу. Не используй Markdown-таблицы.`;
 
@@ -178,8 +178,8 @@ const BUILTINS: BuiltinSkill[] = [
       'automation_create',
       'automation_update',
       'memory_view',
-      'permissions_get',
-      'permissions_update',
+      'policy_get',
+      'policy_update',
       'bots_list',
       'settings_get',
     ],
