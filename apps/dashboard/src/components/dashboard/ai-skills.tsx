@@ -2,14 +2,26 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  aiErrorMessage,
   createSkill,
   deleteSkill,
   listSkills,
   type SkillView,
   updateSkill,
 } from "../../lib/ai-api";
-import { errorMessage } from "../../lib/api";
-import { Card, Field, inputClass, Pill, textareaClass } from "./ai-ui";
+import {
+  Card,
+  ErrorBanner,
+  Field,
+  GhostButton,
+  inputClass,
+  OkBanner,
+  Pill,
+  PrimaryButton,
+  textareaClass,
+} from "./ai-ui";
+
+const SLUG_RE = /^[a-z0-9][a-z0-9_-]{1,63}$/;
 
 interface Draft {
   id: string | null;
@@ -53,7 +65,7 @@ export function SkillsPanel() {
         null;
       setDraft(draftOf(next));
     } catch (loadError) {
-      setError(errorMessage(loadError));
+      setError(aiErrorMessage(loadError));
     }
   }, []);
 
@@ -61,9 +73,26 @@ export function SkillsPanel() {
     void load();
   }, [load]);
 
+  const slugValid =
+    Boolean(draft.id) ||
+    draft.slug.trim() === "" ||
+    SLUG_RE.test(draft.slug.trim());
+  const canSave =
+    !busy && Boolean(draft.name.trim()) && Boolean(draft.instructions.trim());
+
   const save = async () => {
-    if (!draft.name.trim() || !draft.instructions.trim()) {
-      setError("Нужны название и инструкции");
+    if (!draft.name.trim()) {
+      setError("Укажите название скилла");
+      return;
+    }
+    if (!draft.id && !slugValid) {
+      setError(
+        "Slug: латиница, цифры, дефис или подчёркивание, 2–64 символа, начинается с буквы или цифры",
+      );
+      return;
+    }
+    if (!draft.instructions.trim()) {
+      setError("Нужны инструкции для скилла");
       return;
     }
     setBusy(true);
@@ -71,10 +100,9 @@ export function SkillsPanel() {
     setSaved(null);
     try {
       const body = {
-        slug: draft.slug,
-        name: draft.name,
-        description: draft.description,
-        instructions: draft.instructions,
+        name: draft.name.trim(),
+        description: draft.description.trim(),
+        instructions: draft.instructions.trim(),
         tools: draft.tools
           .split(/[\s,]+/)
           .map((item) => item.trim())
@@ -83,12 +111,12 @@ export function SkillsPanel() {
       };
       const savedSkill = draft.id
         ? await updateSkill(draft.id, body)
-        : await createSkill(body);
+        : await createSkill({ ...body, slug: draft.slug.trim().toLowerCase() });
       setDraft(draftOf(savedSkill));
       setSaved(`Скилл «${savedSkill.name}» сохранён`);
       await load(savedSkill.slug);
     } catch (saveError) {
-      setError(errorMessage(saveError));
+      setError(aiErrorMessage(saveError));
     } finally {
       setBusy(false);
     }
@@ -98,36 +126,42 @@ export function SkillsPanel() {
     if (!draft.id) return;
     if (!window.confirm(`Удалить скилл «${draft.name}»?`)) return;
     setBusy(true);
+    setError(null);
+    setSaved(null);
     try {
       await deleteSkill(draft.id);
-      setSaved("Скилл удалён");
       await load();
+      setSaved("Скилл удалён");
     } catch (removeError) {
-      setError(errorMessage(removeError));
+      setError(aiErrorMessage(removeError));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
+    <div className="grid min-w-0 gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
       <Card
         title="Скиллы"
         description="Инструкции для агента"
         actions={
-          <button
-            type="button"
+          <GhostButton
             onClick={() => {
               setDraft(draftOf(null));
               setSaved(null);
+              setError(null);
             }}
-            className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
           >
             + Новый
-          </button>
+          </GhostButton>
         }
       >
         <div className="space-y-1">
+          {skills.length === 0 && (
+            <p className="text-xs text-zinc-500">
+              Скиллов пока нет. Создайте первый справа.
+            </p>
+          )}
           {skills.map((skill) => (
             <button
               key={skill.id}
@@ -155,40 +189,26 @@ export function SkillsPanel() {
         </div>
       </Card>
 
-      <div className="space-y-4">
-        {error && (
-          <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-            {error}
-          </div>
-        )}
-        {saved && (
-          <div className="rounded-md border border-emerald-900/60 bg-emerald-950/40 px-3 py-2 text-sm text-emerald-300">
-            {saved}
-          </div>
-        )}
+      <div className="min-w-0 space-y-4">
+        <ErrorBanner message={error} />
+        <OkBanner message={saved} />
         <Card
           title={draft.id ? "Редактирование скилла" : "Новый скилл"}
           description="Скилл — это markdown-инструкция плюс необязательный список инструментов."
           actions={
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {draft.id && draft.origin !== "system" && (
-                <button
-                  type="button"
+                <GhostButton
                   onClick={() => void remove()}
                   disabled={busy}
-                  className="rounded-md border border-red-900/60 px-2.5 py-1.5 text-xs text-red-300 hover:bg-red-950/40 disabled:opacity-40"
+                  danger
                 >
                   Удалить
-                </button>
+                </GhostButton>
               )}
-              <button
-                type="button"
-                onClick={() => void save()}
-                disabled={busy}
-                className="rounded-md bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-50"
-              >
-                Сохранить
-              </button>
+              <PrimaryButton onClick={() => void save()} disabled={!canSave}>
+                {busy ? "Сохранение…" : "Сохранить"}
+              </PrimaryButton>
             </div>
           }
         >
@@ -203,7 +223,10 @@ export function SkillsPanel() {
                 onChange={(event) =>
                   setDraft({ ...draft, slug: event.target.value })
                 }
-                className={inputClass}
+                aria-invalid={!slugValid}
+                className={`${inputClass} ${
+                  slugValid ? "" : "border-red-700 focus:border-red-500"
+                }`}
                 placeholder="my-skill"
               />
             </Field>
@@ -256,6 +279,7 @@ export function SkillsPanel() {
               onChange={(event) =>
                 setDraft({ ...draft, enabled: event.target.checked })
               }
+              className="h-3.5 w-3.5 accent-sky-500"
             />
             Скилл включён
           </label>
