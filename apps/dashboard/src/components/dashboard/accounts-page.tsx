@@ -165,7 +165,7 @@ export function AccountsPage() {
                     className="h-11 w-11 text-sm"
                   />
 
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-[240px] flex-1">
                     <div className="flex items-center gap-2">
                       <p className="truncate text-sm font-medium text-zinc-100">
                         {accountName(account)}
@@ -202,7 +202,7 @@ export function AccountsPage() {
                     )}
                   </div>
 
-                  <div className="flex shrink-0 items-center gap-1.5">
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
                     <Link
                       href={`/chats?account=${account.id}`}
                       className="rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"

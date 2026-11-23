@@ -50,6 +50,12 @@ export function serializeSession(session: TelegramSessionModel): SessionView {
   };
 }
 
+/** Telegram stores numbers without `+`; the UI always shows it. */
+function displayPhone(phone: string | null | undefined): string | null {
+  if (!phone) return null;
+  return phone.startsWith('+') ? phone : `+${phone}`;
+}
+
 export function serializeAccount(
   account: TelegramAccountModel,
   sessions: TelegramSessionModel[] = [],
@@ -61,7 +67,7 @@ export function serializeAccount(
     firstName: account.firstName,
     lastName: account.lastName,
     username: account.username,
-    phone: phone ?? null,
+    phone: displayPhone(phone),
     phoneMasked: phone ? maskPhone(phone) : null,
     isActive: account.isActive,
     activeSessionId: account.activeSessionId ?? null,
