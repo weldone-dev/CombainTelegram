@@ -576,10 +576,9 @@ in memory for 10 minutes.
   For an account with a TDLib session, `UpdatesService` skips its mtcute
   sessions entirely: a message may not be announced twice with different ids.
 
-### Diagnostic scripts
-`apps/api/scripts/tdlib-qr-poc.ts` and `tdlib-code-poc.ts` prove the bridge
-outside the runtime (`bun run tdlib:poc --account <id>`), including the
-QR + 2FA flow and the phone-code flow. They write no account data.
+The same bridge backs both onboarding and migration, so no separate proof
+scripts are kept: `POST /accounts/:id/tdlib/migrate` is the diagnostic path and
+is covered by the auth tests.
 
 ## 9. Phases
 

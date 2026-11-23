@@ -1,9 +1,7 @@
-import type { ApiProfile } from 'opentele2';
-
 /**
- * Pure helpers for the TDLib QR bridge POC (`scripts/tdlib-qr-poc.ts`).
+ * QR login token parsing and `setTdlibParameters` mapping.
  *
- * Nothing here talks to Telegram or TDLib: the script only needs an
+ * Nothing here talks to Telegram or TDLib: the auth service only needs an
  * `ApiProfile`, filesystem paths and the QR link string. Keeping the mapping
  * and parsing rules testable without the native addon is the point.
  */
@@ -14,62 +12,6 @@ export const QR_LOGIN_PREFIX = 'tg://login?token=';
 /** Telegram login tokens are short-lived bearer-like values, never huge. */
 const MIN_TOKEN_BYTES = 16;
 const MAX_TOKEN_BYTES = 512;
-
-/**
- * Subset of TDLib's `setTdlibParameters` accepted by `tdlib-native`.
- *
- * TDLib 1.8.70 has no `language_code` parameter anymore: the app language is a
- * client-side option there, so only `system_language_code` comes from the
- * opentele2 profile.
- */
-export interface TdlibParameters {
-  api_id: number;
-  api_hash: string;
-  device_model: string;
-  system_version: string;
-  application_version: string;
-  system_language_code: string;
-  database_directory: string;
-  files_directory: string;
-  use_file_database: boolean;
-  use_chat_info_database: boolean;
-  use_message_database: boolean;
-  use_secret_chats: boolean;
-}
-
-export interface TdlibDirectories {
-  databaseDirectory: string;
-  filesDirectory: string;
-}
-
-/**
- * Builds TDLib parameters from an opentele2 profile, so the TDLib client
- * presents the exact same official device/application identity as the mtcute
- * session it is bridged into.
- */
-export function buildTdlibParameters(
-  profile: ApiProfile,
-  dirs: TdlibDirectories,
-): TdlibParameters {
-  if (!profile.apiId || !profile.apiHash) {
-    throw new Error('TDLib parameters require a non-empty apiId/apiHash');
-  }
-
-  return {
-    api_id: profile.apiId,
-    api_hash: profile.apiHash,
-    device_model: profile.deviceModel,
-    system_version: profile.systemVersion,
-    application_version: profile.appVersion,
-    system_language_code: profile.systemLangCode,
-    database_directory: dirs.databaseDirectory,
-    files_directory: dirs.filesDirectory,
-    use_file_database: false,
-    use_chat_info_database: false,
-    use_message_database: false,
-    use_secret_chats: false,
-  };
-}
 
 /**
  * Decodes a base64url string (padding optional) and rejects anything that is

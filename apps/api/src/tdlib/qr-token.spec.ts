@@ -1,57 +1,14 @@
 import { Buffer } from 'node:buffer';
-import type { ApiProfile } from 'opentele2';
 import { describe, expect, it } from 'vitest';
 import {
-  buildTdlibParameters,
   decodeBase64Url,
   parseQrLoginToken,
   QR_LOGIN_PREFIX,
-} from './poc.js';
-
-const PROFILE: ApiProfile = {
-  apiId: 2040,
-  apiHash: 'b18441a1ff607e10a989891a5462e627',
-  deviceModel: 'Desktop',
-  systemVersion: 'Linux 6.8',
-  appVersion: '5.10.0 x64',
-  langCode: 'en',
-  systemLangCode: 'en-US',
-  langPack: 'tdesktop',
-};
-
-const DIRS = {
-  databaseDirectory: '/tmp/poc/db',
-  filesDirectory: '/tmp/poc/files',
-};
+} from './qr-token.js';
 
 /** 32-byte token, what Telegram actually puts into a QR link. */
 const TOKEN = Buffer.from(Array.from({ length: 32 }, (_, i) => i + 1));
 const TOKEN_B64 = TOKEN.toString('base64url');
-
-describe('buildTdlibParameters', () => {
-  it('maps the opentele2 profile onto TDLib device fields', () => {
-    expect(buildTdlibParameters(PROFILE, DIRS)).toEqual({
-      api_id: 2040,
-      api_hash: 'b18441a1ff607e10a989891a5462e627',
-      device_model: 'Desktop',
-      system_version: 'Linux 6.8',
-      application_version: '5.10.0 x64',
-      system_language_code: 'en-US',
-      database_directory: '/tmp/poc/db',
-      files_directory: '/tmp/poc/files',
-      use_file_database: false,
-      use_chat_info_database: false,
-      use_message_database: false,
-      use_secret_chats: false,
-    });
-  });
-
-  it('rejects a profile without credentials', () => {
-    expect(() =>
-      buildTdlibParameters({ ...PROFILE, apiHash: '' }, DIRS),
-    ).toThrow(/apiId\/apiHash/);
-  });
-});
 
 describe('decodeBase64Url', () => {
   it('decodes unpadded base64url', () => {

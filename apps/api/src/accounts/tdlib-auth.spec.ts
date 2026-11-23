@@ -10,7 +10,7 @@ import type {
 } from './tdlib-auth.client.js';
 import { mapTdlibError, TdlibAuthService } from './tdlib-auth.service.js';
 import type { TdlibAuthView } from './tdlib-auth.service.js';
-import { parseQrLoginToken } from '../tdlib/poc.js';
+import { parseQrLoginToken } from '../tdlib/qr-token.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 
 const USER = { id: 'user-1' } as unknown as UserModel;

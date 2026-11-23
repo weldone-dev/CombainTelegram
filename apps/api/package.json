@@ -21,7 +21,6 @@
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "dev": "nest start --watch",
-    "tdlib:poc": "bun scripts/tdlib-qr-poc.ts",
     "check-types": "tsc --noEmit -p tsconfig.build.json"
   },
   "dependencies": {

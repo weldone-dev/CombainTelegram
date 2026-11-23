@@ -16,7 +16,7 @@ import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import { ProxyTransportService } from '../telegram/proxy-transport.service.js';
 import { TdClientManagerService } from '../tdlib/td-client-manager.service.js';
 import type { TdlibDirectories } from '../tdlib/td-client-manager.service.js';
-import { parseQrLoginToken } from '../tdlib/poc.js';
+import { parseQrLoginToken } from '../tdlib/qr-token.js';
 import { apiError, conflict, notFound } from '../common/api-error.js';
 import {
   optionalString,
