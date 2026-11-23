@@ -194,6 +194,7 @@ export function loadAccounts(): AccountView[] | null {
     firstName: account.firstName,
     lastName: account.lastName ?? null,
     username: account.username ?? null,
+    phone: null,
     phoneMasked: null,
     isActive: account.isActive === true,
     createdAt: "",

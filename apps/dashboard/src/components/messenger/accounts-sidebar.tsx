@@ -93,8 +93,8 @@ export function AccountsSidebar({
                 </span>
                 <span className="block truncate text-[11px] text-zinc-500">
                   {account.username ? `@${account.username}` : ""}
-                  {account.username && account.phoneMasked ? " · " : ""}
-                  {account.phoneMasked ??
+                  {account.username && account.phone ? " · " : ""}
+                  {account.phone ??
                     (account.username ? "" : `ID ${account.tgUserId}`)}
                 </span>
                 <span className="block truncate text-[11px] text-zinc-600">

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { apiFetch, errorMessage } from "../../lib/api";
 import { accountAvatarUrl } from "../../lib/avatar";
 import { accountName, activeSession, sessionSummary } from "../../lib/format";
@@ -9,6 +9,7 @@ import type { AccountView, ProxyView } from "../../lib/types";
 import { Avatar } from "../avatar";
 import { EngineBadge } from "../engine-badge";
 import { SessionsModal } from "../messenger/sessions-modal";
+import { ProxyInfo } from "../proxy-info";
 import { useAppData } from "./app-data";
 import { TdlibAccountPanel } from "./tdlib-account-panel";
 
@@ -32,10 +33,25 @@ export function AccountsPage() {
   const [proxyList, setProxyList] = useState<ProxyView[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  // Proxy names are needed for the chip before the sessions modal is opened.
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<ProxyView[]>("/proxies", {})
+      .then((list) => {
+        if (!cancelled) setProxyList(list);
+      })
+      .catch(() => {
+        // The chip falls back to «Напрямую»; the modal loads the list itself.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const visible = accounts.filter((account) => {
     const needle = query.trim().toLowerCase();
     if (!needle) return true;
-    return [accountName(account), account.username, account.phoneMasked]
+    return [accountName(account), account.username, account.phone]
       .filter(Boolean)
       .some((value) => String(value).toLowerCase().includes(needle));
   });
@@ -162,12 +178,28 @@ export function AccountsPage() {
                       {active && <EngineBadge engine={active.engine} />}
                     </div>
                     <p className="truncate text-xs text-zinc-500">
-                      {account.username ? `@${account.username} · ` : ""}
-                      {account.phoneMasked ?? `ID ${account.tgUserId}`}
+                      {account.phone
+                        ? `${account.username ? `@${account.username} · ` : ""}${account.phone}`
+                        : account.username
+                          ? `@${account.username}`
+                          : `ID ${account.tgUserId}`}
                     </p>
                     <p className="truncate text-xs text-zinc-500">
                       {sessionSummary(account)}
                     </p>
+                    {active && (
+                      <div className="mt-1.5 flex">
+                        <ProxyInfo
+                          proxy={
+                            proxyList.find(
+                              (proxy) => proxy.id === active.proxyId,
+                            ) ?? null
+                          }
+                          assigned={Boolean(active.proxyId)}
+                          onActivate={() => void openSessions(account)}
+                        />
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex shrink-0 items-center gap-1.5">

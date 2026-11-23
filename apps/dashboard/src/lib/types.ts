@@ -33,12 +33,27 @@ export interface ProxyTestResult {
   latencyMs: number;
 }
 
+/** `POST /proxies/:id/check` — reachability test plus the exit node. */
+export interface ProxyCheckResult {
+  ok: boolean;
+  latencyMs: number;
+  exitIp?: string;
+  country?: string;
+  /** MTProto proxies hide the exit node from an HTTP probe. */
+  unsupported?: boolean;
+  error?: string;
+  checkedAt: string;
+}
+
 export interface AccountView {
   id: string;
   tgUserId: string;
   firstName: string;
   lastName: string | null;
   username: string | null;
+  /** Full number as stored on the account, e.g. `+79104881282`. */
+  phone: string | null;
+  /** Legacy masked form; kept in the payload but never rendered. */
   phoneMasked: string | null;
   isActive: boolean;
   createdAt: string;

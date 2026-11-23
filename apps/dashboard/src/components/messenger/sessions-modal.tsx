@@ -30,6 +30,7 @@ import type {
   SessionView,
 } from "../../lib/types";
 import { EngineBadge } from "../engine-badge";
+import { ProxyInfo } from "../proxy-info";
 
 type AddMethod = "qr" | "phone";
 type AddStep = "form" | "starting" | "qr" | "code" | "password" | "failed";
@@ -720,6 +721,10 @@ export function SessionsModal({
                 {current.sessions.map((session) => {
                   const isActive =
                     !session.revokedAt && session.id === activeId;
+                  const sessionProxy = session.proxyId
+                    ? (proxies.find((proxy) => proxy.id === session.proxyId) ??
+                      null)
+                    : null;
                   return (
                     <div
                       key={session.id}
@@ -753,7 +758,6 @@ export function SessionsModal({
                           <p className="truncate text-xs text-zinc-500">
                             {session.profile} ·{" "}
                             {platformLabel(session.platform)}
-                            {session.proxyId ? " · через прокси" : ""}
                           </p>
                         </div>
                       </div>
@@ -769,6 +773,21 @@ export function SessionsModal({
                               Через эту сессию идут чаты, история и realtime.
                             </p>
                           )}
+
+                          <div className="mt-2 flex items-center gap-1.5 text-xs text-zinc-400">
+                            <span className="truncate">
+                              Прокси:{" "}
+                              <span className="text-zinc-300">
+                                {sessionProxy?.name ??
+                                  (session.proxyId ? "недоступен" : "напрямую")}
+                              </span>
+                            </span>
+                            <ProxyInfo
+                              variant="icon"
+                              proxy={sessionProxy}
+                              assigned={Boolean(session.proxyId)}
+                            />
+                          </div>
 
                           <label className="mt-2 block text-xs text-zinc-400">
                             Прокси
