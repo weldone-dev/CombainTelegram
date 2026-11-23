@@ -134,6 +134,7 @@ function createHarness(
   account: Record<string, unknown> = {
     id: 'acc-1',
     userId: 'user-1',
+    tgUserId: 42n,
     cloudPasswordEncrypted: null,
     sessions: [],
   },
@@ -155,7 +156,16 @@ function createHarness(
 
   const prisma = {
     telegramAccount: {
-      findFirst: vi.fn(async () => account),
+      findFirst: vi.fn(
+        async (args?: { where?: { id?: string; userId?: string } }) => {
+          const where = args?.where ?? {};
+          if (where.id !== undefined && where.id !== account.id) return null;
+          if (where.userId !== undefined && where.userId !== account.userId) {
+            return null;
+          }
+          return account;
+        },
+      ),
       update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         Object.assign(account, data);
         return account;
@@ -432,6 +442,116 @@ describe('TdlibAuthService migration flow', () => {
       view.attemptId,
     );
     expect(waiting.needsPassword).toBeUndefined();
+  });
+});
+
+describe('TdlibAuthService add-session flow', () => {
+  it('attaches to the given account with a unique device id and its stored password', async () => {
+    const crypto = new SessionCryptoService({
+      sessionMasterKey: Buffer.alloc(32, 5),
+    } as never);
+    const envelope = crypto.serialize(
+      crypto.encrypt('stored-pass', 'cloud:acc-1'),
+    );
+    const { service, client, attach } = createHarness({
+      id: 'acc-1',
+      userId: 'user-1',
+      tgUserId: 42n,
+      cloudPasswordEncrypted: envelope,
+      sessions: [],
+    });
+
+    const starting = service.start(USER, {
+      method: 'phone',
+      phone: '+15551234567',
+      accountId: 'acc-1',
+    });
+    await flush();
+    client.emit({ _: 'authorizationStateWaitTdlibParameters' });
+    const view = await starting;
+
+    expect(view.status).toBe('awaiting_code');
+    await service.submitCode(USER, view.attemptId, '12345');
+    client.emit({ _: 'authorizationStateWaitPassword' });
+    await flush();
+
+    // The account's stored cloud password is submitted without a prompt.
+    expect(client.passwordChecks).toEqual(['stored-pass']);
+
+    client.emit({ _: 'authorizationStateReady' });
+    await flush();
+
+    const ready = await waitFor(
+      () => service.status(USER, view.attemptId),
+      (status) => status.status === 'ready',
+    );
+    expect(ready.status).toBe('ready');
+    expect(attach).toHaveBeenCalledTimes(1);
+    const call = attach.mock.calls[0][0] as {
+      accountId?: string;
+      deviceId: string;
+      label: string | null;
+      tdlibPath: string;
+    };
+    expect(call.accountId).toBe('acc-1');
+    expect(call.deviceId).toMatch(/^tdlib-[0-9a-f]{8}$/);
+    expect(call.deviceId).not.toBe('tdlib');
+    expect(call.label).toBe('TDLib');
+    expect(call.tdlibPath).toBe(`/sessions/${call.deviceId}`);
+  });
+
+  it('keeps awaiting_password when the stored password is wrong', async () => {
+    const crypto = new SessionCryptoService({
+      sessionMasterKey: Buffer.alloc(32, 5),
+    } as never);
+    const envelope = crypto.serialize(
+      crypto.encrypt('wrong-pass', 'cloud:acc-1'),
+    );
+    const { service, client } = createHarness({
+      id: 'acc-1',
+      userId: 'user-1',
+      tgUserId: 42n,
+      cloudPasswordEncrypted: envelope,
+      sessions: [],
+    });
+
+    const starting = service.start(USER, {
+      method: 'phone',
+      phone: '+15551234567',
+      accountId: 'acc-1',
+    });
+    await flush();
+    client.emit({ _: 'authorizationStateWaitTdlibParameters' });
+    const view = await starting;
+    await service.submitCode(USER, view.attemptId, '12345');
+
+    client.emit({ _: 'authorizationStateWaitPassword' });
+    await flush();
+
+    const waiting = await service.status(USER, view.attemptId);
+    expect(waiting.status).toBe('awaiting_password');
+    expect(waiting.needsPassword).toBe(true);
+    expect(waiting.error).toBe('TDLIB_PASSWORD_INVALID');
+  });
+
+  it('rejects an account the user does not own', async () => {
+    const { service } = createHarness({
+      id: 'acc-1',
+      userId: 'someone-else',
+      tgUserId: 42n,
+      cloudPasswordEncrypted: null,
+      sessions: [],
+    });
+
+    try {
+      await service.start(USER, {
+        method: 'qr',
+        accountId: 'acc-1',
+      });
+      throw new Error('expected ACCOUNT_NOT_FOUND');
+    } catch (error) {
+      expect(responseCode(error)).toBe('ACCOUNT_NOT_FOUND');
+    }
   });
 });
 

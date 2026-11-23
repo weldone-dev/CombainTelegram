@@ -97,4 +97,14 @@ export class AccountsController {
   ): Promise<AccountView> {
     return this.accounts.updateSession(user.id, id, sessionId, body);
   }
+
+  /** Pins a session as the account's transport; the UI does this explicitly. */
+  @Post(':id/sessions/:sessionId/activate')
+  activateSession(
+    @CurrentUser() user: UserModel,
+    @Param('id') id: string,
+    @Param('sessionId') sessionId: string,
+  ): Promise<AccountView> {
+    return this.accounts.activateSession(user.id, id, sessionId);
+  }
 }

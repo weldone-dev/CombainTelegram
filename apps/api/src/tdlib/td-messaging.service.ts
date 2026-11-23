@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { TelegramConfigService } from '../telegram/telegram.config.js';
 import { apiError, notFound } from '../common/api-error.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
+import { resolveActiveSession } from '../accounts/active-session.js';
 import type { ChatInfoView, ChatPeerView } from '../messaging/chat-info.js';
 import {
   canSendMessages,
@@ -1332,9 +1333,12 @@ export class TdMessagingService implements OnModuleDestroy {
    * Resolves the account's TDLib session (ownership-checked) and returns its
    * facade, or `null` when this account should use mtcute.
    *
-   * "Live" means a non-revoked session row with `engine = "tdlib"`; the native
-   * client is reopened from its encrypted database when needed. A closed
-   * TDLib folder is not a reason to lose the account's message history.
+   * Routing follows the account's active session: TDLib is used only when
+   * `resolveActiveSession` picks a live TDLib row. An explicit `sessionId` can
+   * narrow that to another live TDLib session of the same account, but it can
+   * never route an mtcute-active account to TDLib. The native client is
+   * reopened from its encrypted database when needed; a closed TDLib folder is
+   * not a reason to lose the account's message history.
    */
   async forAccount(
     userId: string,
@@ -1349,20 +1353,17 @@ export class TdMessagingService implements OnModuleDestroy {
     })) as (TelegramAccountModel & { sessions: TelegramSessionModel[] }) | null;
     if (!account) return null;
 
+    const active = resolveActiveSession(account);
+    if (!active || active.engine !== 'tdlib') return null;
+
     const live = account.sessions.filter(
       (row) => row.engine === 'tdlib' && !row.revokedAt,
     );
-    let session: TelegramSessionModel | undefined;
-    if (sessionId) {
-      session = live.find((row) => row.id === sessionId);
-    } else {
-      session = live
-        .slice()
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
-    }
-    if (!session) return null;
+    const requested = sessionId
+      ? live.find((row) => row.id === sessionId)
+      : undefined;
 
-    return this.contextFor(session);
+    return this.contextFor(requested ?? active);
   }
 
   private contextFor(

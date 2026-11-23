@@ -40,7 +40,13 @@ function fakeClient() {
   };
 }
 
-function createService(accounts: Array<{ id: string; sessions: SessionRow[] }>) {
+function createService(
+  accounts: Array<{
+    id: string;
+    activeSessionId?: string | null;
+    sessions: SessionRow[];
+  }>,
+) {
   const prisma = {
     telegramAccount: {
       findMany: vi.fn(async () => accounts),
@@ -94,6 +100,41 @@ describe('UpdatesService — TDLib session wins', () => {
     expect(clients.clientForSession).toHaveBeenCalledWith(
       expect.objectContaining({ id: 's-mtcute' }),
     );
+
+    await service.stopForUser('user-1');
+  });
+
+  it('subscribes only the pinned mtcute session when that is the active one', async () => {
+    const { service, clients } = createService([
+      {
+        id: 'acc-4',
+        activeSessionId: 's-pinned',
+        sessions: [session('s-pinned', 'mtcute'), session('s-td', 'tdlib')],
+      },
+    ]);
+
+    await service.startForUser('user-1');
+
+    expect(clients.clientForSession).toHaveBeenCalledTimes(1);
+    expect(clients.clientForSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 's-pinned' }),
+    );
+
+    await service.stopForUser('user-1');
+  });
+
+  it('skips mtcute when the account pinned its TDLib session', async () => {
+    const { service, clients } = createService([
+      {
+        id: 'acc-5',
+        activeSessionId: 's-td',
+        sessions: [session('s-mtcute', 'mtcute'), session('s-td', 'tdlib')],
+      },
+    ]);
+
+    await service.startForUser('user-1');
+
+    expect(clients.clientForSession).not.toHaveBeenCalled();
 
     await service.stopForUser('user-1');
   });

@@ -16,6 +16,7 @@ interface FakeAccountRow {
   username: string | null;
   deviceProfile: string;
   isActive: boolean;
+  activeSessionId?: string | null;
   phoneEncrypted?: Uint8Array | null;
   phoneNonce?: Uint8Array | null;
   phoneTag?: Uint8Array | null;
@@ -31,6 +32,7 @@ interface FakeSessionRow {
   label: string | null;
   platform: string;
   profile: string;
+  engine: string;
   dcId: number;
   apiId: number;
   keyVersion: number;
@@ -68,6 +70,22 @@ function createFakePrisma(): {
         const key = where.userId_tgUserId;
         const account = accounts.find(
           (row) => row.userId === key.userId && row.tgUserId === key.tgUserId,
+        );
+        if (!account) return null;
+        return {
+          ...account,
+          sessions: sessions.filter((row) => row.accountId === account.id),
+        };
+      },
+      findFirst: async ({
+        where,
+      }: {
+        where: { id?: string; userId?: string };
+      }) => {
+        const account = accounts.find(
+          (row) =>
+            (where.id === undefined || row.id === where.id) &&
+            (where.userId === undefined || row.userId === where.userId),
         );
         if (!account) return null;
         return {
@@ -137,6 +155,7 @@ function createFakePrisma(): {
           label: create.label ?? null,
           platform: create.platform ?? 'desktop',
           profile: create.profile ?? 'desktop',
+          engine: create.engine ?? 'mtcute',
           dcId: create.dcId ?? 2,
           apiId: create.apiId ?? 2040,
           keyVersion: create.keyVersion ?? 1,
@@ -312,6 +331,80 @@ describe('AccountSessionsService multi-session attach', () => {
       throw new Error('expected ACCOUNT_LIMIT');
     } catch (error) {
       expect(httpBody(error).code).toBe('ACCOUNT_LIMIT');
+    }
+  });
+
+  it('attaches an extra TDLib session to an existing account without activating it', async () => {
+    const { service, profiles, fake } = makeService();
+    const first = await service.attachSession(input(profiles));
+    fake.accounts[0].activeSessionId = fake.sessions[0].id;
+
+    const attached = await service.attachTdlibSession({
+      userId: 'user_1',
+      accountId: first.account.id,
+      deviceId: 'tdlib-1a2b3c4d',
+      label: 'TDLib',
+      tgUser: { id: 777n, firstName: 'Ann', lastName: 'Lee', username: 'ann' },
+      tdlibPath: '/sessions/tdlib-1a2b3c4d',
+      databaseKey: 'database-key',
+      apiId: 1234,
+      proxyId: null,
+    });
+
+    expect(attached.isNewAccount).toBe(false);
+    expect(attached.isNewSession).toBe(true);
+    expect(attached.account.id).toBe(first.account.id);
+    expect(fake.accounts).toHaveLength(1);
+    expect(fake.sessions).toHaveLength(2);
+    expect(attached.account.sessions.map((row) => row.deviceId).sort()).toEqual(
+      ['desktop-device-01', 'tdlib-1a2b3c4d'],
+    );
+    const tdlibRow = fake.sessions.find(
+      (row) => row.deviceId === 'tdlib-1a2b3c4d',
+    );
+    expect(tdlibRow?.engine).toBe('tdlib');
+    expect(tdlibRow?.label).toBe('TDLib');
+    // Activation is explicit; attaching never steals the active slot.
+    expect(fake.accounts[0].activeSessionId).toBe(fake.sessions[0].id);
+  });
+
+  it('refuses to attach a TDLib session to an account of another user', async () => {
+    const { service, profiles } = makeService();
+    const first = await service.attachSession(input(profiles));
+
+    try {
+      await service.attachTdlibSession({
+        userId: 'user_2',
+        accountId: first.account.id,
+        deviceId: 'tdlib-deadbeef',
+        tgUser: { id: 777n, firstName: 'Ann' },
+        tdlibPath: '/sessions/tdlib-deadbeef',
+        databaseKey: 'database-key',
+        apiId: 1234,
+      });
+      throw new Error('expected ACCOUNT_NOT_FOUND');
+    } catch (error) {
+      expect(httpBody(error).code).toBe('ACCOUNT_NOT_FOUND');
+    }
+  });
+
+  it('refuses to attach a different Telegram user to an existing account', async () => {
+    const { service, profiles } = makeService();
+    const first = await service.attachSession(input(profiles));
+
+    try {
+      await service.attachTdlibSession({
+        userId: 'user_1',
+        accountId: first.account.id,
+        deviceId: 'tdlib-feedface',
+        tgUser: { id: 888n, firstName: 'Bob' },
+        tdlibPath: '/sessions/tdlib-feedface',
+        databaseKey: 'database-key',
+        apiId: 1234,
+      });
+      throw new Error('expected ACCOUNT_MISMATCH');
+    } catch (error) {
+      expect(httpBody(error).code).toBe('ACCOUNT_MISMATCH');
     }
   });
 

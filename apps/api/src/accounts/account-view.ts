@@ -22,6 +22,8 @@ export interface AccountView {
   username: string | null;
   phoneMasked: string | null;
   isActive: boolean;
+  /** Pinned transport session, or `null` when the fallback order applies. */
+  activeSessionId: string | null;
   createdAt: string;
   lastUsedAt: string | null;
   deviceProfile: Record<string, unknown> | null;
@@ -56,6 +58,7 @@ export function serializeAccount(
     username: account.username,
     phoneMasked: phone ? maskPhone(phone) : null,
     isActive: account.isActive,
+    activeSessionId: account.activeSessionId ?? null,
     createdAt: account.createdAt.toISOString(),
     lastUsedAt: account.lastUsedAt?.toISOString() ?? null,
     deviceProfile: parseDeviceProfile(account.deviceProfile),

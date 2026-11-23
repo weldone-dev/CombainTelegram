@@ -162,6 +162,11 @@ Rules:
 - `(accountId, deviceId)` is unique: PC and phone are two rows/clients.
 - Each session may have its own `proxyId`; a proxied session never falls back to
   a direct connection (a disabled/missing proxy is an error, not a leak).
+- `TelegramAccount.activeSessionId` pins the session used as the account's
+  transport (engine and routing). `resolveActiveSession` falls back to a live
+  TDLib session, then the newest live mtcute session; deleting the pinned
+  session clears the column. Attaching a session never changes it: the UI calls
+  `POST /accounts/:id/sessions/:sessionId/activate`.
 - Deleting the last session deletes the account slot (`DELETE /accounts/:id/sessions/:sessionId`).
 
 ## 5. Session encryption
@@ -240,6 +245,8 @@ GET    /accounts/:id/sessions                      → Telegram authorizations
 GET    /accounts/:id/avatar                        → JPEG profile photo (404 if none)
 DELETE /accounts/:id/sessions/:sessionId?revoke=true
 PATCH  /accounts/:id/sessions/:sessionId           { proxyId?: string|null, label? }
+POST   /accounts/:id/sessions/:sessionId/activate  → pin the transport session
+
 ```
 
 Proxies (per local user; reusable, name is unique):
@@ -417,6 +424,7 @@ POST   /accounts/:id/activate                      → one active account per us
 DELETE /accounts/:id?revokeSession=true|false      → local detach by default
 GET    /accounts/:id/sessions                      → Telegram authorizations
 DELETE /accounts/:id/sessions/:sessionId?revoke=true
+POST   /accounts/:id/sessions/:sessionId/activate  → pin the transport session
 ```
 
 Swagger UI is public at `/docs`, the OpenAPI JSON at `/docs-json`; there is no
@@ -523,8 +531,11 @@ Never send session keys, auth keys, phone codes or passwords over WS.
 
 The working session is native TDLib (`tdlib-native` + prebuilt `libtdjson`),
 while mtcute remains available as the fallback engine. `TELEGRAM_ENGINE`
-(`auto` by default) decides: an account with a live `engine = "tdlib"` session
-is served by TDLib, everything else by mtcute. Every TDLib call is wrapped:
+(`auto` by default) decides: an account whose active session
+(`activeSessionId`, falling back to a live TDLib row) is `engine = "tdlib"` is
+served by TDLib, everything else by mtcute. Realtime follows the same split:
+`UpdatesService` binds mtcute sessions only for mtcute-active accounts and
+`TdUpdatesService` binds only the active TDLib session. Every TDLib call is wrapped:
 on error the request is logged (`tdlib.messaging.*`) and retried with mtcute,
 so a TDLib problem degrades instead of breaking the UI.
 
@@ -558,9 +569,12 @@ user can remove it in Telegram at any time. The phone-code path
 `777000` bridge is unreliable because Telegram often sends that code by SMS.
 
 `POST /accounts/:id/tdlib/migrate` runs the flow for an existing account
-(the QR is approved automatically). `POST /tdlib/auth/start` handles new
-accounts (`qr` or `phone`), with `/code` and `/password` steps. Attempts live
-in memory for 10 minutes.
+(the QR is approved automatically) and keeps the stable `deviceId = "tdlib"`.
+`POST /tdlib/auth/start` handles new accounts (`qr` or `phone`), with `/code`
+and `/password` steps; with an optional `accountId` it adds an extra TDLib
+session to that account under `tdlib-<8 hex>` (the account's stored cloud
+password is submitted automatically, and `activeSessionId` is untouched).
+Attempts live in memory for 10 minutes.
 
 ### Messaging and realtime
 - `TdChatRegistry` maps TDLib `chat_id` ↔ marked peer ids (user, `-group`,

@@ -3,6 +3,7 @@ import type { OnModuleDestroy } from '@nestjs/common';
 import type { TelegramClient } from '@mtcute/node';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ClientManagerService } from '../telegram/client-manager.service.js';
+import { resolveActiveSession } from '../accounts/active-session.js';
 import { toMessageView } from '../messaging/message-view.js';
 import { emitLog } from '../logs/log-sink.js';
 import { EventDeduplicator } from './dedupe.js';
@@ -116,22 +117,21 @@ export class UpdatesService implements OnModuleDestroy {
     });
 
     for (const account of accounts) {
-      // Once an account has a live TDLib session, history and message ids come
-      // from TDLib. mtcute updates for the same account would carry a different
-      // id space, so they are dropped entirely instead of racing the TDLib
-      // bridge (which emits the same events from `TdUpdatesService`).
-      const hasTdlib = account.sessions.some(
-        (session) => !session.revokedAt && session.engine === 'tdlib',
-      );
-      if (hasTdlib) {
+      // Realtime follows the active engine of the account. A TDLib-active
+      // account is served by `TdUpdatesService`; mtcute updates for the same
+      // account would carry a different id space, so they are dropped
+      // entirely instead of racing the TDLib bridge.
+      const active = resolveActiveSession(account);
+      if (!active || active.engine === 'tdlib') {
         if (!this.tdlibAccounts.has(account.id)) {
           this.tdlibAccounts.add(account.id);
           this.logger.debug(
-            `Skipping mtcute updates for account ${account.id}: it has a TDLib session`,
+            `Skipping mtcute updates for account ${account.id}: its active session is TDLib`,
           );
         }
         continue;
       }
+      this.tdlibAccounts.delete(account.id);
 
       for (const session of account.sessions) {
         if (session.revokedAt) continue;

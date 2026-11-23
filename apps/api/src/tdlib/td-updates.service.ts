@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { emitLog } from '../logs/log-sink.js';
 import { EventDeduplicator } from '../realtime/dedupe.js';
 import { RealtimeService } from '../realtime/realtime.service.js';
+import { resolveActiveSession } from '../accounts/active-session.js';
 import type { PeerLike } from '../messaging/message-view.js';
 import { TdChatRegistry } from './td-chat-registry.js';
 import { TdClientManagerService } from './td-client-manager.service.js';
@@ -126,33 +127,33 @@ export class TdUpdatesService implements OnModuleDestroy {
     })) as AccountWithSessions[];
 
     for (const account of accounts) {
-      for (const session of account.sessions) {
-        if (session.revokedAt) continue;
-        if (session.engine !== 'tdlib') continue;
-        if (userSessions.has(session.id)) continue;
+      // Only the account's active session feeds realtime. When the active
+      // session is mtcute, its updates come from `UpdatesService`.
+      const session = resolveActiveSession(account);
+      if (!session || session.engine !== 'tdlib') continue;
+      if (userSessions.has(session.id)) continue;
 
-        try {
-          const client = await this.tdClients.clientForSession(session);
-          const state = this.bind(userId, account.id, session, client);
-          userSessions.set(session.id, state);
-        } catch (error) {
-          const message = (error as Error).message;
-          this.logger.warn(
-            `Could not subscribe to the TDLib session ${session.id} of account ${account.id}: ${message}`,
-          );
-          emitLog({
-            level: 'warn',
-            source: 'realtime',
-            action: 'realtime.tdlib.subscribe',
-            message: `Could not subscribe to the TDLib session ${session.id} of account ${account.id}: ${message}`,
-            status: 'failed',
-            userId,
-            accountId: account.id,
-            sessionId: session.id,
-            proxyId: session.proxyId,
-            details: { error: message },
-          });
-        }
+      try {
+        const client = await this.tdClients.clientForSession(session);
+        const state = this.bind(userId, account.id, session, client);
+        userSessions.set(session.id, state);
+      } catch (error) {
+        const message = (error as Error).message;
+        this.logger.warn(
+          `Could not subscribe to the TDLib session ${session.id} of account ${account.id}: ${message}`,
+        );
+        emitLog({
+          level: 'warn',
+          source: 'realtime',
+          action: 'realtime.tdlib.subscribe',
+          message: `Could not subscribe to the TDLib session ${session.id} of account ${account.id}: ${message}`,
+          status: 'failed',
+          userId,
+          accountId: account.id,
+          sessionId: session.id,
+          proxyId: session.proxyId,
+          details: { error: message },
+        });
       }
     }
   }

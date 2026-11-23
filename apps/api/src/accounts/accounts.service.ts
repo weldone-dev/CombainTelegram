@@ -15,10 +15,12 @@ import { TdUpdatesService } from '../tdlib/td-updates.service.js';
 import { apiError, conflict, notFound } from '../common/api-error.js';
 import { optionalString, requireString } from '../common/validation.js';
 import { setLogProxyId } from '../logs/log-context.js';
+import { emitLog } from '../logs/log-sink.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
 import { downloadFileBuffer } from '../messaging/telegram-download.js';
 import type { AccountView } from './account-view.js';
 import { serializeAccount } from './account-view.js';
+import { newestMtcuteSession, resolveActiveSession } from './active-session.js';
 
 export interface TelegramSessionView {
   hash: string;
@@ -124,6 +126,60 @@ export class AccountsService {
   }
 
   /**
+   * Pins one of the account's sessions as its transport. The UI calls this
+   * explicitly: attaching a session never changes `activeSessionId` on its own.
+   * Realtime is rebound so the engine (mtcute vs TDLib) follows immediately.
+   */
+  async activateSession(
+    userId: string,
+    accountId: string,
+    sessionId: string,
+  ): Promise<AccountView> {
+    const account = await this.requireAccount(userId, accountId);
+    const session = account.sessions.find((row) => row.id === sessionId);
+    if (!session) {
+      throw notFound(
+        'SESSION_NOT_FOUND',
+        'This session does not belong to the account',
+      );
+    }
+    if (session.revokedAt) {
+      throw conflict(
+        'SESSION_REVOKED',
+        'This session was revoked and can no longer be activated',
+      );
+    }
+
+    await this.prisma.telegramAccount.update({
+      where: { id: account.id },
+      data: { activeSessionId: session.id },
+    });
+
+    emitLog({
+      level: 'info',
+      source: 'accounts',
+      action: 'accounts.session.activate',
+      message: `Activated session ${session.id} of account ${account.id}`,
+      status: 'ok',
+      userId,
+      accountId: account.id,
+      sessionId: session.id,
+      proxyId: session.proxyId,
+      details: { engine: session.engine, deviceId: session.deviceId },
+    });
+
+    // The active engine may have changed; both bridges re-read the accounts.
+    await this.refreshRealtime(userId);
+
+    const updated = await this.requireAccount(userId, accountId);
+    return serializeAccount(
+      updated,
+      updated.sessions,
+      this.decryptPhone(updated),
+    );
+  }
+
+  /**
    * Local detach is the default. `revokeSession=true` calls `auth.logOut` on
    * every session first, which truly terminates them on Telegram.
    */
@@ -179,11 +235,7 @@ export class AccountsService {
     accountId: string,
   ): Promise<TelegramSessionView[]> {
     const account = await this.requireAccount(userId, accountId);
-    const mtcuteSessions = account.sessions.filter(
-      (row) => row.engine !== 'tdlib',
-    );
-    const session =
-      mtcuteSessions.find((row) => !row.revokedAt) ?? mtcuteSessions[0];
+    const session = newestMtcuteSession(account);
     if (!session) {
       throw conflict(
         'NO_SESSIONS',
@@ -244,11 +296,13 @@ export class AccountsService {
     if (revoke) {
       if (session.engine === 'tdlib') {
         await this.revokeTdlibSession(session);
+        await this.clearActiveSession(account, sessionId);
         await this.prisma.telegramSession.delete({ where: { id: sessionId } });
         const left = account.sessions.length - 1;
         if (left <= 0) {
           await this.prisma.telegramAccount.delete({ where: { id: account.id } });
         }
+        await this.refreshRealtime(userId);
         return { removed: true, revoked: true, accountRemoved: left <= 0 };
       }
       try {
@@ -274,6 +328,7 @@ export class AccountsService {
     } else {
       await this.clients.closeSession(sessionId);
     }
+    await this.clearActiveSession(account, sessionId);
     await this.prisma.telegramSession.delete({ where: { id: sessionId } });
 
     const remaining = account.sessions.length - 1;
@@ -281,6 +336,7 @@ export class AccountsService {
       await this.prisma.telegramAccount.delete({ where: { id: account.id } });
     }
 
+    await this.refreshRealtime(userId);
     return { removed: true, revoked: revoke, accountRemoved: remaining <= 0 };
   }
 
@@ -348,9 +404,12 @@ export class AccountsService {
    * Resolves the account (owned by `userId`) and the session to talk to
    * Telegram with, then opens that session's client.
    *
-   * `sessionId` is optional: without it the account's most recently created
-   * live session is used (desktop vs phone is an explicit choice otherwise).
-   * Both the session and the account are ownership-checked here.
+   * `sessionId` is optional: without it the account's active session is used
+   * (`resolveActiveSession`: pinned id, then live TDLib, then the newest live
+   * mtcute session). This method always returns an mtcute client, so when the
+   * active session belongs to TDLib it falls back to the newest mtcute session
+   * and TDLib-only accounts raise `NO_SESSIONS`. Both the session and the
+   * account are ownership-checked here.
    */
   async resolveSession(
     userId: string,
@@ -376,15 +435,14 @@ export class AccountsService {
       }
     } else {
       // Only mtcute sessions can open an mtcute client; TDLib rows are used
-      // by TdClientManagerService and must never be picked here.
-      const mtcuteSessions = account.sessions.filter(
-        (row) => row.engine !== 'tdlib',
-      );
-      const live = mtcuteSessions.filter((row) => !row.revokedAt);
-      const candidates = live.length > 0 ? live : mtcuteSessions;
-      session = candidates
-        .slice()
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+      // by TdClientManagerService and must never be picked here. When the
+      // active session is TDLib, keep the rest of the API working through the
+      // newest mtcute session.
+      const active = resolveActiveSession(account);
+      session =
+        active && active.engine !== 'tdlib'
+          ? active
+          : newestMtcuteSession(account);
       if (!session) {
         throw conflict(
           'NO_SESSIONS',
@@ -465,6 +523,24 @@ export class AccountsService {
       if (oldest === undefined) break;
       this.avatars.delete(oldest);
     }
+  }
+
+  /** Deleting the pinned session unpins it; the fallback order takes over. */
+  private async clearActiveSession(
+    account: AccountWithSessions,
+    sessionId: string,
+  ): Promise<void> {
+    if (account.activeSessionId !== sessionId) return;
+    await this.prisma.telegramAccount.update({
+      where: { id: account.id },
+      data: { activeSessionId: null },
+    });
+  }
+
+  /** Rebinds both realtime bridges after the active engine may have changed. */
+  private async refreshRealtime(userId: string): Promise<void> {
+    await this.updates?.reconnectForUser(userId);
+    await this.tdUpdates?.reconnectForUser(userId);
   }
 
   private async requireAccount(

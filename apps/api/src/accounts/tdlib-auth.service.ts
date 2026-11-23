@@ -1,6 +1,6 @@
 import { HttpException, Injectable, Logger, Optional } from '@nestjs/common';
 import type { OnModuleDestroy } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import type { TelegramClient } from '@mtcute/node';
 import type {
@@ -43,6 +43,11 @@ const MAX_PASSWORD_ATTEMPTS = 3;
 /** One TDLib session per account: a re-migration replaces it. */
 const TDLIB_DEVICE_ID = 'tdlib';
 
+/** Device id of an extra TDLib session added to an existing account. */
+function newTdlibDeviceId(): string {
+  return `tdlib-${randomBytes(4).toString('hex')}`;
+}
+
 export type TdlibAuthStatus =
   | 'starting'
   | 'qr_pending'
@@ -68,6 +73,8 @@ export interface TdlibStartDto {
   phone?: unknown;
   proxyId?: unknown;
   label?: unknown;
+  /** Attach the new TDLib session to this existing account. */
+  accountId?: unknown;
 }
 
 export interface TdlibMigrateDto {
@@ -191,6 +198,8 @@ interface TdlibAttempt {
   phone: string | null;
   label: string | null;
   proxyId: string | null;
+  /** Session row key: stable `tdlib` for new/migrated accounts, unique when adding. */
+  deviceId: string;
   client: TdlibAuthClient;
   dirs: TdlibDirectories;
   databaseKey: string;
@@ -348,10 +357,25 @@ export class TdlibAuthService implements OnModuleDestroy {
       );
     }
     const phone = method === 'phone' ? requirePhone(body.phone) : null;
-    const label = optionalString(body.label, 'label', { max: 64 }) ?? null;
     const proxyId =
       optionalString(body.proxyId, 'proxyId', { max: 64 }) ?? null;
     await this.assertProxy(user.id, proxyId);
+
+    let label = optionalString(body.label, 'label', { max: 64 }) ?? null;
+    let accountId: string | undefined;
+    let storedPassword: string | undefined;
+
+    const rawAccountId = optionalString(body.accountId, 'accountId', {
+      max: 64,
+    });
+    if (rawAccountId) {
+      // Second session of an account the user already has. The account stays
+      // exactly as it is (sessions, engine, proxy) until the new row lands.
+      const account = await this.requireAccount(user.id, rawAccountId);
+      accountId = account.id;
+      label = label ?? 'TDLib';
+      storedPassword = this.decryptCloudPassword(account);
+    }
 
     return this.startAttempt({
       userId: user.id,
@@ -360,6 +384,11 @@ export class TdlibAuthService implements OnModuleDestroy {
       phone,
       label,
       proxyId,
+      ...(accountId ? { accountId } : {}),
+      ...(storedPassword !== undefined ? { storedPassword } : {}),
+      // A unique device id keeps the new session separate from a migrated
+      // `tdlib` row and from previous add-session attempts.
+      ...(accountId ? { deviceId: newTdlibDeviceId() } : {}),
     });
   }
 
@@ -486,6 +515,7 @@ export class TdlibAuthService implements OnModuleDestroy {
     accountId?: string;
     approver?: TelegramClient;
     storedPassword?: string;
+    deviceId?: string;
   }): Promise<TdlibAuthView> {
     const id = randomUUID();
     const dirs = this.tdClients.temporaryDirectories(id);
@@ -522,6 +552,7 @@ export class TdlibAuthService implements OnModuleDestroy {
       phone: input.phone,
       label: input.label,
       proxyId: input.proxyId,
+      deviceId: input.deviceId ?? TDLIB_DEVICE_ID,
       client,
       dirs,
       databaseKey,
@@ -805,12 +836,13 @@ export class TdlibAuthService implements OnModuleDestroy {
       // previous TDLib session instead of stacking new rows (and folders).
       attempt.adoptedPath = await this.tdClients.adoptDirectory(
         attempt.dirs,
-        TDLIB_DEVICE_ID,
+        attempt.deviceId,
       );
 
       const attached = await this.sessions.attachTdlibSession({
         userId: attempt.userId,
-        deviceId: TDLIB_DEVICE_ID,
+        deviceId: attempt.deviceId,
+        ...(attempt.accountId ? { accountId: attempt.accountId } : {}),
         label: attempt.label,
         tgUser: {
           id: me.id,

@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import type { ResolvedProfile } from '../telegram/client-profile.service.js';
 import { TelegramConfigService } from '../telegram/telegram.config.js';
-import { apiError, notFound } from '../common/api-error.js';
+import { apiError, conflict, notFound } from '../common/api-error.js';
 import { emitLog } from '../logs/log-sink.js';
 import { UpdatesService } from '../realtime/updates.service.js';
 import { TdUpdatesService } from '../tdlib/td-updates.service.js';
@@ -53,6 +53,11 @@ export interface AttachTdlibSessionInput {
   label?: string | null;
   tgUser: TelegramUserInfo;
   phone?: string | null;
+  /**
+   * Attach to this existing account instead of upserting by `tgUserId` (used
+   * when a second TDLib session is added to an account the user already has).
+   */
+  accountId?: string;
   /** Permanent folder of the TDLib database (already moved out of the attempt). */
   tdlibPath: string;
   /** Raw `database_encryption_key` of that folder; sealed before storage. */
@@ -291,10 +296,26 @@ export class AccountSessionsService {
       if (!proxy) throw notFound('PROXY_NOT_FOUND', 'Proxy not found');
     }
 
-    const existing = (await this.prisma.telegramAccount.findUnique({
-      where: { userId_tgUserId: { userId: input.userId, tgUserId } },
-      include: { sessions: true },
-    })) as AccountWithSessions | null;
+    const existing = input.accountId
+      ? ((await this.prisma.telegramAccount.findFirst({
+          where: { id: input.accountId, userId: input.userId },
+          include: { sessions: true },
+        })) as AccountWithSessions | null)
+      : ((await this.prisma.telegramAccount.findUnique({
+          where: { userId_tgUserId: { userId: input.userId, tgUserId } },
+          include: { sessions: true },
+        })) as AccountWithSessions | null);
+
+    if (input.accountId && !existing) {
+      throw notFound('ACCOUNT_NOT_FOUND', 'Telegram account not found');
+    }
+    // Adding a session must not move another Telegram user into this account.
+    if (existing && existing.tgUserId !== tgUserId) {
+      throw conflict(
+        'ACCOUNT_MISMATCH',
+        'This Telegram user does not match the account',
+      );
+    }
 
     let account: TelegramAccountModel;
     let isNewAccount = false;
@@ -307,6 +328,18 @@ export class AccountSessionsService {
           firstName: input.tgUser.firstName,
           lastName: input.tgUser.lastName ?? null,
           username: input.tgUser.username ?? null,
+          // Adding a session to an existing account keeps its device profile;
+          // a plain TDLib upsert still refreshes it (old behaviour).
+          ...(input.accountId
+            ? {}
+            : {
+                deviceProfile: JSON.stringify({
+                  key: 'android',
+                  platform: 'android',
+                  engine: 'tdlib',
+                  apiId: input.apiId,
+                }),
+              }),
           lastUsedAt: now,
         },
       });

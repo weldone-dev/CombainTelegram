@@ -259,6 +259,11 @@ The mtcute/Desktop session is not logged out. That keeps an escape hatch and
 avoids signing the user out of Telegram Desktop; it can be removed manually in
 Telegram's Devices menu.
 
+An extra TDLib session can be added to an existing account instead of a new
+one: `POST /tdlib/auth/start` accepts `accountId`, attaches with a unique
+`deviceId = "tdlib-<hex>"`, and does not change `activeSessionId` (activation
+is an explicit `POST /accounts/:id/sessions/:sessionId/activate`).
+
 The phone-code path (`setAuthenticationPhoneNumber`) is implemented for new
 accounts. Forwarding the code from the `777000` service chat proved unreliable:
 Telegram sends that code by SMS, so QR is the primary flow.
