@@ -58,6 +58,8 @@ import {
 
 /** Dialogs handled per `read-all` call, mirroring the mtcute cap. */
 const MAX_READ_ALL_DIALOGS = 200;
+/** How long a send waits for TDLib to replace the temporary message id. */
+const SEND_WAIT_TIMEOUT_MS = 30_000;
 const READ_ALL_BATCH_SIZE = 10;
 
 /** Per-message download payload handed back to `MessagingService` for caching. */
@@ -819,10 +821,42 @@ export class TdSessionMessenger implements TdMessenger {
     return { _: 'formattedText' as const, text, entities: [] };
   }
 
+  /**
+   * TDLib returns a message with a temporary id and `sending_state` while the
+   * send is in flight; the real server id arrives with
+   * `updateMessageSendSucceeded`. Editing/deleting the temp id later fails, so
+   * the response must carry the final message.
+   */
+  private async awaitSent(raw: message): Promise<message> {
+    if (!raw.sending_state) return raw;
+    const tempId = raw.id;
+    return new Promise<message>((resolve) => {
+      const finish = (value: message): void => {
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(raw), SEND_WAIT_TIMEOUT_MS);
+      const unsubscribe = this.client.updates.subscribe((update) => {
+        if (update._ === 'updateMessageSendSucceeded') {
+          if (update.old_message_id === tempId) finish(update.message);
+          return;
+        }
+        if (
+          update._ === 'updateMessageSendFailed' &&
+          update.old_message_id === tempId
+        ) {
+          finish(raw);
+        }
+      });
+    });
+  }
+
   private async sentMessage(
     chatId: number,
-    raw: message,
+    rawMessage: message,
   ): Promise<MessageView> {
+    const raw = await this.awaitSent(rawMessage);
     const entry = await this.chatFor(chatId).catch(() => null);
     if (!entry) {
       // The message still maps without chat extras.
