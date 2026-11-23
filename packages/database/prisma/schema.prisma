@@ -78,6 +78,8 @@ model TelegramAccount {
   cloudPasswordTag       Bytes?
   deviceProfile  String           @default("{}")
   isActive       Boolean          @default(false)
+  /// Session the app uses as the account's transport (engine + routing).
+  activeSessionId String?
   lastUsedAt     DateTime?
   createdAt      DateTime         @default(now())
   sessions       TelegramSession[]
