@@ -124,11 +124,7 @@ export class BotRunnerService implements OnModuleInit, OnModuleDestroy {
         for (const update of updates) {
           if (signal.aborted) break;
           offset = Math.max(offset, update.update_id + 1);
-          const message = update.message;
-          if (!message || !message.text) continue;
-          if (message.chat.type !== 'private') continue;
-          if (message.from?.is_bot) continue;
-          await this.handle(bot, api, message, message.text);
+          await this.handleUpdate(bot, api, update);
         }
         if (updates.length > 0) {
           await this.bots.setPolling(bot.id, {
@@ -158,6 +154,19 @@ export class BotRunnerService implements OnModuleInit, OnModuleDestroy {
         );
       }
     }
+  }
+
+  /** Handles one Bot API update; split out of the polling loop for tests. */
+  async handleUpdate(
+    bot: TelegramBotModel,
+    api: TelegramBotApi,
+    update: BotApiUpdate,
+  ): Promise<void> {
+    const message = update.message;
+    if (!message || !message.text) return;
+    if (message.chat.type !== 'private') return;
+    if (message.from?.is_bot) return;
+    await this.handle(bot, api, message, message.text);
   }
 
   private async handle(
