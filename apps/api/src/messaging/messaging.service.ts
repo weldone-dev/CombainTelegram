@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import {
   InputMedia,
   SearchFilters,
@@ -13,6 +13,9 @@ import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
 import { raiseTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
+import { emitLog } from '../logs/log-sink.js';
+import { TdMessagingService } from '../tdlib/td-messaging.service.js';
+import type { TdMessenger } from '../tdlib/td-messaging.service.js';
 import {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_THUMB_BYTES,
@@ -355,7 +358,58 @@ export class MessagingService {
   /** Sum of `data.byteLength` over `downloads`, kept in sync with every write. */
   private downloadBytes = 0;
 
-  constructor(private readonly accounts: AccountsService) {}
+  constructor(
+    private readonly accounts: AccountsService,
+    @Optional() private readonly td?: TdMessagingService,
+  ) {}
+
+  /**
+   * TDLib facade for this request, or `null` when mtcute should handle it.
+   *
+   * The engine switch (`TELEGRAM_ENGINE`) and the "account owns a live TDLib
+   * session" check live in `TdMessagingService`. Opening a client can fail;
+   * that is logged and treated as "no TDLib", never as a request failure.
+   */
+  private async tdFor(
+    userId: string,
+    accountId: string,
+    sessionId?: string,
+    action = 'resolve',
+  ): Promise<TdMessenger | null> {
+    if (!this.td) return null;
+    try {
+      return await this.td.forAccount(userId, accountId, sessionId);
+    } catch (error) {
+      this.logTdFailure(action, { userId, accountId, sessionId }, error);
+      return null;
+    }
+  }
+
+  /** Structured log line for a TDLib failure before the mtcute fallback. */
+  private logTdFailure(
+    action: string,
+    context: {
+      userId?: string;
+      accountId?: string;
+      sessionId?: string;
+      chatId?: number;
+    },
+    error: unknown,
+  ): void {
+    emitLog({
+      level: 'warn',
+      source: 'messaging',
+      action: `tdlib.messaging.${action}`,
+      message: `TDLib ${action} failed, using mtcute: ${(error as Error)?.message ?? 'unknown error'}`,
+      status: 'failed',
+      userId: context.userId,
+      accountId: context.accountId,
+      sessionId: context.sessionId,
+      chatId: context.chatId,
+      errorCode: 'TDLIB_MESSAGING_FAILED',
+      details: { error: (error as Error)?.message ?? String(error) },
+    });
+  }
 
   private pruneAvatars(now: number): void {
     for (const [key, entry] of this.avatars) {
@@ -416,6 +470,14 @@ export class MessagingService {
     const limit = parseLimit(query.limit);
     const folderId = parseFolderId(query.folderId);
     const archived = parseOptionalBoolean(query.archived, 'archived');
+    const td = await this.tdFor(userId, accountId, sessionId, 'listChats');
+    if (td) {
+      try {
+        return await td.listChats({ limit, folderId, archived });
+      } catch (error) {
+        this.logTdFailure('listChats', { userId, accountId, sessionId }, error);
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -467,6 +529,18 @@ export class MessagingService {
   ): Promise<ChatPeerView> {
     const chatId = parseChatId(rawChatId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
+    const td = await this.tdFor(userId, accountId, sessionId, 'getChat');
+    if (td) {
+      try {
+        return await td.getChat(chatId);
+      } catch (error) {
+        this.logTdFailure(
+          'getChat',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -502,6 +576,23 @@ export class MessagingService {
   ): Promise<ChatInfoView> {
     const chatId = parseChatId(rawChatId);
     const sessionId = parseOptionalSessionId(sessionIdParam);
+    const tdInfo = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'getChatInfo',
+    );
+    if (tdInfo) {
+      try {
+        return await tdInfo.getChatInfo(chatId);
+      } catch (error) {
+        this.logTdFailure(
+          'getChatInfo',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -658,6 +749,26 @@ export class MessagingService {
     );
 
     const key = `${userId}:${accountId}:${chatId}`;
+    const td = await this.tdFor(userId, accountId, sessionId, 'chatAvatar');
+    if (td) {
+      const cachedTd = this.avatars.get(key);
+      if (cachedTd && Date.now() - cachedTd.at < AVATAR_TTL_MS) {
+        return cachedTd.data
+          ? { data: cachedTd.data, mime: 'image/jpeg' }
+          : null;
+      }
+      try {
+        const avatar = await td.chatAvatar(chatId);
+        this.setAvatar(key, avatar?.data ?? null);
+        return avatar;
+      } catch (error) {
+        this.logTdFailure(
+          'chatAvatar',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const cached = this.avatars.get(key);
     if (cached && Date.now() - cached.at < AVATAR_TTL_MS) {
       return cached.data ? { data: cached.data, mime: 'image/jpeg' } : null;
@@ -719,6 +830,18 @@ export class MessagingService {
     const offsetId = parseOffsetId(query.offsetId);
     const newerThanId = parseOffsetId(query.newerThanId);
     const sessionId = parseOptionalSessionId(query.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'listMessages');
+    if (td) {
+      try {
+        return await td.listMessages(chatId, { limit, offsetId, newerThanId });
+      } catch (error) {
+        this.logTdFailure(
+          'listMessages',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -882,11 +1005,9 @@ export class MessagingService {
     }
 
     try {
-      const message: Message = await client.sendText(
-        discussion.chat.id,
-        text,
-        { replyTo: discussion.id },
-      );
+      const message: Message = await client.sendText(discussion.chat.id, text, {
+        replyTo: discussion.id,
+      });
       return toMessageView(message);
     } catch (error) {
       raiseTelegramError(error);
@@ -903,6 +1024,18 @@ export class MessagingService {
     const text = parseMessageText(body.text);
     const replyToId = parseOptionalMessageId(body.replyToId);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendMessage');
+    if (td) {
+      try {
+        return await td.sendMessage(chatId, { text, replyToId });
+      } catch (error) {
+        this.logTdFailure(
+          'sendMessage',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -949,14 +1082,33 @@ export class MessagingService {
         : 'application/octet-stream';
     const kind = mediaKindForMime(mimeType);
 
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendMedia');
+    if (td) {
+      try {
+        return await td.sendMedia(chatId, {
+          buffer: input.buffer,
+          fileName,
+          mimeType,
+          size,
+          caption,
+          replyToId,
+        });
+      } catch (error) {
+        this.logTdFailure(
+          'sendMedia',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
+
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
       sessionId,
     );
 
-    const sendOptions =
-      replyToId !== undefined ? { replyTo: replyToId } : {};
+    const sendOptions = replyToId !== undefined ? { replyTo: replyToId } : {};
 
     try {
       const media =
@@ -1075,6 +1227,36 @@ export class MessagingService {
       typeof filenameParam === 'string' && filenameParam.trim()
         ? filenameParam.trim()
         : null;
+
+    const td = await this.tdFor(userId, accountId, sessionId, 'downloadMedia');
+    if (td) {
+      const tdCacheKey = wantThumb ? thumbKey : cacheKey;
+      const tdCached = this.cachedDownload(tdCacheKey);
+      if (tdCached) return this.toDownloadView(tdCached, requestedName);
+
+      try {
+        const payload = await td.downloadMedia(chatId, messageId, {
+          thumb: wantThumb,
+          maxBytes: MAX_MEDIA_BYTES,
+        });
+        const entry = {
+          data: payload.data,
+          mimeType: payload.mimeType,
+          fileName: payload.fileName,
+          inline: payload.inline,
+          at: Date.now(),
+          ...(payload.thumb ? { ttlMs: MEDIA_THUMB_CACHE_TTL_MS } : {}),
+        };
+        this.rememberDownload(tdCacheKey, entry);
+        return this.toDownloadView(entry, requestedName);
+      } catch (error) {
+        this.logTdFailure(
+          'downloadMedia',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
 
     if (!wantThumb) {
       const cached = this.cachedDownload(cacheKey);
@@ -1234,6 +1416,18 @@ export class MessagingService {
     const messageId = parseMessageId(rawMessageId);
     const emoji = parseReactionEmoji(body.emoji);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendReaction');
+    if (td) {
+      try {
+        return await td.sendReaction(chatId, messageId, emoji ?? null);
+      } catch (error) {
+        this.logTdFailure(
+          'sendReaction',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1241,7 +1435,11 @@ export class MessagingService {
     );
 
     try {
-      await client.sendReaction({ chatId, message: messageId, emoji: emoji ?? null });
+      await client.sendReaction({
+        chatId,
+        message: messageId,
+        emoji: emoji ?? null,
+      });
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -1267,6 +1465,18 @@ export class MessagingService {
     const messageId = parseMessageId(rawMessageId);
     const options = parsePollOptions(body.options);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'votePoll');
+    if (td) {
+      try {
+        return await td.votePoll(chatId, messageId, options);
+      } catch (error) {
+        this.logTdFailure(
+          'votePoll',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1318,7 +1528,10 @@ export class MessagingService {
     }
     const text = message.text?.trim();
     if (!text) {
-      throw apiError('VALIDATION_ERROR', 'This message has no text to translate');
+      throw apiError(
+        'VALIDATION_ERROR',
+        'This message has no text to translate',
+      );
     }
 
     try {
@@ -1376,6 +1589,23 @@ export class MessagingService {
     const fromChatId = parseChatId(body.fromChatId, 'fromChatId');
     const messageIds = parseMessageIds(body.messageIds);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(
+      userId,
+      accountId,
+      sessionId,
+      'forwardMessages',
+    );
+    if (td) {
+      try {
+        return await td.forwardMessages(chatId, { fromChatId, messageIds });
+      } catch (error) {
+        this.logTdFailure(
+          'forwardMessages',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1410,6 +1640,22 @@ export class MessagingService {
     const limit = parseLimit(query.limit);
     const offsetId = parseOffsetId(query.offsetId);
     const sessionId = parseOptionalSessionId(query.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'searchMessages');
+    if (td) {
+      try {
+        return await td.searchMessages(chatId, {
+          q: text,
+          limit,
+          offsetId,
+        });
+      } catch (error) {
+        this.logTdFailure(
+          'searchMessages',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1445,6 +1691,18 @@ export class MessagingService {
     const text = parseSearchQuery(query.q);
     const limit = parseLimit(query.limit);
     const sessionId = parseOptionalSessionId(query.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'searchGlobal');
+    if (td) {
+      try {
+        return await td.searchGlobal({ q: text, limit });
+      } catch (error) {
+        this.logTdFailure(
+          'searchGlobal',
+          { userId, accountId, sessionId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1512,6 +1770,18 @@ export class MessagingService {
     const messageId = parseMessageId(rawMessageId);
     const text = parseMessageText(body.text);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'editMessage');
+    if (td) {
+      try {
+        return await td.editMessage(chatId, messageId, text);
+      } catch (error) {
+        this.logTdFailure(
+          'editMessage',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1546,6 +1816,18 @@ export class MessagingService {
     const messageId = parseMessageId(rawMessageId);
     const { revoke } = parseDeleteMessageOptions(query);
     const sessionId = parseOptionalSessionId(query.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'deleteMessage');
+    if (td) {
+      try {
+        return await td.deleteMessage(chatId, messageId, revoke);
+      } catch (error) {
+        this.logTdFailure(
+          'deleteMessage',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1572,6 +1854,18 @@ export class MessagingService {
         ? undefined
         : parseMessageId(body.maxId);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'markRead');
+    if (td) {
+      try {
+        return await td.markRead(chatId, maxId);
+      } catch (error) {
+        this.logTdFailure(
+          'markRead',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1717,6 +2011,18 @@ export class MessagingService {
     body: { sessionId?: unknown } = {},
   ): Promise<ReadAllView> {
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'markAllRead');
+    if (td) {
+      try {
+        return await td.markAllRead();
+      } catch (error) {
+        this.logTdFailure(
+          'markAllRead',
+          { userId, accountId, sessionId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1770,6 +2076,18 @@ export class MessagingService {
     sessionIdParam?: unknown,
   ): Promise<FoldersView> {
     const sessionId = parseOptionalSessionId(sessionIdParam);
+    const td = await this.tdFor(userId, accountId, sessionId, 'listFolders');
+    if (td) {
+      try {
+        return { folders: await td.listFolders() };
+      } catch (error) {
+        this.logTdFailure(
+          'listFolders',
+          { userId, accountId, sessionId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -1871,6 +2189,18 @@ export class MessagingService {
     const chatId = parseChatId(rawChatId);
     const status = parseTypingStatus(body.status);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendTyping');
+    if (td) {
+      try {
+        return await td.sendTyping(chatId, status);
+      } catch (error) {
+        this.logTdFailure(
+          'sendTyping',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
