@@ -361,6 +361,32 @@ export class TdSessionMessenger implements TdMessenger {
   }
 
   /** Maps a batch and records chat extras used by `ChatView`. */
+  /**
+   * TDLib returns only locally cached messages and fills the cache in the
+   * background, so a cold chat can answer with one message for a `limit` of 20.
+   * Retrying briefly yields the full page instead of a one-message transcript.
+   */
+  private async historyPage(
+    chatId: number,
+    fromMessageId: number,
+    limit: number,
+  ): Promise<message[]> {
+    let best: message[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const result = await this.client.api.getChatHistory({
+        chat_id: chatId,
+        from_message_id: fromMessageId,
+        offset: 0,
+        limit,
+      });
+      const batch = result.messages ?? [];
+      if (batch.length > best.length) best = batch;
+      if (best.length >= limit) break;
+      await new Promise((resolve) => setTimeout(resolve, 120 * (attempt + 1)));
+    }
+    return best;
+  }
+
   private async mapMessages(
     entry: chat,
     raws: message[],
@@ -604,13 +630,12 @@ export class TdSessionMessenger implements TdMessenger {
     }
 
     const offsetId = query.offsetId;
-    const result = await this.client.api.getChatHistory({
-      chat_id: chatId,
-      from_message_id: offsetId ?? 0,
-      offset: 0,
-      limit: offsetId ? query.limit + 1 : query.limit,
-    });
-    const raws = (result.messages ?? [])
+    const result = await this.historyPage(
+      chatId,
+      offsetId ?? 0,
+      offsetId ? query.limit + 1 : query.limit,
+    );
+    const raws = result
       .filter((value) => (offsetId ? value.id < offsetId : true))
       .slice(0, query.limit);
 
