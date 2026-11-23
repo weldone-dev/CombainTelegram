@@ -29,6 +29,7 @@
         "rxjs": "^7.8.1",
         "socket.io": "^4.8.4",
         "tar": "^7.5.23",
+        "tdlib-native": "^5.0.1",
         "web-push": "^4.0.0",
       },
       "devDependencies": {
@@ -90,6 +91,7 @@
   "trustedDependencies": [
     "better-sqlite3",
     "sharp",
+    "tdlib-native",
   ],
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.3.0", "", {}, "sha512-U4+70Pc5ZS9osnCBCE5Jha/ciHM+Yp+CNMNC/7HvYbNRk1Ldd+f7qO65W5qfhu/TCv+/ozljlXXe9Nj8419DMA=="],
@@ -505,6 +507,28 @@
     "@tailwindcss/oxide-win32-x64-msvc": ["@tailwindcss/oxide-win32-x64-msvc@4.3.3", "", { "os": "win32", "cpu": "x64" }, "sha512-yJ0pwIVc/nYeGoV02WtsN8KYyLQv7kyI2wDnkezyJlGGjkd4QLwDGAwl47YpPJeuI0M0ObaXGSPjvWDPeTPggw=="],
 
     "@tailwindcss/turbopack": ["@tailwindcss/turbopack@4.3.3", "", { "dependencies": { "@alloc/quick-lru": "^5.2.0", "@tailwindcss/node": "4.3.3", "@tailwindcss/oxide": "4.3.3", "tailwindcss": "4.3.3" } }, "sha512-FgL4wRgItNdXcDjcgYUSd59gNsWqNVK4GotjZimZMmt7OOIkRNqH2QEUcRXLdBDXvwTsi5rkYxDxzfrFUkmObQ=="],
+
+    "@tdlib-native/tdjson": ["@tdlib-native/tdjson@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "dependencies": { "detect-libc": "^2.0.4" }, "optionalDependencies": { "@tdlib-native/tdjson-android-arm64-glibc": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-android-arm64-musl": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-darwin-arm64": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-darwin-x64": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-linux-arm64-glibc": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-linux-arm64-musl": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-linux-x64-glibc": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-linux-x64-musl": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-win32-ia32": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "@tdlib-native/tdjson-win32-x64": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e" } }, "sha512-b5fAVAF0t05NWIxZqGXuop6l0IR/bxLWlkIuaocG1Btaij64WQcg9EI6unuNFWdWA1PXvQdnRzoW0kzr8o1vqg=="],
+
+    "@tdlib-native/tdjson-android-arm64-glibc": ["@tdlib-native/tdjson-android-arm64-glibc@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "android", "cpu": "arm64" }, "sha512-87MjpwWZ/7fGTCL9DvZKPI4AGtpPwpZl3RzO85lFsb+aQ8E7/TenrLXQUkrFil6qovtxugz53uoBTLALpQv+wA=="],
+
+    "@tdlib-native/tdjson-android-arm64-musl": ["@tdlib-native/tdjson-android-arm64-musl@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "android", "cpu": "arm64" }, "sha512-OQGjybFzLTQJvWw0BfjCzPG+ORy60DU1ZkbYO7kwTxxQUyefffZeRusJ/fFmbFRFfuHgX/kEDcYw/ITCkz7IiQ=="],
+
+    "@tdlib-native/tdjson-darwin-arm64": ["@tdlib-native/tdjson-darwin-arm64@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "darwin", "cpu": "arm64" }, "sha512-wp5RWSZ47WHP4Ej4JE1CXEoUP4xDgh4qSGb8etwf6jMaKx6rvaP3QXri7NvM9CGi/5DECM/yLDIU1AbFo/gc7A=="],
+
+    "@tdlib-native/tdjson-darwin-x64": ["@tdlib-native/tdjson-darwin-x64@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "darwin", "cpu": "x64" }, "sha512-I9nzNx7G61+fbZzHmJBkMzpBrUD+G0Ote2th7Wp36VzR3A7NPZEfIMQgL0ubjJqo0Dewq7zNcyvM8y/2jUfoDw=="],
+
+    "@tdlib-native/tdjson-linux-arm64-glibc": ["@tdlib-native/tdjson-linux-arm64-glibc@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "linux", "cpu": "arm64" }, "sha512-KuYkk3/XSnNZ/Tppfv4ZoPt36OyVgoyI4M0y4j9Udeczr5oy4W8SvmMzsGQhw7R/iepUvoid1rmXZviVf3riTg=="],
+
+    "@tdlib-native/tdjson-linux-arm64-musl": ["@tdlib-native/tdjson-linux-arm64-musl@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "linux", "cpu": "arm64" }, "sha512-Ing/i4gC/GcfC9oUaHhReXEb0HqkZTsbznGP7yjzXy2UBieZyKzyKDQ0Di9YC4LILqV+KiwcSzVgcmdFGPSGRg=="],
+
+    "@tdlib-native/tdjson-linux-x64-glibc": ["@tdlib-native/tdjson-linux-x64-glibc@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "linux", "cpu": "x64" }, "sha512-Lzs2J+YGLwj9bH244N4acUHdi+E/wDyT1gzK0+DgA4Svz24oaD47i/pJfWidUdK2BVyIHQnU+EzcH8JY6LyVbg=="],
+
+    "@tdlib-native/tdjson-linux-x64-musl": ["@tdlib-native/tdjson-linux-x64-musl@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "linux", "cpu": "x64" }, "sha512-sMXBmo1mLRGKuYjjPLbi8ZZt4SgUMUMKh/Ork58pf9D2hh2IrPqmCUqg7bgRUiI9/uJRrZRRiUYpj1kvFp+BZQ=="],
+
+    "@tdlib-native/tdjson-win32-ia32": ["@tdlib-native/tdjson-win32-ia32@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "win32", "cpu": "ia32" }, "sha512-0swac7WmyyzRfqyRkandTqyWrQtoqimjiMtC+7KAdlMTa4P0TPaRcLyyIS47iK8wT6E4HZ/XqQyrAM0SdOgCyg=="],
+
+    "@tdlib-native/tdjson-win32-x64": ["@tdlib-native/tdjson-win32-x64@1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e", "", { "os": "win32", "cpu": "x64" }, "sha512-FxaaL4CJSzesnh0ovtqJzHSzFGghYE82tdnCdAV9vf371ry+PQN7EvCARw73IzUMUlaWDECUTF4haMVrouRMEg=="],
 
     "@tokenizer/inflate": ["@tokenizer/inflate@0.6.1", "", { "dependencies": { "debug": "^4.4.3", "strtok3": "^10.8.0", "token-types": "^6.2.0" } }, "sha512-EuqSyHdOXN61cc5/rsW6uUn1TJZJGZr56jlkUbsLwVJ6uHgvwQyFkYfOCf+zzPFAYjftPk1WeJnEhpLVvzbm1A=="],
 
@@ -1162,6 +1186,8 @@
 
     "node-abi": ["node-abi@3.101.0", "", { "dependencies": { "semver": "^7.3.5" } }, "sha512-bkb/RkuWCE64eWu1PCh3Fu2pGc9mKRs+kOE+FU2bGHRYlQa86/D321DSATV54AsCQMKz3/xSt9sRgraZTpqdhQ=="],
 
+    "node-addon-api": ["node-addon-api@8.9.2", "", {}, "sha512-VijLXbi3UACN69I0JVXJsX4tjACjNoQDgv2gTF6sx2wWEi8tkSg2eX8p5gSIFi8z2+DL3oHmY6OyKce38SDolg=="],
+
     "node-emoji": ["node-emoji@2.2.0", "", { "dependencies": { "@sindresorhus/is": "^4.6.0", "char-regex": "^1.0.2", "emojilib": "^2.4.0", "skin-tone": "^2.0.0" } }, "sha512-Z3lTE9pLaJF47NyMhd4ww1yFTAP8YhYI8SleJiHzM46Fgpm5cnNzSl9XfzFNqbaz+VlJrIj3fXQ4DeN1Rjm6cw=="],
 
     "object-assign": ["object-assign@4.1.1", "", {}, "sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg=="],
@@ -1367,6 +1393,8 @@
     "tar-fs": ["tar-fs@2.1.5", "", { "dependencies": { "chownr": "^1.1.1", "mkdirp-classic": "^0.5.2", "pump": "^3.0.0", "tar-stream": "^2.1.4" } }, "sha512-OboTd8mmMhZDNPV+UjQcK9yKAatXu2aJ+r1w4im1Otd4M4fl2hwvdoXUxIYHFTHWK/3y3FarBP70v3vwmGlOxw=="],
 
     "tar-stream": ["tar-stream@2.2.0", "", { "dependencies": { "bl": "^4.0.3", "end-of-stream": "^1.4.1", "fs-constants": "^1.0.0", "inherits": "^2.0.3", "readable-stream": "^3.1.1" } }, "sha512-ujeqbceABgwMZxEJnk2HDY2DlnUZ+9oEcb1KzTVfYHio0UE6dG71n60d8D2I4qNvleWrrXpmjpt7vZeF1LnMZQ=="],
+
+    "tdlib-native": ["tdlib-native@5.0.1", "", { "dependencies": { "debug": "^4.4.1", "node-addon-api": "^8.5.0" }, "optionalDependencies": { "@tdlib-native/tdjson": "1.8.70-commit.c8828d50f5eac2fc7089ce1089d7ce9095c61b5e" } }, "sha512-m/yeXp8kAPeeL1WxOw6+7AjCc6OeqgTt1XND+ysstdqBp5pk6hXgqbDCJb5hA0kjYOa2xz5R7VKYZo615iis7A=="],
 
     "through": ["through@2.3.8", "", {}, "sha512-w89qg7PI8wAdvX60bMDP+bFoD5Dvhm9oLheFp5O4a2QF0cSBGsBX4qZmadPMvVqlLJBBci+WqGGOAPvcDeNSVg=="],
 

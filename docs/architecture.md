@@ -519,7 +519,39 @@ in-process (rxjs Subject), so a multi-node deployment needs Redis pub/sub.
 
 Never send session keys, auth keys, phone codes or passwords over WS.
 
-## 8. Phases
+## 8. TDLib migration (POC)
+
+The runtime still uses mtcute everywhere; a TDLib move is only being probed.
+`apps/api/scripts/tdlib-qr-poc.ts` proves the bridge that would let an existing
+mtcute session authorize a new TDLib client without a second login:
+
+1. boot a Nest application context read-only and open the stored session with
+   `AccountsService.resolveSession(DEFAULT_USER_ID, accountId)`;
+2. start `tdlib-native` (with `TDLibAddon`) on the `opentele2`
+   `profile('TelegramDesktop')` credentials and device fields, using a
+   throwaway database under the OS temp dir;
+3. request QR authentication in TDLib and read the `tg://login?token=...` link;
+4. accept that token on the existing mtcute session with
+   `auth.acceptLoginToken`, wait for `authorizationStateReady`, then print
+   `{ qrLink, authorized: true, tdlibUser }`.
+
+Run it with a stored account id:
+
+```sh
+cd apps/api
+bun run tdlib:poc --account <TelegramAccount id> --help   # usage, no connection
+bun run tdlib:poc --account <TelegramAccount id>          # live QR flow
+```
+
+`TD_ACCOUNT_ID`, `TD_POC_DIR` and `TD_POC_TIMEOUT_MS` mirror the flags
+(`--account`, `--dir`, `--timeout <seconds>`); `--keep` preserves the TDLib
+database for inspection. The script writes no account data, does not touch
+`LogsService`, and is not imported by the app: **this does not change runtime
+behaviour**. Note that TDLib 1.8.70 dropped the `language_code`
+`setTdlibParameters` field, so only `system_language_code` comes from the
+profile.
+
+## 9. Phases
 
 0. **Spike** (1–2 days): a NestJS script proving phone login, QR login and
    tdata→session import against a test account, with `getMe()` after each.
@@ -534,7 +566,7 @@ Never send session keys, auth keys, phone codes or passwords over WS.
    avatars, realtime fan-out. **Implemented** (bounded in-memory cache).
 5. **Admin panel** workflows on top of the same API.
 
-## 9. Open decisions
+## 10. Open decisions
 
 - ~~Local users: e-mail/password vs external IdP~~ → the app is single-user now
   (`DEFAULT_USER_ID`); add real auth before any shared deployment.
