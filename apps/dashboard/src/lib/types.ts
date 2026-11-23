@@ -44,7 +44,22 @@ export interface AccountView {
   createdAt: string;
   lastUsedAt: string | null;
   deviceProfile: Record<string, unknown> | null;
+  /** Live session that chat, history and realtime currently use. */
+  activeSessionId: string | null;
   sessions: SessionView[];
+}
+
+/** `PATCH /accounts/:accountId/sessions/:sessionId`. */
+export interface SessionPatch {
+  proxyId?: string | null;
+  label?: string | null;
+}
+
+/** `DELETE /accounts/:accountId/sessions/:sessionId`. */
+export interface SessionRemovalView {
+  removed: boolean;
+  revoked: boolean;
+  accountRemoved: boolean;
 }
 
 export interface MessageMediaView {

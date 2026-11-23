@@ -199,6 +199,7 @@ export function loadAccounts(): AccountView[] | null {
     createdAt: "",
     lastUsedAt: null,
     deviceProfile: null,
+    activeSessionId: null,
     sessions: [],
   }));
 }

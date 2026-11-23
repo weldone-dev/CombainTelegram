@@ -98,18 +98,20 @@ export function sessionSummary(account: AccountView): string {
 }
 
 /**
- * The session Telegram currently treats as the account transport: the live
- * session used most recently. Used for the "active transport" badge.
+ * The session that currently serves the account: `activeSessionId` when it
+ * points at a live session, otherwise the newest live session. Chat, history
+ * and realtime all go through this session, so every screen must use this rule.
  */
 export function activeSession(account: AccountView): SessionView | null {
   const live = account.sessions.filter((session) => !session.revokedAt);
-  const pool = live.length > 0 ? live : account.sessions;
-  if (pool.length === 0) return null;
+  if (live.length === 0) return null;
+  const chosen = live.find((session) => session.id === account.activeSessionId);
+  if (chosen) return chosen;
   const time = (session: SessionView): number => {
     const value = Date.parse(session.lastUsedAt ?? session.createdAt);
     return Number.isNaN(value) ? 0 : value;
   };
-  return pool.reduce((best, session) =>
+  return live.reduce((best, session) =>
     time(session) > time(best) ? session : best,
   );
 }
