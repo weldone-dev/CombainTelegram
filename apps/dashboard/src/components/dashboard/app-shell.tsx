@@ -36,7 +36,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
-    setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1");
+    const stored = window.localStorage.getItem(COLLAPSE_KEY);
+    setCollapsed(
+      stored === "1" || (stored === null && window.innerWidth < 768),
+    );
   }, []);
 
   const toggle = () => {

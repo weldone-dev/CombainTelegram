@@ -79,7 +79,7 @@ Updated: 2026-11-23. This file is the single place to check progress.
   browser denies Notification/push permission, so that part is environment-bound.
 
 ### Quality
-- API: 364 tests, `tsc`, `oxlint`, `nest build` green.
+- API: 486 tests, `tsc`, `oxlint`, `nest build` green.
 - Dashboard: `tsc`, `biome`, `next build` green.
 - Worker worktrees and branches removed; only `main` remains.
 
@@ -139,8 +139,14 @@ Live checks:
 - [x] dry-run automation: a manual `send_message` automation ran and returned
       `dryRun: would send to 777: …`; the run row was written.
 - [x] AI → Настройки renders (`/ai` answers 200; settings, permissions, MCP and
-      tool list load).
-- [x] API suite: 35 files, 364 tests passed.
+      tool list load); the MCP endpoint uses the API origin, not :3000.
+- [x] MCP capability gate: with `mcp=false` every method answers `-32001`;
+      restored to true afterwards.
+- [x] Soul settings are merged: `PUT {settings:{maxPerHour:7}}` kept the
+      existing `chatIds` and other values.
+- [x] Attached-but-disabled skills stay attached in `SoulView.skills`.
+- [x] API suite: 45 files, 486 tests passed (config, memory, agent, MCP,
+      autopilot, bots, automations).
 
 ## Still on mtcute (works only while the old session exists)
 `resolveChat`, chat settings/delete, and the admin tools (members, bans, rights,

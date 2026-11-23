@@ -279,8 +279,8 @@ Access control: `allowedUserIds` per bot (Telegram user ids). When it is empty,
 policy list, otherwise every attached account's `tgUserId`. Unauthorised users
 get one refusal message containing their id and the attempt is logged
 (`bot.deny`). If the app has no accounts *and* no owner list, the allowlist is
-empty and the runner does not refuse anyone — attach an account (or set owner
-ids) before enabling a bot.
+empty and every request is refused — attach an account (or set owner ids) before
+enabling a bot.
 
 Bot limits worth knowing: a Telegram bot cannot message a user who never started
 it, and a bot chat is not an account DM. Personal conversations are handled by
@@ -418,9 +418,9 @@ Implemented methods:
 | `resources/read` | accounts (id, name, username, masked phone) or souls |
 | `notifications/*` | accepted, no body |
 
-Anything else, including `resources/templates/list`, returns `-32601 Method not
-found`; the server advertises no resource templates. There is no
-`completion`, `logging` or `sampling` support.
+Anything else, including `completion`, `logging` or `sampling`, returns
+`-32601 Method not found`. `resources/templates/list` is supported and returns
+an empty template list.
 
 MCP calls run as the single local user with `source = "mcp"`,
 `accountId = null`, `chatId = null`; the tool arguments decide the account/chat,
@@ -571,19 +571,14 @@ The sidebar entry is “AI” (page title “AI и души”). The page has si
 - Bots: long polling needs outbound `api.telegram.org`, one poller per token
   (`409` otherwise), text and private chats only, and a bot cannot start a DM.
 - MCP is HTTP-only (no stdio binary), stateless, with no server-initiated SSE.
-  `resources/templates/list` is not implemented.
-- The `mcp` capability is stored and shown but not enforced by
-  `McpController`; access is controlled by the bearer token plus each tool's own
-  capability. The `admin` capability has no tools yet.
+  When the `mcp` capability is off, every method except `initialize`, `ping`
+  and notifications answers `-32001`; access also needs the bearer token.
+  The `admin` capability has no tools yet (reserved).
 - Message ids belong to the engine that served the call; TDLib and mtcute ids are
   never mixed.
-- A per-account bot is scoped for account/chat tools, but the global list tools
-  (`accounts_list`, `souls_list`, `automations_list`, `bots_list`) still show
-  every account.
-- `Soul.settings` is replaced on `PUT`, not merged; omitted keys reset to
-  defaults.
-- The dashboard's automation editor stores the agent action flag as `send`,
-  while the runner reads `sendOutput`; set `sendOutput` in the JSON (or through
-  the API) until the UI is fixed.
+- A per-account bot is scoped: `accounts_list`, `souls_list`,
+  `automations_list` and `bots_list` only show its own account, and a tool call
+  naming another account is refused (`ACCOUNT_SCOPE`).
+- `Soul.settings` is merged on `PUT`; omitted keys keep their current values.
 - Agent output is buffered (no streaming); each tool result is truncated to
   6 000 chars in the model context and each step to 1 800 completion tokens.

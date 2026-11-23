@@ -387,10 +387,7 @@ export class SkillsService implements OnModuleInit {
       where: { soulId },
       include: { skill: true },
     });
-    return links
-      .map((link) => link.skill as SkillModel)
-      .filter((skill) => skill.enabled)
-      .map(view);
+    return links.map((link) => link.skill as SkillModel).map(view);
   }
 
   async forBot(botId: string): Promise<SkillView[]> {
