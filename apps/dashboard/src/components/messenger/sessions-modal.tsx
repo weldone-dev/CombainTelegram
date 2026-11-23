@@ -5,12 +5,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/api";
 import { copyToClipboard } from "../../lib/clipboard";
 import { accountName, activeSession, platformLabel } from "../../lib/format";
+import { clearAccountCache } from "../../lib/offline-cache";
 import {
   activateSession,
   deleteSession,
   fetchAccount,
   patchSession,
 } from "../../lib/session-api";
+import { notifySessionChanged } from "../../lib/session-events";
 import {
   ATTEMPT_STATUS_LABELS,
   attemptErrorText,
@@ -97,6 +99,16 @@ export function SessionsModal({
     onUpdated(updated);
   };
 
+  /**
+   * Chat and message ids belong to the engine behind the active session, so
+   * the cached chat list and transcripts of this account cannot be reused
+   * after the session changes.
+   */
+  const invalidateSessionCache = useCallback(() => {
+    clearAccountCache(account.id);
+    notifySessionChanged(account.id);
+  }, [account.id]);
+
   const assign = async (sessionId: string, proxyId: string) => {
     setBusySessionId(sessionId);
     setError(null);
@@ -120,6 +132,7 @@ export function SessionsModal({
     setNotice(null);
     try {
       applyAccount(await activateSession(current.id, sessionId));
+      invalidateSessionCache();
       setNotice("Активная сессия переключена");
     } catch (activateError) {
       setError(errorMessage(activateError));
@@ -144,6 +157,9 @@ export function SessionsModal({
         deleteTarget.id,
         deleteRevoke,
       );
+      // Deleting can move the account onto another session (or remove it), so
+      // the cached engine-specific ids are no longer trustworthy.
+      invalidateSessionCache();
       if (result.accountRemoved) {
         onAccountRemoved?.(current.id);
         onNotice?.(
@@ -181,6 +197,9 @@ export function SessionsModal({
     async (attempt: AttemptView) => {
       if (addCompletingRef.current) return;
       addCompletingRef.current = true;
+      // A newly added session can become the active transport, so the cached
+      // engine-specific chat ids and transcripts must go.
+      invalidateSessionCache();
       let updated = attempt.account ?? null;
       try {
         updated = (await fetchAccount(account.id)) ?? updated;
@@ -202,7 +221,7 @@ export function SessionsModal({
       setAddError(null);
       addCompletingRef.current = false;
     },
-    [account.id, onNotice, onUpdated],
+    [account.id, invalidateSessionCache, onNotice, onUpdated],
   );
 
   const handleAddAttempt = useCallback(

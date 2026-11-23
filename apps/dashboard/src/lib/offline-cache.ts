@@ -283,6 +283,24 @@ export function loadMessages(
   return entry && Array.isArray(entry.items) ? entry.items : null;
 }
 
+/**
+ * Drops one account's chat list and transcripts.
+ *
+ * Message ids are engine-specific: TDLib and mtcute number messages
+ * differently, so a transcript cached under one engine is unusable (and its
+ * ids unknown to the API) after the account's active session changes. The
+ * account rows and the last selection are kept.
+ */
+export function clearAccountCache(accountId: string): void {
+  mutate((store) => {
+    delete store.chats[accountId];
+    const prefix = `${accountId}:`;
+    for (const key of Object.keys(store.messages)) {
+      if (key.startsWith(prefix)) delete store.messages[key];
+    }
+  });
+}
+
 /** Drops every offline snapshot (e.g. when the user clears the cache). */
 export function clearOfflineCache(): void {
   const target = storage();

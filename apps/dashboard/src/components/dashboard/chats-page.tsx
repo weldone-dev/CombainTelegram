@@ -27,6 +27,10 @@ import {
   saveSelection,
 } from "../../lib/offline-cache";
 import { subscribeRealtime } from "../../lib/realtime-bus";
+import {
+  SESSION_CHANGED_EVENT,
+  type SessionChangedDetail,
+} from "../../lib/session-events";
 import type {
   ChatFolderSelection,
   ChatPatch,
@@ -200,7 +204,7 @@ export function ChatsPage() {
     async (
       accountId: string,
       options: { limit: number; folder: ChatFolderSelection },
-    ) => {
+    ): Promise<ChatView[] | null> => {
       const requestId = chatsRequestRef.current + 1;
       chatsRequestRef.current = requestId;
       setChatsLoading(true);
@@ -210,7 +214,7 @@ export function ChatsPage() {
           limit: options.limit,
           folder: options.folder,
         });
-        if (chatsRequestRef.current !== requestId) return;
+        if (chatsRequestRef.current !== requestId) return null;
         setChats(list);
         saveChatList(accountId, list);
         setSelectedChatId((current) =>
@@ -218,8 +222,9 @@ export function ChatsPage() {
             ? current
             : null,
         );
+        return list;
       } catch (error) {
-        if (chatsRequestRef.current !== requestId) return;
+        if (chatsRequestRef.current !== requestId) return null;
         const cached = isOffline(error) ? loadCachedChatList(accountId) : null;
         if (cached && cached.length > 0) {
           setChats(cached);
@@ -229,10 +234,11 @@ export function ChatsPage() {
               ? current
               : null,
           );
-        } else {
-          setChats([]);
-          setChatsError(errorMessage(error));
+          return cached;
         }
+        setChats([]);
+        setChatsError(errorMessage(error));
+        return null;
       } finally {
         if (chatsRequestRef.current === requestId) setChatsLoading(false);
       }
@@ -762,6 +768,40 @@ export function ChatsPage() {
       window.removeEventListener("online", handleOnline);
     };
   }, [reloadAccounts, refreshChats, loadMessages]);
+
+  // The active session changed, so its engine (TDLib or mtcute) may have
+  // changed too: the cached chat ids and the open transcript belong to the
+  // previous engine and must be fetched again instead of shown or acted on.
+  useEffect(() => {
+    const handleSessionChanged = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<SessionChangedDetail>>)
+        .detail;
+      const accountId = selectedAccountIdRef.current;
+      if (!accountId || detail?.accountId !== accountId) return;
+      setOffline(false);
+      setChats([]);
+      setChatsError(null);
+      messagesRequestRef.current += 1;
+      setMessages([]);
+      setNextOffsetId(null);
+      setMessagesError(null);
+      setFocusedMessage(null);
+      void (async () => {
+        const list = await loadChats(accountId, { limit: chatLimit, folder });
+        // A newer request or an account switch wins over this reload.
+        if (!list || selectedAccountIdRef.current !== accountId) return;
+        const chatId = selectedChatIdRef.current;
+        if (chatId !== null && list.some((chat) => chat.id === chatId)) {
+          void loadMessages(accountId, chatId);
+        }
+      })();
+    };
+
+    window.addEventListener(SESSION_CHANGED_EVENT, handleSessionChanged);
+    return () => {
+      window.removeEventListener(SESSION_CHANGED_EVENT, handleSessionChanged);
+    };
+  }, [chatLimit, folder, loadChats, loadMessages]);
 
   useEffect(() => {
     if (!selectedAccountId) {
