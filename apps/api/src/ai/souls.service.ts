@@ -70,6 +70,9 @@ function mergeSoulSettings(
     );
   }
   if (typeof source.typing === 'boolean') next.typing = source.typing;
+  if (typeof source.peerProfile === 'boolean') {
+    next.peerProfile = source.peerProfile;
+  }
   if (source.typingSpeed !== undefined) {
     next.typingSpeed = clampTypingCpm(
       source.typingSpeed,
@@ -114,6 +117,7 @@ export function parseSoulSettings(raw: unknown): SoulSettings {
       source.typingSpeed,
       DEFAULT_SOUL_SETTINGS.typingSpeed,
     ),
+    peerProfile: source.peerProfile !== false,
   };
 }
 

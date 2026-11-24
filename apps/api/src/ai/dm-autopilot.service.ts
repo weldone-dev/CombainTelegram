@@ -31,6 +31,8 @@ interface Pending {
 
 const BATCH_MS = 1500;
 const MAX_AGE_MS = 120_000;
+/** How long a fetched peer profile stays fresh, milliseconds. */
+const PEER_PROFILE_TTL_MS = 10 * 60_000;
 
 /** Autopilot only ever works in `draft` or `auto`; anything else is off. */
 function isAutopilotMode(mode: string): boolean {
@@ -54,6 +56,10 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
   private readonly pending = new Map<string, Pending>();
   private readonly busy = new Set<string>();
   private readonly seen = new Set<string>();
+  private readonly peerProfiles = new Map<
+    string,
+    { at: number; block: string }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -155,6 +161,51 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       message,
       senderName,
     });
+  }
+
+  /**
+   * Describes the peer so the agent knows who it is talking to: the Telegram
+   * name, username and profile bio. Cached per account+chat and best-effort —
+   * a profile that cannot be fetched is simply left out of the prompt.
+   */
+  private async peerBlock(
+    userId: string,
+    accountId: string,
+    chatId: number,
+  ): Promise<string> {
+    const key = `${accountId}:${chatId}`;
+    const cached = this.peerProfiles.get(key);
+    if (cached && Date.now() - cached.at < PEER_PROFILE_TTL_MS) {
+      return cached.block;
+    }
+    let block = '';
+    try {
+      const info = await this.messaging.getChatInfo(
+        userId,
+        accountId,
+        String(chatId),
+      );
+      const name = info.title || `id ${chatId}`;
+      const username = info.username ? ` (@${info.username})` : '';
+      const about = info.about?.trim() ?? '';
+      block = [
+        `Собеседник в Telegram: ${name}${username}.`,
+        about ? `О собеседнике в профиле: ${about}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+    } catch (error) {
+      this.logger.warn(
+        `Could not load the profile of ${chatId}: ${(error as Error).message}`,
+      );
+      return '';
+    }
+    this.peerProfiles.set(key, { at: Date.now(), block });
+    if (this.peerProfiles.size > 500) {
+      const oldest = this.peerProfiles.keys().next().value;
+      if (oldest) this.peerProfiles.delete(oldest);
+    }
+    return block;
   }
 
   /**
@@ -265,6 +316,10 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
           : 'Ответь от лица владельца. Верни только текст ответа.',
       ].join('\n');
 
+      const peerBlock = settings.peerProfile
+        ? await this.peerBlock(userId, accountId, chatId)
+        : '';
+
       if (settings.typing && soul.mode === 'auto') {
         await this.messaging
           .sendTyping(userId, accountId, String(chatId))
@@ -278,8 +333,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         source: 'dm',
         prompt,
         tools: [],
-        systemExtra:
+        systemExtra: [
+          peerBlock,
           'Это живая переписка. Не упоминай ИИ, инструменты и настройки. Один короткий ответ, без кавычек и Markdown.',
+        ]
+          .filter(Boolean)
+          .join('\n'),
         history: (
           await this.memory.recentTurns(accountId, chatId, 10)
         )

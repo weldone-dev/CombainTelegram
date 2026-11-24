@@ -157,6 +157,7 @@ Modes:
 | `maxPerChatPerDay` | `40` | assistant replies per chat per day; `0` disables |
 | `typing` | `true` | send `typing` while generating/sending |
 | `typingSpeed` | `300` | characters per minute for the typing indicator, clamped to 40…600 (600 = human upper bound) |
+| `peerProfile` | `true` | pass the peer's Telegram name, username and profile bio to the agent (cached 10 min, best-effort) |
 
 `PUT` validates the mode and replaces `settings` with the parsed object; because
 parsing fills defaults first, omitted keys fall back to the defaults above — send
@@ -178,7 +179,9 @@ no dashboard open) and:
    rows;
 5. runs the agent with `source = "dm"`, the persona and memory, no tools
    (`tools: []`) and the last 10 turns as history, then appends the incoming
-   message to memory;
+   message to memory; when `peerProfile` is on, the system prompt also carries
+   the peer's username and profile bio (`getChatInfo`), so the soul knows who it
+   is talking to;
 6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` optionally sends
    typing (`typingDurationMs = length / typingSpeed`, 0.6…60 s, refreshed every
    4 s, so longer replies keep the indicator longer), sends the reply as a

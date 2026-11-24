@@ -107,6 +107,21 @@ function harness(
     sendTyping: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => message({ id: 2002, outgoing: true })),
     markRead: vi.fn(async () => ({ read: true, maxId: null })),
+    getChatInfo: vi.fn(async () => ({
+      id: CHAT_ID,
+      type: 'user',
+      title: 'Роман',
+      username: 'username_dev',
+      about: 'Пишу код и тестирую ботов',
+      memberCount: null,
+      onlineCount: null,
+      isChannel: false,
+      isGroup: false,
+      isAdmin: false,
+      isCreator: false,
+      canSendMessages: true,
+      inviteLink: null,
+    })),
   };
   const events = new Subject<RealtimeEvent>();
   const realtime = {
@@ -401,6 +416,106 @@ describe('DmAutopilotService.reply', () => {
       expect.objectContaining({ text: 'Hello back' }),
     );
     expect(h.memory.maybeCompact).toHaveBeenCalledWith('account-1', CHAT_ID);
+  });
+
+  it('passes the peer username and bio to the agent', async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.messaging.getChatInfo).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemExtra: expect.stringContaining('Роман (@username_dev)'),
+      }),
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemExtra: expect.stringContaining('Пишу код и тестирую ботов'),
+      }),
+    );
+  });
+
+  it('never fetches the peer profile when the option is off', async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+          peerProfile: false,
+        }),
+      }),
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.messaging.getChatInfo).not.toHaveBeenCalled();
+    expect(h.messaging.sendMessage).toHaveBeenCalled();
+  });
+
+  it('still replies when the peer profile cannot be fetched', async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    h.messaging.getChatInfo.mockRejectedValueOnce(new Error('FLOOD_WAIT_5'));
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemExtra: expect.not.stringContaining('Собеседник в Telegram'),
+      }),
+    );
+    expect(h.messaging.sendMessage).toHaveBeenCalled();
   });
 
   it('refuses to reply for an unknown mode', async () => {

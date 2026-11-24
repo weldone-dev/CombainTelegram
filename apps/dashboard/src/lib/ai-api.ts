@@ -67,6 +67,7 @@ export interface SoulSettings {
   maxPerChatPerDay: number;
   typing: boolean;
   typingSpeed: number;
+  peerProfile: boolean;
 }
 
 export interface SoulView {

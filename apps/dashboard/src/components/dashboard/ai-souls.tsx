@@ -299,6 +299,7 @@ export function SoulsPanel() {
         settings: {
           allowAllChats: freshDraft.settings.allowAllChats,
           typing: freshDraft.settings.typing,
+          peerProfile: freshDraft.settings.peerProfile,
           chatIds: parseIds(chatIdsText),
           excludeChatIds: parseIds(excludeText),
           replyDelayMs: clampNumber(
@@ -619,6 +620,12 @@ export function SoulsPanel() {
                     checked={freshDraft.settings.typing}
                     onChange={(value) => updateSettings({ typing: value })}
                     label="Показывать «печатает…»"
+                  />
+                  <Toggle
+                    checked={freshDraft.settings.peerProfile}
+                    onChange={(value) => updateSettings({ peerProfile: value })}
+                    label="Передавать профиль собеседника"
+                    hint="Username и описание из профиля Telegram"
                   />
                   <Field
                     label="Разрешённые chat id"

@@ -242,6 +242,8 @@ export interface SoulSettings {
   typing: boolean;
   /** Typing simulation speed in characters per minute (40–600). */
   typingSpeed: number;
+  /** Pass the peer's username and profile bio to the agent. */
+  peerProfile: boolean;
 }
 
 export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
@@ -253,6 +255,7 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   maxPerChatPerDay: 40,
   typing: true,
   typingSpeed: 300,
+  peerProfile: true,
 };
 
 export interface SkillView {
