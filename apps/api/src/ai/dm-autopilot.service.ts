@@ -13,6 +13,7 @@ import { emitLog } from '../logs/log-sink.js';
 import { AgentService } from './agent.service.js';
 import { MemoryService } from './memory.service.js';
 import { SoulsService, parseSoulSettings } from './souls.service.js';
+import { typingDurationMs } from './typing.js';
 
 interface MessageNewPayload {
   accountId?: unknown;
@@ -151,6 +152,23 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** Keeps the Telegram "typing…" action alive for `durationMs`. */
+  private async holdTyping(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    durationMs: number,
+  ): Promise<void> {
+    const end = Date.now() + durationMs;
+    do {
+      await this.messaging
+        .sendTyping(userId, accountId, String(chatId), { status: 'typing' })
+        .catch(() => undefined);
+      const left = end - Date.now();
+      if (left > 0) await sleep(Math.min(4_000, left));
+    } while (Date.now() < end);
+  }
+
   private async reply(
     userId: string,
     accountId: string,
@@ -259,9 +277,14 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       }
 
       await sleep(settings.replyDelayMs);
-      await this.messaging.sendTyping(userId, accountId, String(chatId), {
-        status: 'typing',
-      }).catch(() => undefined);
+      if (settings.typing) {
+        await this.holdTyping(
+          userId,
+          accountId,
+          chatId,
+          typingDurationMs([...replyText].length, settings.typingSpeed),
+        );
+      }
       const sent = await this.messaging.sendMessage(
         userId,
         accountId,

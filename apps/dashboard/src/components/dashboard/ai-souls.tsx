@@ -48,6 +48,7 @@ interface NumberDraft {
   replyDelayMs: string;
   maxPerHour: string;
   maxPerChatPerDay: string;
+  typingSpeed: string;
   temperature: string;
 }
 
@@ -55,6 +56,7 @@ const EMPTY_NUMBERS: NumberDraft = {
   replyDelayMs: "",
   maxPerHour: "",
   maxPerChatPerDay: "",
+  typingSpeed: "",
   temperature: "",
 };
 
@@ -63,6 +65,7 @@ function numbersOf(soul: SoulView): NumberDraft {
     replyDelayMs: String(soul.settings.replyDelayMs),
     maxPerHour: String(soul.settings.maxPerHour),
     maxPerChatPerDay: String(soul.settings.maxPerChatPerDay),
+    typingSpeed: String(soul.settings.typingSpeed),
     temperature: String(soul.temperature),
   };
 }
@@ -315,6 +318,12 @@ export function SoulsPanel() {
             freshDraft.settings.maxPerChatPerDay,
             0,
             5000,
+          ),
+          typingSpeed: clampNumber(
+            numbers.typingSpeed,
+            freshDraft.settings.typingSpeed,
+            40,
+            600,
           ),
         },
         skillSlugs: freshDraft.skills.map((skill) => skill.slug),
@@ -635,6 +644,19 @@ export function SoulsPanel() {
                         value={numbers.replyDelayMs}
                         onChange={(event) =>
                           updateNumber("replyDelayMs", event.target.value)
+                        }
+                        inputMode="numeric"
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field
+                      label="Скорость печати, симв/мин"
+                      hint="40–600; 600 — предел человеческой скорости"
+                    >
+                      <input
+                        value={numbers.typingSpeed}
+                        onChange={(event) =>
+                          updateNumber("typingSpeed", event.target.value)
                         }
                         inputMode="numeric"
                         className={inputClass}

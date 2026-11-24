@@ -240,6 +240,8 @@ export interface SoulSettings {
   maxPerHour: number;
   maxPerChatPerDay: number;
   typing: boolean;
+  /** Typing simulation speed in characters per minute (40–600). */
+  typingSpeed: number;
 }
 
 export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
@@ -250,6 +252,7 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   maxPerHour: 12,
   maxPerChatPerDay: 40,
   typing: true,
+  typingSpeed: 300,
 };
 
 export interface SkillView {

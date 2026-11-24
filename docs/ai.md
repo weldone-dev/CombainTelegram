@@ -156,6 +156,7 @@ Modes:
 | `maxPerHour` | `12` | assistant replies per account per hour; `0` disables |
 | `maxPerChatPerDay` | `40` | assistant replies per chat per day; `0` disables |
 | `typing` | `true` | send `typing` while generating/sending |
+| `typingSpeed` | `300` | characters per minute for the typing indicator, clamped to 40…600 (600 = human upper bound) |
 
 `PUT` validates the mode and replaces `settings` with the parsed object; because
 parsing fills defaults first, omitted keys fall back to the defaults above — send
@@ -176,7 +177,9 @@ no dashboard open) and:
    (`tools: []`) and the last 10 turns as history, then appends the incoming
    message to memory;
 6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` optionally sends
-   typing, sleeps `replyDelayMs`, sends the reply as a Telegram reply, appends
+   typing (`typingDurationMs = length / typingSpeed`, 0.6…60 s, refreshed every
+   4 s, so longer replies keep the indicator longer), sends the reply as a
+   Telegram reply, appends
    the assistant turn, emits `ai.reply` and triggers memory compaction.
 
 It never starts a conversation: only replies to an incoming message. Autopilot

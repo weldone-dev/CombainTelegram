@@ -66,6 +66,7 @@ export interface SoulSettings {
   maxPerHour: number;
   maxPerChatPerDay: number;
   typing: boolean;
+  typingSpeed: number;
 }
 
 export interface SoulView {

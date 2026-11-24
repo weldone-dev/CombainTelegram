@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { SoulModel, TelegramAccountModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { SkillsService } from './skills.service.js';
+import { clampTypingCpm } from './typing.js';
 import {
   DEFAULT_SOUL_SETTINGS,
   type SoulSettings,
@@ -69,6 +70,12 @@ function mergeSoulSettings(
     );
   }
   if (typeof source.typing === 'boolean') next.typing = source.typing;
+  if (source.typingSpeed !== undefined) {
+    next.typingSpeed = clampTypingCpm(
+      source.typingSpeed,
+      current.typingSpeed,
+    );
+  }
   return next;
 }
 
@@ -103,6 +110,10 @@ export function parseSoulSettings(raw: unknown): SoulSettings {
       5000,
     ),
     typing: source.typing !== false,
+    typingSpeed: clampTypingCpm(
+      source.typingSpeed,
+      DEFAULT_SOUL_SETTINGS.typingSpeed,
+    ),
   };
 }
 
