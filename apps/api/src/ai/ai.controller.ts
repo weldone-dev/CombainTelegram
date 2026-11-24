@@ -43,7 +43,9 @@ function str(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function chatMessages(body: ChatBody): LlmMessage[] {
+type ChatHistoryMessage = { role: 'user' | 'assistant'; content: string };
+
+function chatMessages(body: ChatBody): ChatHistoryMessage[] {
   if (!Array.isArray(body.messages)) return [];
   return body.messages
     .filter(
@@ -52,7 +54,10 @@ function chatMessages(body: ChatBody): LlmMessage[] {
         (item.role === 'user' || item.role === 'assistant') &&
         typeof item.content === 'string',
     )
-    .map((item) => ({ role: item.role as 'user' | 'assistant', content: item.content }));
+    .map((item) => ({
+      role: item.role as 'user' | 'assistant',
+      content: item.content,
+    }));
 }
 
 function skillSlugs(value: unknown): string[] {

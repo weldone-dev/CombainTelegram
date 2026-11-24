@@ -79,6 +79,8 @@ asks for at most 1 800 completion tokens. The fallback summary (when the model
 spends its whole step budget on tools) asks for 800. `temperature` is clamped to
 0…2 and `maxSteps` to 1…12 (default 6). `reasoningEffort` (`off`/`low`/`medium`/
 `high`, default `low`, env `AI_REASONING_EFFORT`) is sent as `reasoning_effort`;
+image understanding needs a model that accepts `image_url` content parts
+(`deepseek-v4.1-flash` on OpenCode Go does);
 when the provider returns `reasoning_content` it is stored in
 `AgentRun.reasoning` and shown as a collapsible «Размышления» block in the
 dashboard chat. Reasoning is silent in Telegram: no `typing…` is sent while the
@@ -197,7 +199,9 @@ no dashboard open) and:
    (`tools: []`) and the last 10 turns as history, then appends the incoming
    message to memory; when `peerProfile` is on, the system prompt also carries
    the peer's username and profile bio (`getChatInfo`), so the soul knows who it
-   is talking to;
+   is talking to; photos and image documents up to 5 MB are downloaded and sent
+   to the model as `image_url` content parts, so a vision model can answer about
+   the picture itself (the text placeholder is `[изображение]`);
 6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` keeps the thinking
    phase silent (no `typing…` while the model works), then for each reply
    bubble starts a `typing…` heartbeat every 4 s, holds it until

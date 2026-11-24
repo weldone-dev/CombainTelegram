@@ -166,10 +166,22 @@ export class AgentService implements OnModuleInit {
         }));
     }
 
+    const promptContent: LlmMessage['content'] =
+      input.images && input.images.length > 0
+        ? [
+            { type: 'text', text: input.prompt },
+            ...input.images.map((image) => ({
+              type: 'image_url' as const,
+              image_url: {
+                url: `data:${image.mime};base64,${image.data.toString('base64')}`,
+              },
+            })),
+          ]
+        : input.prompt;
     const messages: LlmMessage[] = [
       { role: 'system', content: systemParts.join('\n') },
       ...history,
-      { role: 'user', content: input.prompt },
+      { role: 'user', content: promptContent },
     ];
 
     const run = (await this.prisma.agentRun.create({

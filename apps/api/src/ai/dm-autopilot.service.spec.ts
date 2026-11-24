@@ -118,6 +118,13 @@ function harness(
     sendTyping: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => message({ id: 2002, outgoing: true })),
     markRead: vi.fn(async () => ({ read: true, maxId: null })),
+    downloadMedia: vi.fn(async () => ({
+      data: Buffer.from('fake-image'),
+      mimeType: 'image/png',
+      fileName: 'photo.png',
+      disposition: 'inline',
+      length: 10,
+    })),
     getChatInfo: vi.fn(async () => ({
       id: CHAT_ID,
       type: 'user',
@@ -666,6 +673,55 @@ describe('DmAutopilotService.reply', () => {
       'user-1',
       'ai.draft',
       expect.objectContaining({ text: 'Первая часть\n\nВторая часть' }),
+    );
+  });
+
+  it('forwards an attached image to the vision model', async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({
+        text: '',
+        mediaType: 'photo',
+        media: {
+          kind: 'photo',
+          mimeType: 'image/png',
+          fileName: null,
+          size: 10,
+          downloadable: true,
+        },
+      }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: '[изображение]' }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.messaging.downloadMedia).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      '1001',
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        images: [{ mime: 'image/png', data: Buffer.from('fake-image') }],
+        prompt: expect.stringContaining('изображение'),
+      }),
     );
   });
 

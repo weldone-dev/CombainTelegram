@@ -231,6 +231,31 @@ describe('AgentService.run', () => {
     });
   });
 
+  it('sends images as content parts', async () => {
+    const h = harness();
+    h.llm.chat.mockResolvedValue(reply({ content: 'A red square.' }));
+
+    const result = await h.service.run({
+      ...input,
+      images: [{ mime: 'image/png', data: Buffer.from('png-bytes') }],
+    });
+
+    expect(result.text).toBe('A red square.');
+    const call = h.llm.chat.mock.calls.at(-1)?.[0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const userMessage = call.messages.find((message) => message.role === 'user');
+    expect(userMessage?.content).toEqual([
+      { type: 'text', text: 'List my accounts' },
+      {
+        type: 'image_url',
+        image_url: {
+          url: `data:image/png;base64,${Buffer.from('png-bytes').toString('base64')}`,
+        },
+      },
+    ]);
+  });
+
   it('treats an explicit empty tool list as no tools at all', async () => {
     const h = harness({ skillTools: ['memory_add'] });
     h.llm.chat.mockResolvedValue(reply({ content: 'Plain answer' }));

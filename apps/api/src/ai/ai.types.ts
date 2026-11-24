@@ -132,9 +132,13 @@ export interface LlmToolCall {
   function: { name: string; arguments: string };
 }
 
+export type LlmContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  content: string | null | LlmContentPart[];
   tool_calls?: LlmToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -196,6 +200,8 @@ export interface AgentRunInput {
   source: string;
   /** User prompt or the rendered automation prompt. */
   prompt: string;
+  /** Images attached to the prompt (vision models only). */
+  images?: Array<{ mime: string; data: Buffer }>;
   /** Extra system instructions (surface-specific). */
   systemExtra?: string;
   /** Skill slugs to include in addition to the soul's skills. */

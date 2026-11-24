@@ -41,6 +41,8 @@ interface Pending {
 
 /** How many consecutive messages one reply is allowed to cover. */
 const MAX_BURST = 5;
+/** Biggest image forwarded to a vision model, bytes. */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 interface TypingState {
   userId: string;
@@ -170,6 +172,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
 
     const text =
       (message.text || '').trim() ||
+      (message.media?.kind === 'photo' ? '[изображение]' : '') ||
       `[${message.mediaType ?? 'media'}]`;
     if (!text) return;
     const senderName = message.senderName || `Чат ${chatId}`;
@@ -287,6 +290,43 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       if (oldest) this.peerProfiles.delete(oldest);
     }
     return block;
+  }
+
+  /**
+   * Downloads an attached image so the model can look at it. Only photos and
+   * image documents under {@link MAX_IMAGE_BYTES} are forwarded; anything else
+   * is left as a text placeholder.
+   */
+  private async imagesFor(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    message: MessageView,
+  ): Promise<Array<{ mime: string; data: Buffer }>> {
+    const media = message.media;
+    if (!media || !media.downloadable) return [];
+    const isImage =
+      media.kind === 'photo' ||
+      (media.kind === 'document' &&
+        (media.mimeType ?? '').toLowerCase().startsWith('image/'));
+    if (!isImage) return [];
+    if (media.size !== null && media.size > MAX_IMAGE_BYTES) return [];
+    try {
+      const file = await this.messaging.downloadMedia(
+        userId,
+        accountId,
+        String(chatId),
+        String(message.id),
+      );
+      if (!file.mimeType.toLowerCase().startsWith('image/')) return [];
+      if (file.data.length > MAX_IMAGE_BYTES) return [];
+      return [{ mime: file.mimeType, data: file.data }];
+    } catch (error) {
+      this.logger.warn(
+        `Could not download the image of ${message.id}: ${(error as Error).message}`,
+      );
+      return [];
+    }
   }
 
   /**
@@ -471,10 +511,17 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const instruction =
+    const images = await this.imagesFor(userId, accountId, chatId, message);
+    const instruction = [
+      images.length > 0
+        ? 'Собеседник прислал изображение — посмотри, что на нём, и ответь по смыслу.'
+        : '',
       soul.mode === 'draft'
         ? 'Предложи ответ от лица владельца.'
-        : 'Ответь от лица владельца.';
+        : 'Ответь от лица владельца.',
+    ]
+      .filter(Boolean)
+      .join(' ');
     // Models drift, so the format is spelled out both here and in the system
     // prompt; `parseReply` still accepts plain text when they ignore it.
     const replyFormat = [
@@ -535,6 +582,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       chatId,
       source: 'dm',
       prompt,
+      images,
       tools: [],
       systemExtra: [
         peerBlock,
