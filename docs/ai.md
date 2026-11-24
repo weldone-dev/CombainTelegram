@@ -254,6 +254,7 @@ are never overwritten, so edits survive restarts:
 | --- | --- |
 | `soul-creator` | interview and edit a soul; the shared bot's default |
 | `dm-assistant` | short, human replies in a personal chat |
+| `human-style` | strip AI writing habits: no lists, clichés or officialese; messenger-length Russian |
 | `memory-curator` | produce the `{summary, facts}` compaction JSON |
 | `automation-builder` | turn a request into trigger/action JSON |
 | `telegram-assistant` | read chats, draft answers, manage the account; per-account bot's default |
