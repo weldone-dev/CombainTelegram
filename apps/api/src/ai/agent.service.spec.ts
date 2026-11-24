@@ -48,6 +48,7 @@ function harness(
       apiKey: 'sk-test',
       temperature: 0.4,
       maxSteps: 6,
+      reasoningEffort: 'low' as const,
       dryRun: true,
       source: 'database' as const,
     })),
@@ -211,6 +212,23 @@ describe('AgentService.run', () => {
       expect.objectContaining({ tool: 'accounts_list', step: 0 }),
     ]);
     expect(data.finishedAt).toBeInstanceOf(Date);
+  });
+
+  it('records the model reasoning', async () => {
+    const h = harness();
+    h.llm.chat.mockResolvedValue(
+      reply({ content: 'Fine.', reasoning: 'Weigh the options first.' }),
+    );
+
+    const result = await h.service.run(input);
+
+    expect(result.reasoning).toBe('Weigh the options first.');
+    expect(h.llm.chat).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoningEffort: 'low' }),
+    );
+    expect(updatedData(h.prisma)).toMatchObject({
+      reasoning: 'Weigh the options first.',
+    });
   });
 
   it('treats an explicit empty tool list as no tools at all', async () => {

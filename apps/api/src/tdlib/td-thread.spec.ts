@@ -243,6 +243,60 @@ describe('TdSessionMessenger.getMessageThread', () => {
   });
 });
 
+describe('TdSessionMessenger.sendMessage', () => {
+  it('attaches a manual quote to the reply', async () => {
+    const { messenger, api } = createMessenger({
+      sendMessage: vi.fn(async () => messageFixture(910, 'ответ')),
+    });
+
+    const sent = await messenger.sendMessage(DISCUSSION_CHAT_ID, {
+      text: 'ответ',
+      replyToId: 901,
+      quote: 'первый комментарий',
+    });
+
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chat_id: DISCUSSION_CHAT_ID,
+        reply_to: {
+          _: 'inputMessageReplyToMessage',
+          message_id: 901,
+          quote: {
+            _: 'inputTextQuote',
+            text: {
+              _: 'formattedText',
+              text: 'первый комментарий',
+              entities: [],
+            },
+            rich_texts: [],
+            position: 0,
+          },
+          checklist_task_id: 0,
+          poll_option_id: '',
+        },
+      }),
+    );
+    expect(sent).toMatchObject({ id: 910, text: 'ответ' });
+  });
+
+  it('passes no quote when the input has none', async () => {
+    const { messenger, api } = createMessenger({
+      sendMessage: vi.fn(async () => messageFixture(911, 'ответ')),
+    });
+
+    await messenger.sendMessage(DISCUSSION_CHAT_ID, {
+      text: 'ответ',
+      replyToId: 901,
+    });
+
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reply_to: expect.objectContaining({ quote: null }),
+      }),
+    );
+  });
+});
+
 describe('TdSessionMessenger.sendComment', () => {
   it('replies to the thread root and returns the message with its final id', async () => {
     const pending = messageFixture(12345, 'новый комментарий', {

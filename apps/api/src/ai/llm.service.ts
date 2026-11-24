@@ -4,6 +4,7 @@ import type {
   LlmMessage,
   LlmReply,
   LlmToolCall,
+  ReasoningEffort,
   ToolSchema,
 } from './ai.types.js';
 
@@ -17,6 +18,8 @@ export interface LlmRequest {
   maxTokens?: number;
   /** Request timeout, milliseconds. */
   timeoutMs?: number;
+  /** off | low | medium | high; omitted for `off`. */
+  reasoningEffort?: ReasoningEffort;
 }
 
 interface ChatCompletionResponse {
@@ -24,6 +27,7 @@ interface ChatCompletionResponse {
   choices?: Array<{
     message?: {
       content?: string | null;
+      reasoning_content?: string | null;
       tool_calls?: LlmToolCall[];
     };
     finish_reason?: string;
@@ -84,6 +88,9 @@ export class LlmService {
       messages: request.messages,
       temperature: request.temperature ?? 0.7,
       max_tokens: request.maxTokens,
+      ...(request.reasoningEffort && request.reasoningEffort !== 'off'
+        ? { reasoning_effort: request.reasoningEffort }
+        : {}),
       ...(request.tools && request.tools.length > 0
         ? { tools: request.tools, tool_choice: 'auto' }
         : {}),
@@ -187,6 +194,11 @@ export class LlmService {
         });
         return {
           content: typeof message.content === 'string' ? message.content : '',
+          reasoning:
+            typeof message.reasoning_content === 'string' &&
+            message.reasoning_content.trim()
+              ? message.reasoning_content.trim()
+              : undefined,
           toolCalls,
           usage,
           model: parsed.model ?? request.model,

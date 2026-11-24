@@ -15,6 +15,7 @@ import { MemoryService } from './memory.service.js';
 import { SoulsService, parseSoulSettings } from './souls.service.js';
 import { PresenceService } from './presence.service.js';
 import { typingDurationMs } from './typing.js';
+import { parseReply } from './dm-reply.js';
 
 interface MessageNewPayload {
   accountId?: unknown;
@@ -54,6 +55,9 @@ const BATCH_MS = 1500;
 const MAX_AGE_MS = 120_000;
 /** Telegram clears a typing action after ~5 s, so refresh it well before that. */
 const TYPING_REFRESH_MS = 4_000;
+/** Short pause between the bubbles of a multi-message reply, milliseconds. */
+const PART_PAUSE_MIN_MS = 200;
+const PART_PAUSE_MAX_MS = 400;
 /** How long a fetched peer profile stays fresh, milliseconds. */
 const PEER_PROFILE_TTL_MS = 10 * 60_000;
 
@@ -173,12 +177,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     // A human shows the read receipt the moment the message is opened. If the
     // account was offline (idle) it first comes back online, then reads after
     // the configured delay — like picking up the phone.
-    const readDelayMs = await this.presence.incoming(accountId, chatId);
-    if (readDelayMs > 0) {
+    const gate = await this.presence.incoming(accountId, chatId);
+    if (gate.readDelayMs > 0) {
       const timer = setTimeout(() => {
         this.readTimers.delete(timer);
         void this.markRead(userId, accountId, chatId, message.id);
-      }, readDelayMs);
+      }, gate.readDelayMs);
       timer.unref?.();
       this.readTimers.add(timer);
     } else {
@@ -212,7 +216,9 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
           `Autopilot reply failed: ${(error as Error).message}`,
         );
       });
-    }, Math.min(BATCH_MS, Math.max(200, settings.replyDelayMs)));
+    }, Math.min(BATCH_MS, Math.max(200, settings.replyDelayMs)) +
+      gate.readDelayMs +
+      gate.typingDelayMs);
     this.pending.set(chatKey, {
       timer,
       accountId,
@@ -467,8 +473,17 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
 
     const instruction =
       soul.mode === 'draft'
-        ? 'Предложи ответ от лица владельца. Верни только текст ответа.'
-        : 'Ответь от лица владельца. Верни только текст ответа.';
+        ? 'Предложи ответ от лица владельца.'
+        : 'Ответь от лица владельца.';
+    // Models drift, so the format is spelled out both here and in the system
+    // prompt; `parseReply` still accepts plain text when they ignore it.
+    const replyFormat = [
+      'Формат ответа:',
+      '- 1–3 коротких сообщения; каждое — отдельной частью, части разделяй строкой ---',
+      '- если часть отвечает на конкретное входящее сообщение из списка, начни её с [#N] (N — его номер)',
+      '- если поможет короткая цитата из сообщения, добавь отдельной строкой: цитата: «...»',
+      '- пиши как живой человек: без Markdown, без списков, заголовков и подписи.',
+    ].join('\n');
     const prompt =
       texts.length > 1
         ? [
@@ -478,12 +493,16 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
             ),
             '',
             instruction,
+            '',
+            replyFormat,
           ].join('\n')
         : [
             `Входящее личное сообщение от «${senderName}»:`,
             (texts[0]?.text ?? '').slice(0, 4000),
             '',
             instruction,
+            '',
+            replyFormat,
           ].join('\n');
 
     // Read the history before storing this turn, otherwise the new message
@@ -508,10 +527,8 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       : '';
     if (!this.isCurrent(chatKey, token)) return;
 
-    if (settings.typing && soul.mode === 'auto') {
-      this.startTyping(chatKey, token, userId, accountId, chatId);
-    }
-
+    // No "typing…" while the model thinks: the indicator starts only when
+    // there is real text to type, which also keeps the thinking phase silent.
     const result = await this.agent.run({
       userId,
       accountId,
@@ -521,7 +538,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       tools: [],
       systemExtra: [
         peerBlock,
-        'Это живая переписка. Не упоминай ИИ, инструменты и настройки. Один короткий ответ, без кавычек и Markdown.',
+        'Это живая переписка. Не упоминай ИИ, инструменты и настройки. Пиши коротко, как в мессенджере: 1–3 сообщения, без Markdown и без кавычек вокруг всего текста.',
         peerBlock
           ? 'Данные собеседника выше взяты из его профиля Telegram. Если он спрашивает свой username, имя или профиль — назови их прямо и не говори, что видишь только имя.'
           : '',
@@ -546,71 +563,109 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const replyText = result.text.trim();
-    if (!replyText) {
+    const parts = parseReply(result.text);
+    if (parts.length === 0) {
       await this.stopTyping(chatKey, token, true);
       return;
     }
 
     if (soul.mode === 'draft') {
+      // A draft is one editable text, so the bubbles are joined back together.
+      const draftText = parts.map((part) => part.text).join('\n\n');
       await this.stopTyping(chatKey, token, false);
-      await this.memory.append(accountId, chatId, 'draft', replyText, {
+      await this.memory.append(accountId, chatId, 'draft', draftText, {
         runId: result.runId,
       });
       this.realtime.emitToUser(userId, 'ai.draft', {
         accountId,
         chatId,
-        text: replyText,
+        text: draftText,
         senderName,
         runId: result.runId,
       });
       return;
     }
 
-    if (settings.typing) {
-      const startedAt = this.typing.get(chatKey)?.startedAt ?? Date.now();
-      const total = typingDurationMs(
-        [...replyText].length,
-        settings.typingSpeed,
-      );
-      await this.wait(total - (Date.now() - startedAt), chatKey, token);
-    } else {
-      await this.wait(settings.replyDelayMs, chatKey, token);
-    }
-    if (!this.isCurrent(chatKey, token)) {
+    const messageIds: number[] = [];
+    const cancelled = async (index: number): Promise<boolean> => {
+      if (this.isCurrent(chatKey, token)) return false;
       await this.stopTyping(chatKey, token, true);
       emitLog({
         level: 'debug',
         source: 'ai',
         action: 'dm.autopilot.cancel',
-        message: `Reply in ${chatId} cancelled while ${settings.typing ? 'typing' : 'pausing'}`,
+        message: `Reply in ${chatId} cancelled before part ${index + 1} of ${parts.length}`,
         status: 'ok',
         accountId,
         chatId,
-        details: { phase: settings.typing ? 'typing' : 'delay', token },
+        details: {
+          phase: 'parts',
+          token,
+          sent: messageIds.length,
+          parts: parts.length,
+        },
       });
-      return;
+      return true;
+    };
+
+    for (const [index, part] of parts.entries()) {
+      if (await cancelled(index)) return;
+
+      if (index > 0) {
+        // A short pause makes the next bubble arrive as a separate message.
+        await this.wait(
+          PART_PAUSE_MIN_MS +
+            Math.floor(
+              Math.random() * (PART_PAUSE_MAX_MS - PART_PAUSE_MIN_MS),
+            ),
+          chatKey,
+          token,
+        );
+      }
+      if (settings.typing) {
+        this.startTyping(chatKey, token, userId, accountId, chatId);
+        await this.wait(
+          typingDurationMs([...part.text].length, settings.typingSpeed),
+          chatKey,
+          token,
+        );
+      } else if (index === 0) {
+        await this.wait(settings.replyDelayMs, chatKey, token);
+      }
+      if (await cancelled(index)) return;
+
+      const replyToId =
+        part.messageIndex !== undefined
+          ? (texts[part.messageIndex - 1]?.id ?? message.id)
+          : message.id;
+      const input: { text: string; replyToId: number; quote?: string } = {
+        text: part.text,
+        replyToId,
+      };
+      if (part.quote) input.quote = part.quote;
+
+      const sent = await this.messaging.sendMessage(
+        userId,
+        accountId,
+        String(chatId),
+        input,
+      );
+      messageIds.push(sent.id);
+      this.clearTyping(chatKey);
+      this.presence.touch(accountId);
+      await this.memory.append(accountId, chatId, 'assistant', part.text, {
+        messageId: sent.id,
+        runId: result.runId,
+      });
+      this.realtime.emitToUser(userId, 'ai.reply', {
+        accountId,
+        chatId,
+        text: part.text,
+        message: sent,
+        runId: result.runId,
+      });
     }
 
-    const sent = await this.messaging.sendMessage(
-      userId,
-      accountId,
-      String(chatId),
-      { text: replyText, replyToId: message.id },
-    );
-    this.clearTyping(chatKey);
-    this.presence.touch(accountId);
-    await this.memory.append(accountId, chatId, 'assistant', replyText, {
-      messageId: sent.id,
-      runId: result.runId,
-    });
-    this.realtime.emitToUser(userId, 'ai.reply', {
-      accountId,
-      chatId,
-      text: replyText,
-      message: sent,
-      runId: result.runId,
-    });
     emitLog({
       level: 'info',
       source: 'ai',
@@ -619,7 +674,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       status: 'ok',
       accountId,
       chatId,
-      details: { runId: result.runId, senderName, messageId: sent.id },
+      details: {
+        runId: result.runId,
+        senderName,
+        messageIds,
+        parts: parts.length,
+      },
     });
     void this.memory.maybeCompact(accountId, chatId);
   }

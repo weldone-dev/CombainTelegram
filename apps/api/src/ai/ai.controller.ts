@@ -250,6 +250,7 @@ export class AiController {
       return {
         runId: result.runId,
         text: result.text,
+        reasoning: result.reasoning,
         model: result.model,
         steps: result.steps,
         trace: result.trace,

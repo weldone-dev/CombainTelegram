@@ -9,6 +9,7 @@ import {
   parseMessageIds,
   parseOptionalBoolean,
   parseOptionalMessageId,
+  parseOptionalQuote,
   parsePollOptions,
   parseReactionEmoji,
   parseSearchQuery,
@@ -66,6 +67,17 @@ describe('search and forward validation', () => {
     expect(parseOptionalMessageId(undefined)).toBeUndefined();
     expect(parseOptionalMessageId('7')).toBe(7);
     expect(() => parseOptionalMessageId(0)).toThrow(/positive integer/);
+  });
+
+  it('trims reply quotes and clamps them to 200 characters', () => {
+    expect(parseOptionalQuote(undefined)).toBeUndefined();
+    expect(parseOptionalQuote(null)).toBeUndefined();
+    expect(parseOptionalQuote('   ')).toBeUndefined();
+    expect(parseOptionalQuote('  встречаемся в семь  ')).toBe(
+      'встречаемся в семь',
+    );
+    expect(parseOptionalQuote('😀'.repeat(250))).toBe('😀'.repeat(200));
+    expect(() => parseOptionalQuote(42)).toThrow(/quote must be a string/);
   });
 });
 

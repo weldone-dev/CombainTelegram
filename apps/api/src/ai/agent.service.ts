@@ -186,6 +186,7 @@ export class AgentService implements OnModuleInit {
 
     const trace: AgentTraceEntry[] = [];
     let text = '';
+    let reasoning = '';
     let steps = 0;
     let inputTokens = 0;
     let outputTokens = 0;
@@ -200,7 +201,11 @@ export class AgentService implements OnModuleInit {
           tools: toolSchemas,
           temperature,
           maxTokens: 1800,
+          reasoningEffort: provider.reasoningEffort,
         });
+        if (reply.reasoning) {
+          reasoning = reasoning ? `${reasoning}\n\n${reply.reasoning}` : reply.reasoning;
+        }
         steps += 1;
         inputTokens += reply.usage.promptTokens;
         outputTokens += reply.usage.completionTokens;
@@ -256,7 +261,11 @@ export class AgentService implements OnModuleInit {
           ],
           temperature,
           maxTokens: 800,
+          reasoningEffort: provider.reasoningEffort,
         });
+        if (final.reasoning) {
+          reasoning = reasoning ? `${reasoning}\n\n${final.reasoning}` : final.reasoning;
+        }
         text = final.content.trim();
         inputTokens += final.usage.promptTokens;
         outputTokens += final.usage.completionTokens;
@@ -267,6 +276,7 @@ export class AgentService implements OnModuleInit {
         data: {
           status: 'ok',
           output: text.slice(0, 16_000),
+          reasoning: reasoning.slice(0, 16_000) || null,
           steps,
           trace: JSON.stringify(trace),
           inputTokens,
@@ -278,6 +288,7 @@ export class AgentService implements OnModuleInit {
       return {
         runId: run.id,
         text,
+        reasoning: reasoning.trim() || undefined,
         model,
         steps,
         trace,

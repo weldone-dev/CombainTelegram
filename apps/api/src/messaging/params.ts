@@ -3,6 +3,8 @@ import { apiError } from '../common/api-error.js';
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const MAX_TEXT_LENGTH = 4096;
+/** Longest reply quote the API keeps; longer excerpts are clamped. */
+const MAX_QUOTE_LENGTH = 200;
 const MAX_SEARCH_QUERY_LENGTH = 256;
 const MAX_FORWARD_MESSAGES = 100;
 const USERNAME_PATTERN = /^[a-zA-Z0-9_]{1,64}$/;
@@ -98,6 +100,18 @@ export function parseOptionalCaption(value: unknown): string | undefined {
     invalid(`caption must be at most ${MAX_TEXT_LENGTH} characters`);
   }
   return caption;
+}
+
+/**
+ * Optional reply quote: a short excerpt of the replied message. Trimmed and
+ * clamped to 200 characters; empty means "reply without a quote".
+ */
+export function parseOptionalQuote(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') invalid('quote must be a string');
+  const quote = value.trim();
+  if (!quote) return undefined;
+  return Array.from(quote).slice(0, MAX_QUOTE_LENGTH).join('');
 }
 
 /** Search query: trimmed, 1..256 characters. */

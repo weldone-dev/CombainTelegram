@@ -411,6 +411,8 @@ model AiSetting {
   apiKeyDekTag      Bytes?
   temperature       Float    @default(0.7)
   maxSteps          Int      @default(6)
+  /// Reasoning effort sent to the model: off | low | medium | high.
+  reasoningEffort   String   @default("low")
   /// When true, send/edit/delete/react tools answer with a simulated result
   /// instead of touching Telegram. Soul autopilot is exempt (explicit opt-in).
   dryRun            Boolean  @default(true)
@@ -445,6 +447,8 @@ model AgentRun {
   status       String   @default("running")
   prompt       String
   output       String?
+  /// Model reasoning / thinking, when the provider returns it.
+  reasoning    String?
   model        String?
   steps        Int      @default(0)
   trace        String   @default("[]")

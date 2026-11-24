@@ -72,6 +72,7 @@ import {
   parseOptionalBoolean,
   parseOptionalCaption,
   parseOptionalMessageId,
+  parseOptionalQuote,
   parseOptionalSessionId,
   parsePollOptions,
   parseReactionEmoji,
@@ -1146,16 +1147,22 @@ export class MessagingService {
     userId: string,
     accountId: string,
     rawChatId: string,
-    body: { text?: unknown; replyToId?: unknown; sessionId?: unknown } = {},
+    body: {
+      text?: unknown;
+      replyToId?: unknown;
+      quote?: unknown;
+      sessionId?: unknown;
+    } = {},
   ): Promise<MessageView> {
     const chatId = parseChatId(rawChatId);
     const text = parseMessageText(body.text);
     const replyToId = parseOptionalMessageId(body.replyToId);
+    const quote = parseOptionalQuote(body.quote);
     const sessionId = parseOptionalSessionId(body.sessionId);
     const td = await this.tdFor(userId, accountId, sessionId, 'sendMessage');
     if (td) {
       try {
-        return await td.sendMessage(chatId, { text, replyToId });
+        return await td.sendMessage(chatId, { text, replyToId, quote });
       } catch (error) {
         this.logTdFailure(
           'sendMessage',
@@ -1170,6 +1177,8 @@ export class MessagingService {
       sessionId,
     );
 
+    // mtcute has no partial-quote payload; the reply still points at the
+    // message, only the highlighted excerpt is dropped.
     try {
       const message: Message = await client.sendText(
         chatId,

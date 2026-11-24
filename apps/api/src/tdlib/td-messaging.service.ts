@@ -4,6 +4,7 @@ import type { Client } from 'tdlib-native';
 import type {
   ChatList,
   chat,
+  inputTextQuote,
   message,
   messageThreadInfo,
   SearchMessagesFilter,
@@ -114,6 +115,8 @@ export interface TdListMessagesQuery {
 export interface TdSendMessageInput {
   text: string;
   replyToId?: number;
+  /** Short quote from the replied message, shown above the reply. */
+  quote?: string;
 }
 
 export interface TdSendMediaInput {
@@ -1478,6 +1481,16 @@ export class TdSessionMessenger implements TdMessenger {
     return { _: 'formattedText' as const, text, entities: [] };
   }
 
+  /** Manual quote of the replied message: plain text, no rich formatting. */
+  private textQuote(text: string): inputTextQuote {
+    return {
+      _: 'inputTextQuote',
+      text: this.formattedText(text),
+      rich_texts: [],
+      position: 0,
+    };
+  }
+
   /**
    * TDLib returns a message with a temporary id and `sending_state` while the
    * send is in flight; the real server id arrives with
@@ -1573,7 +1586,7 @@ export class TdSessionMessenger implements TdMessenger {
           ? {
               _: 'inputMessageReplyToMessage',
               message_id: input.replyToId,
-              quote: null,
+              quote: input.quote ? this.textQuote(input.quote) : null,
               checklist_task_id: 0,
               poll_option_id: '',
             }

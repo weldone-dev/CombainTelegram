@@ -16,6 +16,7 @@ import {
   type AiPolicyView,
   type AiSettingsUpdate,
   type AiSettingsView,
+  type ReasoningEffort,
   type ResolvedProvider,
 } from './ai.types.js';
 
@@ -30,6 +31,18 @@ export interface PolicyUpdate {
   blockChatIds?: unknown;
   dryRun?: unknown;
   ownerTgUserIds?: unknown;
+}
+
+const REASONING_EFFORTS: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
+
+function parseReasoningEffort(
+  value: unknown,
+  fallback: ReasoningEffort = 'low',
+): ReasoningEffort {
+  const effort = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return (REASONING_EFFORTS as string[]).includes(effort)
+    ? (effort as ReasoningEffort)
+    : fallback;
 }
 
 function text(value: unknown, fallback = ''): string {
@@ -253,6 +266,9 @@ export class AiConfigService implements OnModuleInit {
       apiKey,
       temperature: row.temperature,
       maxSteps: row.maxSteps,
+      reasoningEffort: parseReasoningEffort(
+        row.reasoningEffort || this.env('AI_REASONING_EFFORT'),
+      ),
       dryRun: row.dryRun,
       source: row.baseUrl || row.model ? 'database' : 'env',
     };
@@ -315,6 +331,12 @@ export class AiConfigService implements OnModuleInit {
     }
     if (input.maxSteps !== undefined) {
       data.maxSteps = clampSteps(input.maxSteps, row.maxSteps);
+    }
+    if (input.reasoningEffort !== undefined) {
+      data.reasoningEffort = parseReasoningEffort(
+        input.reasoningEffort,
+        parseReasoningEffort(row.reasoningEffort),
+      );
     }
     if (input.dryRun !== undefined) {
       data.dryRun = input.dryRun === true || input.dryRun === 'true';
@@ -427,6 +449,7 @@ export class AiConfigService implements OnModuleInit {
             : 'none',
       temperature: row.temperature,
       maxSteps: row.maxSteps,
+      reasoningEffort: parseReasoningEffort(row.reasoningEffort),
       dryRun: row.dryRun,
       capabilities: policy.capabilities,
       allowAccountIds: policy.allowAccountIds,

@@ -185,6 +185,9 @@ function SettingsPanel({
   const [apiKey, setApiKey] = useState("");
   const [temperature, setTemperature] = useState(String(settings.temperature));
   const [maxSteps, setMaxSteps] = useState(String(settings.maxSteps));
+  const [reasoningEffort, setReasoningEffort] = useState<
+    "off" | "low" | "medium" | "high"
+  >(settings.reasoningEffort);
   const [capabilities, setCapabilities] = useState<AiCapabilities>(
     settings.capabilities,
   );
@@ -213,6 +216,7 @@ function SettingsPanel({
     setFastModel(settings.fastModel);
     setTemperature(String(settings.temperature));
     setMaxSteps(String(settings.maxSteps));
+    setReasoningEffort(settings.reasoningEffort);
     setCapabilities(settings.capabilities);
     setDryRun(settings.dryRun);
     setAllowAccountIds(settings.allowAccountIds);
@@ -243,6 +247,7 @@ function SettingsPanel({
         fastModel: fastModel.trim(),
         temperature: temperatureValue,
         maxSteps: stepsValue,
+        reasoningEffort,
         dryRun,
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
       });
@@ -414,6 +419,25 @@ function SettingsPanel({
               inputMode="numeric"
               className={inputClass}
             />
+          </Field>
+          <Field
+            label="Размышления модели"
+            hint="low — по умолчанию; пока модель думает, «печатает…» не отправляется"
+          >
+            <select
+              value={reasoningEffort}
+              onChange={(event) =>
+                setReasoningEffort(
+                  event.target.value as "off" | "low" | "medium" | "high",
+                )
+              }
+              className={inputClass}
+            >
+              <option value="off">off — без размышлений</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
           </Field>
         </div>
         <div className="mt-3">

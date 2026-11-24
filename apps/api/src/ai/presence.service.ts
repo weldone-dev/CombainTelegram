@@ -21,6 +21,14 @@ interface PresenceState {
   onlineAt?: number;
 }
 
+/** How long the autopilot should wait before reading and before typing. */
+export interface PresenceGate {
+  /** Delay before the read receipt, measured from the incoming message. */
+  readDelayMs: number;
+  /** Extra pause between the read receipt and the first "typing…". */
+  typingDelayMs: number;
+}
+
 interface PresencePayload {
   accountId?: unknown;
   chatId?: unknown;
@@ -112,15 +120,17 @@ export class PresenceService implements OnModuleInit, OnModuleDestroy {
    * does not jump online instantly — it looks like the person picked up the
    * phone after a few seconds.
    */
-  async incoming(accountId: string, chatId: number): Promise<number> {
+  async incoming(accountId: string, chatId: number): Promise<PresenceGate> {
     const settings = await this.settingsFor(accountId);
     const state = this.state(accountId);
     if (state.online) {
       this.touch(accountId);
-      return 0;
+      return { readDelayMs: 0, typingDelayMs: 0 };
     }
     const readDelayMs =
-      seconds(settings?.presenceReadDelaySeconds ?? 10, 300) * 1000;
+      seconds(settings?.presenceReadDelaySeconds ?? 0, 300) * 1000;
+    const typingDelayMs =
+      seconds(settings?.presenceTypingDelaySeconds ?? 3, 120) * 1000;
     const onlineDelayMs =
       seconds(settings?.presenceOnlineDelaySeconds ?? 5, 600) * 1000;
     let onlineInMs = onlineDelayMs;
@@ -134,17 +144,18 @@ export class PresenceService implements OnModuleInit, OnModuleDestroy {
       timer.unref?.();
       state.onlineTimer = timer;
     }
+    const untilReadMs = onlineInMs + readDelayMs;
     emitLog({
       level: 'debug',
       source: 'ai',
       action: 'presence.pending',
-      message: `Offline; online in ${onlineInMs} ms, ${chatId} will be read ${readDelayMs} ms after that`,
+      message: `Offline; online in ${onlineInMs} ms, read in ${untilReadMs} ms, typing ${typingDelayMs} ms later`,
       status: 'ok',
       accountId,
       chatId,
-      details: { onlineInMs, readDelayMs },
+      details: { onlineInMs, readDelayMs: untilReadMs, typingDelayMs },
     });
-    return onlineInMs + readDelayMs;
+    return { readDelayMs: untilReadMs, typingDelayMs };
   }
 
   /** Switches the account online after the "picked up the phone" delay. */

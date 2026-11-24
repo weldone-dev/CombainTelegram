@@ -77,7 +77,12 @@ with a 400 ms × attempt pause. Every failure goes through that loop (a bad key 
 attempted three times), then the run fails with the provider's message. Each step
 asks for at most 1 800 completion tokens. The fallback summary (when the model
 spends its whole step budget on tools) asks for 800. `temperature` is clamped to
-0…2 and `maxSteps` to 1…12 (default 6).
+0…2 and `maxSteps` to 1…12 (default 6). `reasoningEffort` (`off`/`low`/`medium`/
+`high`, default `low`, env `AI_REASONING_EFFORT`) is sent as `reasoning_effort`;
+when the provider returns `reasoning_content` it is stored in
+`AgentRun.reasoning` and shown as a collapsible «Размышления» block in the
+dashboard chat. Reasoning is silent in Telegram: no `typing…` is sent while the
+model thinks, the indicator starts only when there is text to type.
 
 ### OpenCode Go via Orca
 
@@ -89,6 +94,8 @@ session header:
 AI_BASE_URL=https://opencode.ai/inference/go/openai/v1
 AI_MODEL=deepseek-v4.1-flash
 AI_FAST_MODEL=deepseek-v4.1-flash
+# off | low | medium | high (default low)
+AI_REASONING_EFFORT=low
 AI_EXTRA_HEADERS={"x-opencode-session":"ses_combaintelegram"}
 # Read the live token from Orca's OpenCode database and follow its refreshes.
 AI_API_KEY_SOURCE=opencode
@@ -159,8 +166,9 @@ Modes:
 | `typingSpeed` | `300` | characters per minute for the typing indicator, clamped to 40…600 (600 = human upper bound) |
 | `peerProfile` | `true` | pass the peer's Telegram name, username and profile bio to the agent (cached 10 min, best-effort) |
 | `presenceIdleMinutes` | `5` | minutes without activity before the account looks offline; `0` never goes offline |
-| `presenceReadDelaySeconds` | `10` | delay before reading a message that arrived while the account was offline |
-| `presenceOnlineDelaySeconds` | `5` | delay before the account shows online again after such a message |
+| `presenceOnlineDelaySeconds` | `5` | delay before the account shows online again after a message that arrived while offline, 0…600 s |
+| `presenceReadDelaySeconds` | `0` | extra delay between coming online and the read receipt, 0…300 s |
+| `presenceTypingDelaySeconds` | `3` | pause between the read receipt and the first `typing…`, 0…120 s |
 
 `PUT` validates the mode and replaces `settings` with the parsed object; because
 parsing fills defaults first, omitted keys fall back to the defaults above — send
@@ -179,8 +187,10 @@ no dashboard open) and:
    cancels the reply that is still generating or typing — its result is dropped,
    `typing…` is hidden and the run restarts with the new context; before
    generating anything it marks the chat read up to the incoming message on the
-   active engine, so the sender sees the read receipt immediately (best-effort:
-   a failed receipt never blocks the reply);
+   active engine — immediately while the account is online, or after the
+   presence delays (§4 "Presence") when it was offline — and postpones the reply
+   by the same amount, so the sender never sees "online", "read" and "typing…"
+   all at once (best-effort: a failed receipt never blocks the reply);
 4. enforces `maxPerHour` / `maxPerChatPerDay` by counting assistant `SoulTurn`
    rows;
 5. runs the agent with `source = "dm"`, the persona and memory, no tools
@@ -188,12 +198,30 @@ no dashboard open) and:
    message to memory; when `peerProfile` is on, the system prompt also carries
    the peer's username and profile bio (`getChatInfo`), so the soul knows who it
    is talking to;
-6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` keeps a `typing…`
-   heartbeat every 4 s while the model works, holds it until
-   `typingDurationMs = length / typingSpeed` (0.6…60 s) has elapsed, then sends
-   the reply as a Telegram reply, appends the assistant turn, emits `ai.reply`
-   and triggers memory compaction. A cancelled run clears the heartbeat and
-   sends `chatActionCancel`, so the indicator disappears until the next run.
+6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` keeps the thinking
+   phase silent (no `typing…` while the model works), then for each reply
+   bubble starts a `typing…` heartbeat every 4 s, holds it until
+   `typingDurationMs = length / typingSpeed` (0.6…60 s) has elapsed, sends the
+   bubble as a Telegram reply, appends the assistant turn and emits `ai.reply`.
+   A cancelled run clears the heartbeat and sends `chatActionCancel`, so the
+   indicator disappears until the next run.
+
+### Several bubbles and quotes
+
+One incoming burst may need several answers. The prompt gives the model the
+numbered burst and this output format:
+
+- split bubbles with a line that is exactly `---` (1–3 recommended, max 5);
+- start a bubble with `[#N]` to answer the N-th incoming message;
+- add a line `цитата: «…»` to quote a short excerpt of that message
+  (TDLib `inputTextQuote`, max 200 chars);
+- no Markdown, one thought per bubble.
+
+`parseReply()` (`dm-reply.ts`) turns that into parts. Each part is sent with its
+own typing hold, `replyToId` pointing at the chosen incoming message and the
+quote, with a 200–400 ms pause between bubbles so they arrive separately. A new
+incoming message cancels the remaining bubbles (`dm.autopilot.cancel`,
+`phase: "parts"`). Draft mode joins the parts back into one editable draft.
 
 It never starts a conversation: only replies to an incoming message. Autopilot
 writes are exempt from `dryRun` because `auto`/`draft` is an explicit opt-in
@@ -204,18 +232,31 @@ writes are exempt from `dryRun` because `auto`/`draft` is an explicit opt-in
 `PresenceService` makes the account behave like a person who is not glued to
 the phone:
 
-- any activity (incoming DM, sent reply, outgoing message) marks the account
+- any outgoing activity (a sent reply or an outgoing message) marks the account
   online and re-arms an idle timer;
 - after `presenceIdleMinutes` without activity it calls `setOnline(false)`
   (TDLib option `online`, mtcute `setOnline`), so the peer sees the last-seen
   status instead of "online";
-- the first DM after that switches the account back online after
-  `presenceOnlineDelaySeconds` (default 5 s, so it does not look like a robot
-  answering instantly), then marks the chat read `presenceReadDelaySeconds`
-  later — the sender sees "online" first and the read receipt after the delay.
+- the first DM after that follows a fixed order, so the sender does not see
+  "online", the read receipt and `typing…` in the same instant:
 
-Logs: `presence.offline`, `presence.online`, `presence.option_ignored` (TDLib
-did not apply the option), plus the usual `dm.autopilot.read`.
+  1. the message arrives while the account is offline: it stays offline and the
+     read receipt is postponed;
+  2. after `presenceOnlineDelaySeconds` (default 5 s) the account goes online;
+  3. `presenceReadDelaySeconds` later (default 0) the chat is marked read — with
+     the default the receipt lands as the account appears online;
+  4. `presenceTypingDelaySeconds` after the read receipt (default 3 s) the
+     autopilot shows `typing…` and starts the reply.
+
+  The reply debounce is shifted by the same total, so the answer never overtakes
+  the read receipt or the typing indicator. While the account is already online
+  the gate is zero: the chat is marked read immediately and the normal
+  `replyDelayMs` debounce applies.
+
+Logs: `presence.offline` (the idle timer fired), `presence.pending` (a DM arrived
+while offline; carries the online/read/typing deadlines), `presence.online`
+(back online), `presence.option_ignored` (TDLib did not apply the option), plus
+the usual `dm.autopilot.read`.
 
 ## 5. Memory
 
@@ -594,7 +635,7 @@ The sidebar entry is “AI” (page title “AI и души”). The page has si
 | Скиллы | create/edit/disable/delete skills, edit instructions and tool list |
 | Автоматизации | editor for trigger/action, enable toggle, “Run”, last 30 runs |
 | Боты | shared bot card, per-account cards, token, username, allowlist, skills, “Проверить” |
-| Настройки | model/URL/key (write-only), temperature, max steps, dryRun, all capability toggles, account/chat allowlists, owner ids, MCP endpoint + token + rotate, tool list grouped by capability |
+| Настройки | model/URL/key (write-only), temperature, max steps, reasoning effort, dryRun, all capability toggles, account/chat allowlists, owner ids, MCP endpoint + token + rotate, tool list grouped by capability |
 
 ## 14. Safety rules
 

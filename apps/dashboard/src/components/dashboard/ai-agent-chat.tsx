@@ -14,6 +14,7 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  reasoning?: string;
   trace?: AgentTraceEntry[];
 }
 
@@ -94,6 +95,7 @@ export function AgentChatPanel({
           id: reply.runId,
           role: "assistant",
           content: reply.text || "(пустой ответ)",
+          reasoning: reply.reasoning,
           trace: reply.trace,
         },
       ]);
@@ -188,6 +190,16 @@ export function AgentChatPanel({
                   : "border border-zinc-800 bg-zinc-950/70 text-zinc-200"
               }`}
             >
+              {message.reasoning && (
+                <details className="mb-2 rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5">
+                  <summary className="cursor-pointer list-none text-[10px] tracking-wide text-zinc-500 uppercase">
+                    Размышления
+                  </summary>
+                  <div className="mt-1 max-h-48 overflow-y-auto text-[11px] whitespace-pre-wrap text-zinc-400">
+                    {message.reasoning}
+                  </div>
+                </details>
+              )}
               {message.content}
               {message.trace && message.trace.length > 0 && (
                 <div className="mt-2 border-t border-zinc-800 pt-2">

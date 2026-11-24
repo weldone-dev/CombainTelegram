@@ -52,6 +52,7 @@ interface NumberDraft {
   presenceIdleMinutes: string;
   presenceReadDelaySeconds: string;
   presenceOnlineDelaySeconds: string;
+  presenceTypingDelaySeconds: string;
   temperature: string;
 }
 
@@ -63,6 +64,7 @@ const EMPTY_NUMBERS: NumberDraft = {
   presenceIdleMinutes: "",
   presenceReadDelaySeconds: "",
   presenceOnlineDelaySeconds: "",
+  presenceTypingDelaySeconds: "",
   temperature: "",
 };
 
@@ -76,6 +78,9 @@ function numbersOf(soul: SoulView): NumberDraft {
     presenceReadDelaySeconds: String(soul.settings.presenceReadDelaySeconds),
     presenceOnlineDelaySeconds: String(
       soul.settings.presenceOnlineDelaySeconds,
+    ),
+    presenceTypingDelaySeconds: String(
+      soul.settings.presenceTypingDelaySeconds,
     ),
     temperature: String(soul.temperature),
   };
@@ -354,6 +359,12 @@ export function SoulsPanel() {
             freshDraft.settings.presenceOnlineDelaySeconds,
             0,
             600,
+          ),
+          presenceTypingDelaySeconds: clampNumber(
+            numbers.presenceTypingDelaySeconds,
+            freshDraft.settings.presenceTypingDelaySeconds,
+            0,
+            120,
           ),
         },
         skillSlugs: freshDraft.skills.map((skill) => skill.slug),
@@ -687,13 +698,29 @@ export function SoulsPanel() {
                   </Field>
                   <Field
                     label="Читать после возврата, сек"
-                    hint="Задержка чтения сообщения, пришедшего в оффлайн"
+                    hint="0 — читать сразу после выхода в онлайн"
                   >
                     <input
                       value={numbers.presenceReadDelaySeconds}
                       onChange={(event) =>
                         updateNumber(
                           "presenceReadDelaySeconds",
+                          event.target.value,
+                        )
+                      }
+                      inputMode="numeric"
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    label="Начинать печатать через, сек"
+                    hint="Пауза между прочтением и «печатает…»"
+                  >
+                    <input
+                      value={numbers.presenceTypingDelaySeconds}
+                      onChange={(event) =>
+                        updateNumber(
+                          "presenceTypingDelaySeconds",
                           event.target.value,
                         )
                       }

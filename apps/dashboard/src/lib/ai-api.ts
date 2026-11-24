@@ -33,6 +33,8 @@ export interface AiSettings {
   apiKeySource: "db" | "env" | "opencode" | "none";
   temperature: number;
   maxSteps: number;
+  /** off | low | medium | high */
+  reasoningEffort: "off" | "low" | "medium" | "high";
   dryRun: boolean;
   capabilities: AiCapabilities;
   allowAccountIds: string[];
@@ -71,6 +73,7 @@ export interface SoulSettings {
   presenceIdleMinutes: number;
   presenceReadDelaySeconds: number;
   presenceOnlineDelaySeconds: number;
+  presenceTypingDelaySeconds: number;
 }
 
 export interface SoulView {
@@ -146,6 +149,8 @@ export interface AgentTraceEntry {
 export interface AgentReply {
   runId: string;
   text: string;
+  /** Model reasoning / thinking, when the provider returns it. */
+  reasoning?: string;
   model: string;
   steps: number;
   trace: AgentTraceEntry[];

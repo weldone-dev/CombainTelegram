@@ -97,6 +97,14 @@ function mergeSoulSettings(
       600,
     );
   }
+  if (source.presenceTypingDelaySeconds !== undefined) {
+    next.presenceTypingDelaySeconds = clampInt(
+      source.presenceTypingDelaySeconds,
+      current.presenceTypingDelaySeconds,
+      0,
+      120,
+    );
+  }
   if (source.typingSpeed !== undefined) {
     next.typingSpeed = clampTypingCpm(
       source.typingSpeed,
@@ -159,6 +167,12 @@ export function parseSoulSettings(raw: unknown): SoulSettings {
       DEFAULT_SOUL_SETTINGS.presenceOnlineDelaySeconds,
       0,
       600,
+    ),
+    presenceTypingDelaySeconds: clampInt(
+      source.presenceTypingDelaySeconds,
+      DEFAULT_SOUL_SETTINGS.presenceTypingDelaySeconds,
+      0,
+      120,
     ),
   };
 }

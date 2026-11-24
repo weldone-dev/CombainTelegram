@@ -65,6 +65,8 @@ export interface AiSettingsView {
   apiKeySource: 'db' | 'env' | 'opencode' | 'none';
   temperature: number;
   maxSteps: number;
+  /** off | low | medium | high; low by default. */
+  reasoningEffort: ReasoningEffort;
   dryRun: boolean;
   capabilities: AiCapabilities;
   allowAccountIds: string[];
@@ -86,6 +88,7 @@ export interface AiSettingsUpdate {
   baseUrl?: unknown;
   model?: unknown;
   fastModel?: unknown;
+  reasoningEffort?: unknown;
   /** Empty string clears the stored key; undefined keeps it. */
   apiKey?: unknown;
   temperature?: unknown;
@@ -98,6 +101,8 @@ export interface AiSettingsUpdate {
   ownerTgUserIds?: unknown;
 }
 
+export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high';
+
 export interface ResolvedProvider {
   provider: string;
   baseUrl: string;
@@ -106,6 +111,7 @@ export interface ResolvedProvider {
   fastModel: string;
   temperature: number;
   maxSteps: number;
+  reasoningEffort: ReasoningEffort;
   dryRun: boolean;
   source: 'env' | 'database';
 }
@@ -141,6 +147,8 @@ export interface LlmUsage {
 
 export interface LlmReply {
   content: string;
+  /** Provider reasoning/thinking text, when returned. */
+  reasoning?: string;
   toolCalls: LlmToolCall[];
   usage: LlmUsage;
   model: string;
@@ -214,6 +222,8 @@ export interface AgentTraceEntry {
 export interface AgentRunResult {
   runId: string;
   text: string;
+  /** Accumulated reasoning/thinking of the model. */
+  reasoning?: string;
   model: string;
   steps: number;
   trace: AgentTraceEntry[];
@@ -246,10 +256,12 @@ export interface SoulSettings {
   peerProfile: boolean;
   /** Minutes without activity before the account goes offline; 0 disables. */
   presenceIdleMinutes: number;
-  /** Seconds to wait before reading a message that arrived while offline. */
+  /** Extra seconds between coming online and reading the message. */
   presenceReadDelaySeconds: number;
   /** Seconds to wait before showing the account online again. */
   presenceOnlineDelaySeconds: number;
+  /** Seconds between the read receipt and the first "typing…". */
+  presenceTypingDelaySeconds: number;
 }
 
 export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
@@ -263,8 +275,9 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   typingSpeed: 300,
   peerProfile: true,
   presenceIdleMinutes: 5,
-  presenceReadDelaySeconds: 10,
+  presenceReadDelaySeconds: 0,
   presenceOnlineDelaySeconds: 5,
+  presenceTypingDelaySeconds: 3,
 };
 
 export interface SkillView {

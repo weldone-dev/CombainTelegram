@@ -16,7 +16,8 @@ function soul(overrides: Record<string, unknown> = {}): SoulModel {
     settings: JSON.stringify({
       ...DEFAULT_SOUL_SETTINGS,
       presenceIdleMinutes: 5,
-      presenceReadDelaySeconds: 10,
+      presenceReadDelaySeconds: 0,
+      presenceTypingDelaySeconds: 3,
       ...overrides,
     }),
   } as unknown as SoulModel;
@@ -63,10 +64,10 @@ describe('PresenceService', () => {
       false,
     );
 
-    const delay = await h.service.incoming(ACCOUNT, CHAT);
+    const gate = await h.service.incoming(ACCOUNT, CHAT);
 
-    // Online after 5 s, read 10 s later.
-    expect(delay).toBe(15_000);
+    // Online after 5 s, read the moment it is online, typing 3 s later.
+    expect(gate).toEqual({ readDelayMs: 5_000, typingDelayMs: 3_000 });
     expect(h.messaging.setOnline).toHaveBeenCalledTimes(1);
     expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
       'user-1',
@@ -95,8 +96,8 @@ describe('PresenceService', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     const second = await h.service.incoming(ACCOUNT, CHAT);
 
-    expect(first).toBe(15_000);
-    expect(second).toBe(13_000);
+    expect(first).toEqual({ readDelayMs: 5_000, typingDelayMs: 3_000 });
+    expect(second).toEqual({ readDelayMs: 3_000, typingDelayMs: 3_000 });
 
     await vi.advanceTimersByTimeAsync(3_000);
     expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
@@ -117,10 +118,10 @@ describe('PresenceService', () => {
     await h.service.onModuleInit();
     await vi.advanceTimersByTimeAsync(5 * 60_000);
 
-    const delay = await h.service.incoming(ACCOUNT, CHAT);
+    const gate = await h.service.incoming(ACCOUNT, CHAT);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(delay).toBe(10_000);
+    expect(gate).toEqual({ readDelayMs: 0, typingDelayMs: 3_000 });
     expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
       'user-1',
       ACCOUNT,
@@ -133,9 +134,9 @@ describe('PresenceService', () => {
     const h = harness();
     await h.service.onModuleInit();
 
-    const delay = await h.service.incoming(ACCOUNT, CHAT);
+    const gate = await h.service.incoming(ACCOUNT, CHAT);
 
-    expect(delay).toBe(0);
+    expect(gate).toEqual({ readDelayMs: 0, typingDelayMs: 0 });
     expect(h.messaging.setOnline).not.toHaveBeenCalled();
   });
 
@@ -154,10 +155,10 @@ describe('PresenceService', () => {
     const h = harness(null);
     await h.service.onModuleInit();
 
-    const delay = await h.service.incoming(ACCOUNT, CHAT);
+    const gate = await h.service.incoming(ACCOUNT, CHAT);
     await vi.advanceTimersByTimeAsync(60 * 60_000);
 
-    expect(delay).toBe(0);
+    expect(gate).toEqual({ readDelayMs: 0, typingDelayMs: 0 });
     expect(h.messaging.setOnline).not.toHaveBeenCalled();
   });
 
