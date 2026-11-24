@@ -347,6 +347,16 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     const state = this.typing.get(chatKey);
     if (!state) return;
     this.clearTyping(chatKey);
+    emitLog({
+      level: 'debug',
+      source: 'ai',
+      action: 'dm.autopilot.cancel',
+      message: `Typing in ${state.chatId} cancelled by a newer message`,
+      status: 'ok',
+      accountId: state.accountId,
+      chatId: state.chatId,
+      details: { phase: 'typing', token: state.token },
+    });
     void this.messaging
       .sendTyping(state.userId, state.accountId, String(state.chatId), {
         status: 'cancel',
@@ -511,10 +521,11 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         level: 'debug',
         source: 'ai',
         action: 'dm.autopilot.cancel',
-        message: `Reply in ${chatId} cancelled by a newer message`,
+        message: `Reply in ${chatId} cancelled before sending`,
         status: 'ok',
         accountId,
         chatId,
+        details: { phase: 'generation', token },
       });
       return;
     }
@@ -552,6 +563,16 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     }
     if (!this.isCurrent(chatKey, token)) {
       await this.stopTyping(chatKey, token, true);
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.cancel',
+        message: `Reply in ${chatId} cancelled while ${settings.typing ? 'typing' : 'pausing'}`,
+        status: 'ok',
+        accountId,
+        chatId,
+        details: { phase: settings.typing ? 'typing' : 'delay', token },
+      });
       return;
     }
 
@@ -581,7 +602,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       status: 'ok',
       accountId,
       chatId,
-      details: { runId: result.runId, senderName },
+      details: { runId: result.runId, senderName, messageId: sent.id },
     });
     void this.memory.maybeCompact(accountId, chatId);
   }

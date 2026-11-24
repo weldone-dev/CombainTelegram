@@ -78,7 +78,9 @@ import {
 /** Dialogs handled per `read-all` call, mirroring the mtcute cap. */
 const MAX_READ_ALL_DIALOGS = 200;
 /** How long a send waits for TDLib to replace the temporary message id. */
-const SEND_WAIT_TIMEOUT_MS = 30_000;
+const SEND_WAIT_TIMEOUT_MS = 120_000;
+/** A confirmation slower than this is worth a log line. */
+const SEND_SLOW_MS = 10_000;
 /** Upper bound for waiting on a speech-recognition update. */
 const SPEECH_WAIT_TIMEOUT_MS = 30_000;
 const READ_ALL_BATCH_SIZE = 10;
@@ -1481,25 +1483,61 @@ export class TdSessionMessenger implements TdMessenger {
    * `updateMessageSendSucceeded`. Editing/deleting the temp id later fails, so
    * the response must carry the final message.
    */
-  private async awaitSent(raw: message): Promise<message> {
+  private async awaitSent(chatId: number, raw: message): Promise<message> {
     if (!raw.sending_state) return raw;
     const tempId = raw.id;
+    const startedAt = Date.now();
     return new Promise<message>((resolve) => {
       const finish = (value: message): void => {
         clearTimeout(timer);
         unsubscribe();
         resolve(value);
       };
-      const timer = setTimeout(() => finish(raw), SEND_WAIT_TIMEOUT_MS);
+      const timer = setTimeout(() => {
+        emitLog({
+          level: 'warn',
+          source: 'telegram',
+          action: 'tdlib.send.timeout',
+          message: `Send to ${chatId} was not confirmed in ${SEND_WAIT_TIMEOUT_MS} ms; the returned id stays temporary`,
+          status: 'failed',
+          chatId,
+          details: { tempId, timeoutMs: SEND_WAIT_TIMEOUT_MS },
+        });
+        finish(raw);
+      }, SEND_WAIT_TIMEOUT_MS);
       const unsubscribe = this.client.updates.subscribe((update) => {
         if (update._ === 'updateMessageSendSucceeded') {
-          if (update.old_message_id === tempId) finish(update.message);
+          if (update.old_message_id !== tempId) return;
+          const durationMs = Date.now() - startedAt;
+          if (durationMs > SEND_SLOW_MS) {
+            emitLog({
+              level: 'info',
+              source: 'telegram',
+              action: 'tdlib.send.slow',
+              message: `Send to ${chatId} confirmed after ${durationMs} ms`,
+              status: 'ok',
+              chatId,
+              durationMs,
+              details: { tempId, messageId: update.message.id },
+            });
+          }
+          finish(update.message);
           return;
         }
         if (
           update._ === 'updateMessageSendFailed' &&
           update.old_message_id === tempId
         ) {
+          emitLog({
+            level: 'warn',
+            source: 'telegram',
+            action: 'tdlib.send.failed',
+            message: `Send to ${chatId} failed: ${update.error.message}`,
+            status: 'failed',
+            chatId,
+            errorCode: String(update.error.code),
+            details: { tempId, errorMessage: update.error.message },
+          });
           finish(raw);
         }
       });
@@ -1510,7 +1548,7 @@ export class TdSessionMessenger implements TdMessenger {
     chatId: number,
     rawMessage: message,
   ): Promise<MessageView> {
-    const raw = await this.awaitSent(rawMessage);
+    const raw = await this.awaitSent(chatId, rawMessage);
     const entry = await this.chatFor(chatId).catch(() => null);
     if (!entry) {
       // The message still maps without chat extras.

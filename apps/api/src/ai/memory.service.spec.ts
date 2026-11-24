@@ -558,11 +558,9 @@ describe('MemoryService summarization', () => {
 
     expect(result.summary).toBe('Existing summary');
     expect(result.factsAdded).toBe(0);
-    expect(h.prisma.soulSummary.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update: expect.objectContaining({ summary: 'Existing summary' }),
-      }),
-    );
+    expect(result.turnsUsed).toBe(0);
+    // The stored summary is left untouched and the raw turns are kept.
+    expect(h.prisma.soulSummary.upsert).not.toHaveBeenCalled();
     expect(h.prisma.soulTurn.deleteMany).not.toHaveBeenCalled();
   });
 

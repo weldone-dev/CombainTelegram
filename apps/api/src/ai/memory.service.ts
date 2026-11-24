@@ -369,12 +369,50 @@ export class MemoryService {
     const parsed = parseJsonBlock(raw) as
       | { summary?: unknown; facts?: unknown }
       | null;
-    const summaryText =
-      typeof parsed?.summary === 'string' && parsed.summary.trim()
-        ? parsed.summary.trim().slice(0, 4000)
-        : current?.summary ?? '';
+    const parsedSummary =
+      typeof parsed?.summary === 'string' ? parsed.summary.trim() : '';
     const facts = Array.isArray(parsed?.facts) ? parsed.facts : [];
-    const factContents = current ? parseFacts(current.facts) : [];
+    if (!parsedSummary && facts.length === 0) {
+      // The model answered nothing useful (empty content or broken JSON).
+      // Pruning now would drop the raw turns without a summary to replace
+      // them, so keep the buffer and try again on the next compaction.
+      emitLog({
+        level: 'warn',
+        source: 'ai',
+        action: 'memory.summarize.empty',
+        message: `Compaction returned no summary; kept ${rows.length} raw turns`,
+        status: 'failed',
+        accountId,
+        chatId,
+        details: { turns: rows.length, raw: raw.slice(0, 200) },
+      });
+      return {
+        summary: current?.summary ?? '',
+        factsAdded: 0,
+        turnsUsed: 0,
+      };
+    }
+    const summaryText =
+      parsedSummary || current?.summary || '';
+    return this.saveSummary(accountId, chatId, {
+      summaryText,
+      facts,
+      factContents: current ? parseFacts(current.facts) : [],
+      rows,
+    });
+  }
+
+  private async saveSummary(
+    accountId: string,
+    chatId: number,
+    input: {
+      summaryText: string;
+      facts: unknown[];
+      factContents: string[];
+      rows: SoulTurnModel[];
+    },
+  ): Promise<{ summary: string; factsAdded: number; turnsUsed: number }> {
+    const { summaryText, facts, factContents, rows } = input;
     let factsAdded = 0;
     for (const item of facts.slice(0, 20)) {
       if (!item || typeof item !== 'object') continue;
