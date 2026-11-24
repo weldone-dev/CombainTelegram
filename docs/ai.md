@@ -79,6 +79,29 @@ asks for at most 1 800 completion tokens. The fallback summary (when the model
 spends its whole step budget on tools) asks for 800. `temperature` is clamped to
 0…2 and `maxSteps` to 1…12 (default 6).
 
+### OpenCode Go via Orca
+
+Orca's OpenCode Go subscription works too. The Go endpoint needs an OAuth access
+token (the `st_` value, not the expired `sk-` API key from the console) and a
+session header:
+
+```dotenv
+AI_BASE_URL=https://opencode.ai/inference/go/openai/v1
+AI_MODEL=deepseek-v4.1-flash
+AI_FAST_MODEL=deepseek-v4.1-flash
+AI_EXTRA_HEADERS={"x-opencode-session":"ses_combaintelegram"}
+# Read the live token from Orca's OpenCode database and follow its refreshes.
+AI_API_KEY_SOURCE=opencode
+# Optional fallback if the database cannot be read.
+AI_API_KEY=st_...
+```
+
+Any stable `ses_*` value is accepted. `AI_API_KEY_SOURCE=opencode` reads the
+active OAuth credential from `~/.local/share/opencode/opencode.db`; Orca refreshes
+it. `OPENCODE_DB` overrides the path. Without the database source, copy `access`
+from `opencode auth export` into `AI_API_KEY` and refresh it manually before it
+expires.
+
 DeepSeek `deepseek-chat` is the model used for the live checks below; other
 OpenAI-compatible providers are drop-in replacements.
 

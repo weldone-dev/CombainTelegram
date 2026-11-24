@@ -40,6 +40,22 @@ interface ChatCompletionResponse {
 const DEFAULT_TIMEOUT_MS = 90_000;
 const MAX_ATTEMPTS = 3;
 
+function extraHeaders(): Record<string, string> {
+  const raw = process.env.AI_EXTRA_HEADERS;
+  if (!raw || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string') result[key] = value;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
 function endpoint(baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, '');
   if (base.endsWith('/chat/completions')) return base;
@@ -82,6 +98,7 @@ export class LlmService {
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${request.apiKey}`,
+            ...extraHeaders(),
           },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(

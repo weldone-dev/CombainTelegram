@@ -30,7 +30,7 @@ export interface AiSettings {
   fastModel: string;
   hasApiKey: boolean;
   apiKeyHint: string | null;
-  apiKeySource: "db" | "env" | "none";
+  apiKeySource: "db" | "env" | "opencode" | "none";
   temperature: number;
   maxSteps: number;
   dryRun: boolean;

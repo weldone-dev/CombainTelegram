@@ -2,6 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { OnModuleInit } from '@nestjs/common';
 import type { AiSettingModel, TelegramAccountModel } from '@repo/database';
 import { randomBytes } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import type { EncryptedPayload } from '../telegram/session-crypto.service.js';
@@ -103,6 +106,7 @@ function clampSteps(value: unknown, fallback: number): number {
 @Injectable()
 export class AiConfigService implements OnModuleInit {
   private readonly logger = new Logger(AiConfigService.name);
+  private opencodeToken: { token: string; at: number } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -200,13 +204,47 @@ export class AiConfigService implements OnModuleInit {
     return value && value.trim() ? value.trim() : null;
   }
 
+  /**
+   * Optional integration with Orca's OpenCode Go subscription: read the live
+   * OAuth access token from the local OpenCode database, which Orca refreshes.
+   * Falls back to `AI_API_KEY` when the file/schema is unavailable.
+   */
+  private readOpencodeToken(): string | null {
+    if (process.env.AI_API_KEY_SOURCE !== 'opencode') return null;
+    if (this.opencodeToken && Date.now() - this.opencodeToken.at < 60_000) {
+      return this.opencodeToken.token;
+    }
+    const file =
+      this.env('OPENCODE_DB') ??
+      join(homedir(), '.local', 'share', 'opencode', 'opencode.db');
+    try {
+      const db = new DatabaseSync(file, { readOnly: true });
+      const row = db
+        .prepare(
+          "select value from credential where integration_id = 'opencode' and active = 1 order by time_updated desc limit 1",
+        )
+        .get() as { value?: unknown } | undefined;
+      db.close();
+      if (!row || typeof row.value !== 'string') return null;
+      const parsed = JSON.parse(row.value) as { access?: unknown };
+      if (typeof parsed.access !== 'string' || !parsed.access.trim()) {
+        return null;
+      }
+      this.opencodeToken = { token: parsed.access.trim(), at: Date.now() };
+      return this.opencodeToken.token;
+    } catch {
+      return null;
+    }
+  }
+
   async resolved(): Promise<ResolvedProvider> {
     const row = await this.row();
     const baseUrl = text(row.baseUrl, this.env('AI_BASE_URL') ?? '');
     const model = text(row.model, this.env('AI_MODEL') ?? '');
     const fastModel = text(row.fastModel, this.env('AI_FAST_MODEL') ?? model);
     const dbKey = this.readSecret(row, 'apiKey', AAD_KEY);
-    const apiKey = dbKey ?? this.env('AI_API_KEY');
+    const apiKey =
+      this.readOpencodeToken() ?? dbKey ?? this.env('AI_API_KEY');
     return {
       provider: row.provider,
       baseUrl,
@@ -380,7 +418,13 @@ export class AiConfigService implements OnModuleInit {
       apiKeyHint: resolved.apiKey
         ? `…${resolved.apiKey.slice(-4)}`
         : null,
-      apiKeySource: dbKey ? 'db' : this.env('AI_API_KEY') ? 'env' : 'none',
+      apiKeySource: this.readOpencodeToken()
+        ? 'opencode'
+        : dbKey
+          ? 'db'
+          : this.env('AI_API_KEY')
+            ? 'env'
+            : 'none',
       temperature: row.temperature,
       maxSteps: row.maxSteps,
       dryRun: row.dryRun,

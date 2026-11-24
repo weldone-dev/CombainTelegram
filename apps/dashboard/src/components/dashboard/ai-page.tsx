@@ -387,7 +387,7 @@ function SettingsPanel({
             label="API-ключ"
             hint={
               settings.hasApiKey
-                ? `Сейчас: ${settings.apiKeyHint ?? "сохранён"} (${settings.apiKeySource === "env" ? "из .env" : "из базы"})`
+                ? `Сейчас: ${settings.apiKeyHint ?? "сохранён"} (${settings.apiKeySource === "opencode" ? "из Orca/OpenCode" : settings.apiKeySource === "env" ? "из .env" : "из базы"})`
                 : "Ключ ещё не задан"
             }
           >
