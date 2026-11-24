@@ -89,6 +89,14 @@ function mergeSoulSettings(
       300,
     );
   }
+  if (source.presenceOnlineDelaySeconds !== undefined) {
+    next.presenceOnlineDelaySeconds = clampInt(
+      source.presenceOnlineDelaySeconds,
+      current.presenceOnlineDelaySeconds,
+      0,
+      600,
+    );
+  }
   if (source.typingSpeed !== undefined) {
     next.typingSpeed = clampTypingCpm(
       source.typingSpeed,
@@ -145,6 +153,12 @@ export function parseSoulSettings(raw: unknown): SoulSettings {
       DEFAULT_SOUL_SETTINGS.presenceReadDelaySeconds,
       0,
       300,
+    ),
+    presenceOnlineDelaySeconds: clampInt(
+      source.presenceOnlineDelaySeconds,
+      DEFAULT_SOUL_SETTINGS.presenceOnlineDelaySeconds,
+      0,
+      600,
     ),
   };
 }

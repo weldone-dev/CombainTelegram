@@ -160,6 +160,7 @@ Modes:
 | `peerProfile` | `true` | pass the peer's Telegram name, username and profile bio to the agent (cached 10 min, best-effort) |
 | `presenceIdleMinutes` | `5` | minutes without activity before the account looks offline; `0` never goes offline |
 | `presenceReadDelaySeconds` | `10` | delay before reading a message that arrived while the account was offline |
+| `presenceOnlineDelaySeconds` | `5` | delay before the account shows online again after such a message |
 
 `PUT` validates the mode and replaces `settings` with the parsed object; because
 parsing fills defaults first, omitted keys fall back to the defaults above — send
@@ -208,9 +209,10 @@ the phone:
 - after `presenceIdleMinutes` without activity it calls `setOnline(false)`
   (TDLib option `online`, mtcute `setOnline`), so the peer sees the last-seen
   status instead of "online";
-- the first DM after that switches the account back online and marks the chat
-  read `presenceReadDelaySeconds` later, so the sender sees "online" first and
-  the read receipt after the delay.
+- the first DM after that switches the account back online after
+  `presenceOnlineDelaySeconds` (default 5 s, so it does not look like a robot
+  answering instantly), then marks the chat read `presenceReadDelaySeconds`
+  later — the sender sees "online" first and the read receipt after the delay.
 
 Logs: `presence.offline`, `presence.online`, `presence.option_ignored` (TDLib
 did not apply the option), plus the usual `dm.autopilot.read`.

@@ -65,6 +65,61 @@ describe('PresenceService', () => {
 
     const delay = await h.service.incoming(ACCOUNT, CHAT);
 
+    // Online after 5 s, read 10 s later.
+    expect(delay).toBe(15_000);
+    expect(h.messaging.setOnline).toHaveBeenCalledTimes(1);
+    expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
+      'user-1',
+      ACCOUNT,
+      false,
+    );
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(h.messaging.setOnline).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
+      'user-1',
+      ACCOUNT,
+      true,
+    );
+  });
+
+  it('does not restart the online delay on a second message', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.service.onModuleInit();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    const first = await h.service.incoming(ACCOUNT, CHAT);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const second = await h.service.incoming(ACCOUNT, CHAT);
+
+    expect(first).toBe(15_000);
+    expect(second).toBe(13_000);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
+      'user-1',
+      ACCOUNT,
+      true,
+    );
+
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(
+      h.messaging.setOnline.mock.calls.filter((call) => call[2] === true),
+    ).toHaveLength(1);
+  });
+
+  it('goes online immediately when the online delay is zero', async () => {
+    vi.useFakeTimers();
+    const h = harness(soul({ presenceOnlineDelaySeconds: 0 }));
+    await h.service.onModuleInit();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    const delay = await h.service.incoming(ACCOUNT, CHAT);
+    await vi.advanceTimersByTimeAsync(0);
+
     expect(delay).toBe(10_000);
     expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
       'user-1',

@@ -248,6 +248,8 @@ export interface SoulSettings {
   presenceIdleMinutes: number;
   /** Seconds to wait before reading a message that arrived while offline. */
   presenceReadDelaySeconds: number;
+  /** Seconds to wait before showing the account online again. */
+  presenceOnlineDelaySeconds: number;
 }
 
 export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
@@ -262,6 +264,7 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   peerProfile: true,
   presenceIdleMinutes: 5,
   presenceReadDelaySeconds: 10,
+  presenceOnlineDelaySeconds: 5,
 };
 
 export interface SkillView {

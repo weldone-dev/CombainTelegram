@@ -51,6 +51,7 @@ interface NumberDraft {
   typingSpeed: string;
   presenceIdleMinutes: string;
   presenceReadDelaySeconds: string;
+  presenceOnlineDelaySeconds: string;
   temperature: string;
 }
 
@@ -61,6 +62,7 @@ const EMPTY_NUMBERS: NumberDraft = {
   typingSpeed: "",
   presenceIdleMinutes: "",
   presenceReadDelaySeconds: "",
+  presenceOnlineDelaySeconds: "",
   temperature: "",
 };
 
@@ -72,6 +74,9 @@ function numbersOf(soul: SoulView): NumberDraft {
     typingSpeed: String(soul.settings.typingSpeed),
     presenceIdleMinutes: String(soul.settings.presenceIdleMinutes),
     presenceReadDelaySeconds: String(soul.settings.presenceReadDelaySeconds),
+    presenceOnlineDelaySeconds: String(
+      soul.settings.presenceOnlineDelaySeconds,
+    ),
     temperature: String(soul.temperature),
   };
 }
@@ -343,6 +348,12 @@ export function SoulsPanel() {
             freshDraft.settings.presenceReadDelaySeconds,
             0,
             300,
+          ),
+          presenceOnlineDelaySeconds: clampNumber(
+            numbers.presenceOnlineDelaySeconds,
+            freshDraft.settings.presenceOnlineDelaySeconds,
+            0,
+            600,
           ),
         },
         skillSlugs: freshDraft.skills.map((skill) => skill.slug),
@@ -653,6 +664,22 @@ export function SoulsPanel() {
                       value={numbers.presenceIdleMinutes}
                       onChange={(event) =>
                         updateNumber("presenceIdleMinutes", event.target.value)
+                      }
+                      inputMode="numeric"
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    label="Выходить в онлайн через, сек"
+                    hint="Пауза перед появлением онлайн после сообщения в оффлайне"
+                  >
+                    <input
+                      value={numbers.presenceOnlineDelaySeconds}
+                      onChange={(event) =>
+                        updateNumber(
+                          "presenceOnlineDelaySeconds",
+                          event.target.value,
+                        )
                       }
                       inputMode="numeric"
                       className={inputClass}

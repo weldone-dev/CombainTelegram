@@ -79,7 +79,7 @@ Updated: 2026-11-23. This file is the single place to check progress.
   browser denies Notification/push permission, so that part is environment-bound.
 
 ### Quality
-- API: 504 tests, `tsc`, `oxlint`, `nest build` green.
+- API: 506 tests, `tsc`, `oxlint`, `nest build` green.
 - Dashboard: `tsc`, `biome`, `next build` green.
 - Worker worktrees and branches removed; only `main` remains.
 
@@ -145,7 +145,7 @@ Live checks:
 - [x] Soul settings are merged: `PUT {settings:{maxPerHour:7}}` kept the
       existing `chatIds` and other values.
 - [x] Attached-but-disabled skills stay attached in `SoulView.skills`.
-- [x] API suite: 46 files, 504 tests passed (config, memory, agent, MCP,
+- [x] API suite: 46 files, 506 tests passed (config, memory, agent, MCP,
       autopilot, bots, automations).
 
 ## Still on mtcute (works only while the old session exists)

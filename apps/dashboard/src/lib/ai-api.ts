@@ -70,6 +70,7 @@ export interface SoulSettings {
   peerProfile: boolean;
   presenceIdleMinutes: number;
   presenceReadDelaySeconds: number;
+  presenceOnlineDelaySeconds: number;
 }
 
 export interface SoulView {

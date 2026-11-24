@@ -7,10 +7,18 @@ import { RealtimeService } from '../realtime/realtime.service.js';
 import { emitLog } from '../logs/log-sink.js';
 import { SoulsService, parseSoulSettings } from './souls.service.js';
 
+/** Clamps a number of seconds into `[0, max]`. */
+function seconds(value: number, max: number): number {
+  return Math.min(max, Math.max(0, Math.round(value)));
+}
+
 interface PresenceState {
   /** Whether the account is currently shown as online. */
   online: boolean;
   idleTimer?: ReturnType<typeof setTimeout>;
+  /** Pending "come back online" delay after a message arrived offline. */
+  onlineTimer?: ReturnType<typeof setTimeout>;
+  onlineAt?: number;
 }
 
 interface PresencePayload {
@@ -69,6 +77,7 @@ export class PresenceService implements OnModuleInit, OnModuleDestroy {
     this.subscription?.unsubscribe();
     for (const state of this.states.values()) {
       if (state.idleTimer) clearTimeout(state.idleTimer);
+      if (state.onlineTimer) clearTimeout(state.onlineTimer);
     }
     this.states.clear();
   }
@@ -76,6 +85,11 @@ export class PresenceService implements OnModuleInit, OnModuleDestroy {
   /** Marks the account active; it goes offline again after the idle window. */
   touch(accountId: string): void {
     const state = this.state(accountId);
+    if (state.onlineTimer) {
+      clearTimeout(state.onlineTimer);
+      state.onlineTimer = undefined;
+      state.onlineAt = undefined;
+    }
     if (!state.online) {
       state.online = true;
       void this.applyOnline(accountId, true);
@@ -94,28 +108,62 @@ export class PresenceService implements OnModuleInit, OnModuleDestroy {
   /**
    * Called for an incoming DM before the autopilot reads it. Returns how long
    * to wait before marking it read: `0` while the account is already online,
-   * or the configured "came back online" delay when it was offline.
+   * otherwise "time until online" + the configured read delay. The account
+   * does not jump online instantly — it looks like the person picked up the
+   * phone after a few seconds.
    */
   async incoming(accountId: string, chatId: number): Promise<number> {
     const settings = await this.settingsFor(accountId);
-    const wasOffline = !this.state(accountId).online;
-    this.touch(accountId);
-    if (!wasOffline) return 0;
-    const delayMs = Math.min(
-      300,
-      Math.max(0, settings?.presenceReadDelaySeconds ?? 10),
-    ) * 1000;
+    const state = this.state(accountId);
+    if (state.online) {
+      this.touch(accountId);
+      return 0;
+    }
+    const readDelayMs =
+      seconds(settings?.presenceReadDelaySeconds ?? 10, 300) * 1000;
+    const onlineDelayMs =
+      seconds(settings?.presenceOnlineDelaySeconds ?? 5, 600) * 1000;
+    let onlineInMs = onlineDelayMs;
+    if (state.onlineTimer && state.onlineAt !== undefined) {
+      onlineInMs = Math.max(0, state.onlineAt - Date.now());
+    } else {
+      state.onlineAt = Date.now() + onlineDelayMs;
+      const timer = setTimeout(() => {
+        void this.goOnline(accountId);
+      }, onlineDelayMs);
+      timer.unref?.();
+      state.onlineTimer = timer;
+    }
+    emitLog({
+      level: 'debug',
+      source: 'ai',
+      action: 'presence.pending',
+      message: `Offline; online in ${onlineInMs} ms, ${chatId} will be read ${readDelayMs} ms after that`,
+      status: 'ok',
+      accountId,
+      chatId,
+      details: { onlineInMs, readDelayMs },
+    });
+    return onlineInMs + readDelayMs;
+  }
+
+  /** Switches the account online after the "picked up the phone" delay. */
+  private async goOnline(accountId: string): Promise<void> {
+    const state = this.state(accountId);
+    state.onlineTimer = undefined;
+    state.onlineAt = undefined;
+    if (state.online) return;
+    state.online = true;
+    await this.applyOnline(accountId, true);
     emitLog({
       level: 'debug',
       source: 'ai',
       action: 'presence.online',
-      message: `Back online; ${chatId} will be read in ${delayMs} ms`,
+      message: 'Back online after the pause',
       status: 'ok',
       accountId,
-      chatId,
-      details: { readDelayMs: delayMs },
     });
-    return delayMs;
+    void this.scheduleIdle(accountId);
   }
 
   private state(accountId: string): PresenceState {
