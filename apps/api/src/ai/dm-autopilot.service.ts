@@ -52,6 +52,34 @@ const MAX_IMAGES = 2;
 /** The last photo stays available for a follow-up question this long. */
 const LAST_IMAGE_TTL_MS = 3 * 60_000;
 
+/**
+ * Words that mean the peer is asking about a picture. Used to warn the model
+ * when the text talks about an image but no image was attached. The phrase
+ * "что тут находится" is the usual way a picture question arrives with no
+ * photo attached, so it is matched as well.
+ */
+const PICTURE_WORDS = [
+  'картинк',
+  'скрин',
+  'фото',
+  'изображен',
+  'снимок',
+  'видишь ли',
+  'что тут находится',
+  'picture',
+  'screenshot',
+  'photo',
+  'image',
+];
+
+/** Whether the incoming texts clearly refer to a picture. */
+function mentionsPicture(texts: IncomingText[]): boolean {
+  return texts.some((item) => {
+    const text = item.text.toLowerCase();
+    return PICTURE_WORDS.some((word) => text.includes(word));
+  });
+}
+
 /** Whether the media is a picture a vision model can look at. */
 function isImageMedia(media: MessageMediaView | null | undefined): boolean {
   if (!media || !media.downloadable) return false;
@@ -356,7 +384,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
           level: 'debug',
           source: 'ai',
           action: 'dm.autopilot.image',
-          message: `Forwarded a ${file.mimeType} image (${file.data.length} bytes) to the model`,
+          message: `Forwarded ${file.mimeType} image (${file.data.length} bytes) to the model`,
           status: 'ok',
           accountId,
           chatId,
@@ -587,6 +615,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       .join(' ');
     // Models drift, so the format is spelled out both here and in the system
     // prompt; `parseReply` still accepts plain text when they ignore it.
+    // A question about a picture with no picture attached must not be answered
+    // from imagination — say honestly that nothing was received.
+    const noImageNote =
+      images.length === 0 && mentionsPicture(texts)
+        ? 'Изображения к этому сообщению нет — не выдумывай, что на нём, и не говори, что оно мутное; коротко скажи, что не видишь картинки, и попроси прислать.'
+        : '';
     const replyFormat = [
       'Формат ответа:',
       '- 1–3 коротких сообщения; каждое — отдельной частью, части разделяй строкой ---',
@@ -602,6 +636,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
               (item, index) => `${index + 1}. ${item.text.slice(0, 2000)}`,
             ),
             '',
+            ...(noImageNote ? [noImageNote, ''] : []),
             instruction,
             '',
             replyFormat,
@@ -610,6 +645,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
             `Входящее личное сообщение от «${senderName}»:`,
             (texts[0]?.text ?? '').slice(0, 4000),
             '',
+            ...(noImageNote ? [noImageNote, ''] : []),
             instruction,
             '',
             replyFormat,

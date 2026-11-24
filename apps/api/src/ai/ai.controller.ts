@@ -19,7 +19,7 @@ import { AgentToolsService } from './agent-tools.service.js';
 import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
-import type { LlmMessage, SoulUpdate } from './ai.types.js';
+import type { SoulUpdate } from './ai.types.js';
 
 interface ChatMessageInput {
   role?: unknown;

@@ -78,8 +78,16 @@ import {
 
 /** Dialogs handled per `read-all` call, mirroring the mtcute cap. */
 const MAX_READ_ALL_DIALOGS = 200;
-/** How long a send waits for TDLib to replace the temporary message id. */
-const SEND_WAIT_TIMEOUT_MS = 120_000;
+/**
+ * Default wait for TDLib to replace the temporary message id. A stalled send
+ * stays queued in TDLib, so waiting longer only delays the reply.
+ */
+const DEFAULT_SEND_WAIT_TIMEOUT_MS = 20_000;
+/** Bounds of the `SEND_WAIT_TIMEOUT_MS` override. */
+const MIN_SEND_WAIT_TIMEOUT_MS = 5_000;
+const MAX_SEND_WAIT_TIMEOUT_MS = 600_000;
+/** How long a timed-out send keeps watching for its late confirmation. */
+const SEND_LATE_WATCH_MS = 300_000;
 /** A confirmation slower than this is worth a log line. */
 const SEND_SLOW_MS = 10_000;
 /** Upper bound for waiting on a speech-recognition update. */
@@ -90,6 +98,26 @@ const READ_ALL_BATCH_SIZE = 10;
  * state from before the add/remove (the cache catches up just after the call).
  */
 const REACTION_REFRESH_RETRY_MS = 150;
+
+/**
+ * Wait before a send resolves with TDLib's temporary message id.
+ *
+ * `SEND_WAIT_TIMEOUT_MS` overrides the default; a missing, non-numeric or
+ * out-of-range value falls back to the default or the nearest bound. Read on
+ * every call so an env change does not need a restart.
+ */
+export function sendWaitTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.SEND_WAIT_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_SEND_WAIT_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_SEND_WAIT_TIMEOUT_MS;
+  return Math.min(
+    Math.max(Math.round(parsed), MIN_SEND_WAIT_TIMEOUT_MS),
+    MAX_SEND_WAIT_TIMEOUT_MS,
+  );
+}
 
 /** Per-message download payload handed back to `MessagingService` for caching. */
 export interface TdDownloadPayload {
@@ -413,6 +441,8 @@ export class TdSessionMessenger implements TdMessenger {
   private readonly supergroups = new Map<number, Promise<SupergroupInfo>>();
   private readonly extras = new Map<string, ChatExtras>();
   private readonly unsubscribers: Array<() => void> = [];
+  /** Active `awaitSent` watchers, stopped on dispose so nothing leaks. */
+  private readonly sendWatchers = new Set<() => void>();
 
   constructor(
     readonly session: TelegramSessionModel,
@@ -431,6 +461,7 @@ export class TdSessionMessenger implements TdMessenger {
   }
 
   dispose(): void {
+    for (const stop of this.sendWatchers) stop();
     for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
     this.registry.dispose();
   }
@@ -1496,65 +1527,141 @@ export class TdSessionMessenger implements TdMessenger {
    * send is in flight; the real server id arrives with
    * `updateMessageSendSucceeded`. Editing/deleting the temp id later fails, so
    * the response must carry the final message.
+   *
+   * The wait is bounded: a stalled connection is not a failed send, and TDLib
+   * keeps the message queued. After {@link sendWaitTimeoutMs} the temporary
+   * message is handed back while the watcher keeps listening for
+   * {@link SEND_LATE_WATCH_MS}, so a late confirmation is still recorded.
    */
   private async awaitSent(chatId: number, raw: message): Promise<message> {
     if (!raw.sending_state) return raw;
     const tempId = raw.id;
     const startedAt = Date.now();
+    const timeoutMs = sendWaitTimeoutMs();
+
     return new Promise<message>((resolve) => {
-      const finish = (value: message): void => {
-        clearTimeout(timer);
-        unsubscribe();
+      let settled = false;
+      let replyTimer: NodeJS.Timeout | null = null;
+      let lateTimer: NodeJS.Timeout | null = null;
+      let unsubscribe: (() => void) | null = null;
+
+      /** Answers a still-pending caller, then releases timer and subscription. */
+      const stop = (): void => {
+        if (!settled) {
+          settled = true;
+          resolve(raw);
+        }
+        if (replyTimer) {
+          clearTimeout(replyTimer);
+          replyTimer = null;
+        }
+        if (lateTimer) {
+          clearTimeout(lateTimer);
+          lateTimer = null;
+        }
+        unsubscribe?.();
+        unsubscribe = null;
+        this.sendWatchers.delete(stop);
+      };
+
+      /** Answers the caller once; a late watcher may keep running afterwards. */
+      const settle = (value: message): void => {
+        if (settled) return;
+        settled = true;
+        if (replyTimer) {
+          clearTimeout(replyTimer);
+          replyTimer = null;
+        }
         resolve(value);
       };
-      const timer = setTimeout(() => {
-        emitLog({
-          level: 'warn',
-          source: 'telegram',
-          action: 'tdlib.send.timeout',
-          message: `Send to ${chatId} was not confirmed in ${SEND_WAIT_TIMEOUT_MS} ms; the returned id stays temporary`,
-          status: 'failed',
-          chatId,
-          details: { tempId, timeoutMs: SEND_WAIT_TIMEOUT_MS },
-        });
-        finish(raw);
-      }, SEND_WAIT_TIMEOUT_MS);
-      const unsubscribe = this.client.updates.subscribe((update) => {
+
+      this.sendWatchers.add(stop);
+
+      unsubscribe = this.client.updates.subscribe((update) => {
         if (update._ === 'updateMessageSendSucceeded') {
           if (update.old_message_id !== tempId) return;
           const durationMs = Date.now() - startedAt;
-          if (durationMs > SEND_SLOW_MS) {
-            emitLog({
-              level: 'info',
-              source: 'telegram',
-              action: 'tdlib.send.slow',
-              message: `Send to ${chatId} confirmed after ${durationMs} ms`,
-              status: 'ok',
-              chatId,
-              durationMs,
-              details: { tempId, messageId: update.message.id },
-            });
+          if (!settled) {
+            if (durationMs > SEND_SLOW_MS) {
+              emitLog({
+                level: 'info',
+                source: 'telegram',
+                action: 'tdlib.send.slow',
+                message: `Send to ${chatId} confirmed after ${durationMs} ms`,
+                status: 'ok',
+                chatId,
+                durationMs,
+                details: { tempId, messageId: update.message.id },
+              });
+            }
+            settle(update.message);
+            stop();
+            return;
           }
-          finish(update.message);
+          emitLog({
+            level: 'info',
+            source: 'telegram',
+            action: 'tdlib.send.late',
+            message: `Send to ${chatId} was confirmed after ${durationMs} ms; the queued message went through`,
+            status: 'ok',
+            chatId,
+            durationMs,
+            details: { tempId, messageId: update.message.id },
+          });
+          stop();
           return;
         }
         if (
           update._ === 'updateMessageSendFailed' &&
           update.old_message_id === tempId
         ) {
-          emitLog({
-            level: 'warn',
-            source: 'telegram',
-            action: 'tdlib.send.failed',
-            message: `Send to ${chatId} failed: ${update.error.message}`,
-            status: 'failed',
-            chatId,
-            errorCode: String(update.error.code),
-            details: { tempId, errorMessage: update.error.message },
-          });
-          finish(raw);
+          if (!settled) {
+            emitLog({
+              level: 'warn',
+              source: 'telegram',
+              action: 'tdlib.send.failed',
+              message: `Send to ${chatId} failed: ${update.error.message}`,
+              status: 'failed',
+              chatId,
+              errorCode: String(update.error.code),
+              details: { tempId, errorMessage: update.error.message },
+            });
+            settle(raw);
+          } else {
+            emitLog({
+              level: 'warn',
+              source: 'telegram',
+              action: 'tdlib.send.late-failed',
+              message: `Send to ${chatId} failed after the wait: ${update.error.message}`,
+              status: 'failed',
+              chatId,
+              errorCode: String(update.error.code),
+              details: { tempId, errorMessage: update.error.message },
+            });
+          }
+          stop();
         }
       });
+
+      replyTimer = setTimeout(() => {
+        replyTimer = null;
+        emitLog({
+          level: 'warn',
+          source: 'telegram',
+          action: 'tdlib.send.timeout',
+          message: `Send to ${chatId} was not confirmed in ${timeoutMs} ms; continuing with the temporary id (the message is still queued)`,
+          status: 'failed',
+          chatId,
+          details: { tempId, timeoutMs },
+        });
+        settle(raw);
+        // The message is already queued in TDLib: keep watching, but bounded.
+        lateTimer = setTimeout(() => {
+          lateTimer = null;
+          stop();
+        }, SEND_LATE_WATCH_MS);
+        lateTimer.unref?.();
+      }, timeoutMs);
     });
   }
 

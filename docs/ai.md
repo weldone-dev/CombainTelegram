@@ -204,7 +204,10 @@ no dashboard open) and:
    vision model can answer about the picture itself (the text placeholder is
    `[изображение]`); the last photo stays attached for follow-up text questions
    like «что тут?» for 3 minutes, because such a question arrives as a separate
-   message with no media of its own;
+   message with no media of its own; when the text asks about a picture but no
+   image was attached (or cached), the prompt carries an explicit note not to
+   invent the content and to ask for the picture instead, so the soul never
+   reports a "blurry" picture it never received;
 6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` keeps the thinking
    phase silent (no `typing…` while the model works), then for each reply
    bubble starts a `typing…` heartbeat every 4 s, holds it until
@@ -233,6 +236,16 @@ incoming message cancels the remaining bubbles (`dm.autopilot.cancel`,
 It never starts a conversation: only replies to an incoming message. Autopilot
 writes are exempt from `dryRun` because `auto`/`draft` is an explicit opt-in
 (§9); the UI says so next to the flag.
+
+### Send confirmation
+
+TDLib answers a send with a temporary message id; the real one arrives with
+`updateMessageSendSucceeded`. The API waits for it for `SEND_WAIT_TIMEOUT_MS`
+(default **20 s**, clamped 5 s…10 min) and then returns the temporary id with
+the message still queued — a stalled proxy is not a failed send, and waiting
+two minutes only made the answer look ignored (the second bubble sat behind the
+first). A confirmation that arrives later is still recorded as `tdlib.send.late`
+(up to 5 min of watching); a slow but in-time one logs `tdlib.send.slow`.
 
 ### Presence (online/offline)
 
@@ -263,7 +276,10 @@ the phone:
 Logs: `presence.offline` (the idle timer fired), `presence.pending` (a DM arrived
 while offline; carries the online/read/typing deadlines), `presence.online`
 (back online), `presence.option_ignored` (TDLib did not apply the option), plus
-the usual `dm.autopilot.read`.
+the usual `dm.autopilot.read`, `dm.autopilot.peer` (peer profile resolved or
+not), `dm.autopilot.image` (a picture was forwarded to the model, or skipped as
+too big) and `dm.autopilot.cancel` (a newer message invalidated the in-flight
+reply).
 
 ## 5. Memory
 

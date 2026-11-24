@@ -591,7 +591,10 @@ Attempts live in memory for 10 minutes.
 - `td-message-view.ts` maps TDLib messages/content to the existing
   `MessageView`/`ChatView` DTOs, so the dashboard is engine-agnostic.
 - Sends wait for `updateMessageSendSucceeded` so the API returns the final
-  server message id (the temporary id cannot be edited or deleted later).
+  server message id (the temporary id cannot be edited or deleted later). The
+  wait is bounded (`SEND_WAIT_TIMEOUT_MS`, default 20 s): after it the temporary
+  id is returned while TDLib keeps the message queued, and a late confirmation
+  is logged as `tdlib.send.late` instead of blocking the next bubble.
 - `TdFilesService` downloads through TDLib, which follows CDN redirects itself
   (the reason for the migration: mtcute cannot open CDN DCs ≥ 200).
 - `TdUpdatesService` republishes TDLib updates as the same `message.new` /

@@ -797,6 +797,76 @@ describe('DmAutopilotService.reply', () => {
     );
   });
 
+  it('tells the model there is no image when the text asks about a picture', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    // A fresh service has a cold `lastImages` cache, so no picture is attached.
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: 'Что тут находится?' }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Что тут находится?' }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.messaging.downloadMedia).not.toHaveBeenCalled();
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        images: [],
+        prompt: expect.stringContaining('Изображения к этому сообщению нет'),
+      }),
+    );
+  });
+
+  it('does not add the no-image note to an ordinary text message', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: 'привет, как дела' }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'привет, как дела' }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        images: [],
+        prompt: expect.not.stringContaining('Изображения к этому сообщению нет'),
+      }),
+    );
+  });
+
   it('passes the peer username and bio to the agent', async () => {
     vi.useFakeTimers();
     const h = harness({
