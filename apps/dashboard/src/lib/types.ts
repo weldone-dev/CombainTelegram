@@ -155,7 +155,18 @@ export interface MessageView {
   isVoice?: boolean;
   /** Telegram service message; the transcript hides these empty bubbles. */
   service?: boolean;
+  /** TDLib send state; a pending/failed message still has a temporary id. */
+  sendingState?: "pending" | "failed" | null;
   thread?: MessageThreadInfo | null;
+}
+
+/** Reasoning of one agent run attached to the bubble it produced. */
+export interface MessageReasoningView {
+  runId: string;
+  reasoning: string;
+  /** How many Telegram bubbles the run produced (the block sits under the last). */
+  bubbles: number;
+  createdAt: string;
 }
 
 export interface ChatView {
@@ -388,6 +399,20 @@ export interface AiReplyEvent {
   runId: string;
   /** Local-only model reasoning; never sent to Telegram. */
   reasoning: string | null;
+}
+
+/**
+ * Live reasoning stream of the DM autopilot. `delta` is the fragment
+ * accumulated since the previous emit (append it to the local buffer);
+ * `done` repeats the final reasoning.
+ */
+export interface AiThinkingEvent {
+  accountId: string;
+  chatId: number;
+  runId: string;
+  phase?: "start" | "done";
+  delta?: string;
+  reasoning?: string | null;
 }
 
 export interface RealtimeDeletedEvent {

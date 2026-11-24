@@ -289,6 +289,7 @@ export function ChatList({
               placeholder={`Фильтр загруженных чатов (до ${MAX_CHAT_LIMIT})`}
               aria-label="Фильтр загруженных чатов по названию или @username"
               className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 pr-7 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+              autoComplete="off"
             />
             {filter && (
               <button

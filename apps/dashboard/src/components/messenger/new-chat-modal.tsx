@@ -98,6 +98,7 @@ export function NewChatModal({
             placeholder="@durov или t.me/durov"
             aria-label="Username или ссылка t.me"
             className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+            autoComplete="off"
           />
           {error && <p className="text-xs text-red-300">{error}</p>}
           <div className="flex justify-end gap-2">

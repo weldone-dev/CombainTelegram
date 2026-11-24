@@ -1,12 +1,6 @@
-import { LinkedSettingsSection } from "../../../components/settings/linked-settings-section";
+import { redirect } from "next/navigation";
 
+/** The settings area is AI-only now; keep old bookmarks working. */
 export default function SettingsProxyRoute() {
-  return (
-    <LinkedSettingsSection
-      title="Прокси"
-      description="Прокси для подключения аккаунтов Telegram и проверка их доступности."
-      pageHref="/proxies"
-      pageLabel="Прокси"
-    />
-  );
+  redirect("/settings/ai");
 }

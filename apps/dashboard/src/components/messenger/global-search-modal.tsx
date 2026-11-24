@@ -133,6 +133,7 @@ export function GlobalSearchModal({
             placeholder="Название, @username…"
             aria-label="Поисковый запрос"
             className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+            autoComplete="off"
           />
           <button
             type="submit"

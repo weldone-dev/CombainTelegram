@@ -62,9 +62,10 @@ Updated: 2026-11-24. This file is the single place to check progress.
       MTProto reports "exit node unknown").
 - [x] One notification menu (bell): notifications, sound, Web Push and a
       `Проверить` test; Web Audio chime on incoming messages, no audio files.
-- [x] Settings section: `/settings` (general) plus `/settings/ai`, `/accounts`,
-      `/proxy`, `/logs`; provider, permission, MCP and tool-list cards moved off
-      `/ai` to `/settings/ai`.
+- [x] Settings section: the area is AI-only now — `/settings` redirects to
+      `/settings/ai`, and `/settings/accounts`, `/settings/proxy`,
+      `/settings/logs` redirect there too; accounts, proxies and logs moved to
+      the top-level `/accounts`, `/proxies`, `/logs` pages.
 
 ### Live checks
 - Chats list with last messages, pinned/folder order.
@@ -82,8 +83,8 @@ Updated: 2026-11-24. This file is the single place to check progress.
   browser denies Notification/push permission, so that part is environment-bound.
 
 ### Quality
-- API: 697 tests in 54 files, `tsc`, `oxlint`, `nest build` green.
-- Dashboard: `tsc`, `biome`, `next build` green.
+- API: 801 tests in 60 files, `tsc`, `oxlint`, `nest build` green.
+- Dashboard: `tsc`, `biome check`, `next build` green (12 routes).
 - Worker worktrees and branches removed; only `main` remains.
 
 ### Threads
@@ -98,56 +99,85 @@ Updated: 2026-11-24. This file is the single place to check progress.
 - [x] `info/similar` on TDLib (`getChatSimilarChats`).
 
 ### AI layer
-Reference: `docs/ai.md`. Code: `apps/api/src/ai`, `ai-access`, `ai-providers`,
-`mcp`, `bots`, `automations`; UI: `/ai`, settings at `/settings/ai`.
+Reference: `docs/ai.md`. Code: `apps/api/src/ai`, `ai-access`, `ai-account`,
+`ai-chat`, `ai-providers`, `mcp`, `bots`, `automations`; UI: `/ai`, settings at
+`/settings/ai`, per-account AI dialog on `/accounts`.
 
 - [x] DB: `Soul`, `SoulSkill`, `Skill`, `SoulTurn`, `SoulSummary`,
       `SoulMemory`, `TelegramBot`, `BotSkill`, `BotTurn`, `Automation`,
       `AutomationRun`, `AiSetting`, `AiProvider`, `AiChatAccess`,
-      `AiChatBlock`, `AgentRun`; migrations `ai_souls`, `ai_secrets`,
-      `ai_api_key_envelope`, `reasoning_effort`, `ai_chat_controls`.
+      `AiChatBlock`, `AiChatSkill`, `AiChatEvent`, `AiAccountSetting`,
+      `AgentRun`; migrations `ai_souls`, `ai_secrets`,
+      `ai_api_key_envelope`, `reasoning_effort`, `ai_chat_controls`,
+      `ai_account_controls`.
 - [x] Souls: one persona per account, `off/draft/auto`, allowlist/limits,
       lazy creation; DM autopilot replies only in allowlisted private chats
       (draft emits `ai.draft`, auto sends and emits `ai.reply`).
 - [x] Memory: short-term `SoulTurn` buffer + rolling `SoulSummary` and
       `SoulMemory` facts, keyword/importance/recency retrieval, manual and
-      automatic compaction (≥30 turns, oldest ≤60, keep newest 12).
+      automatic compaction (≥30 turns, oldest ≤60, keep newest 12); read-only
+      per-chat view at `GET /accounts/:id/chats/:chatId/memory`.
 - [x] Skills: six seeded built-ins (`soul-creator`, `dm-assistant`,
       `human-style`, `memory-curator`, `automation-builder`,
       `telegram-assistant`), tool allowlists, UI/agent authoring, soul/bot
-      attachment.
+      attachment, plus a per-chat/topic override (`AiChatSkill`,
+      `GET/PUT/DELETE .../ai-skills`, empty override = no skills).
 - [x] Automations: `every`/`daily`/`incoming_message`/`manual` triggers,
       `agent`/`send_message`/`summarize` actions, 15 s in-process scheduler,
       run history, immediate HTTP Run.
 - [x] Bots: shared soul-creator bot (`accountId = null`) and one assistant bot
       per account, BotFather token (validated with `getMe`, encrypted with
       AAD `bot:<id>`), long polling every 10 s, owner-only access,
-      `/start /help /id /reset`.
+      `/start /help /id /reset`; no dashboard UI (REST/MCP only).
 - [x] Agent: OpenAI-compatible chat completions, 45 tools in one registry,
       `AgentRun` with trace, token counts and `source`
       (`ui/mcp/dm/bot/automation/soul-creator/test`).
 - [x] MCP: stateless Streamable HTTP `POST /mcp`, Bearer token, `initialize`,
       `ping`, `tools/list`, `tools/call`, `prompts/*`, `resources/*`;
       same tool registry and policy as the agent.
-- [x] Dashboard `/ai`: Агент, Души с памятью, Скиллы, Автоматизации, Боты;
-      provider/model, dryRun, capabilities, allowlists, MCP and the tool list
-      moved to «Настройки → AI» (`/settings/ai`).
-- [x] Providers: `AiProvider` list with encrypted keys (`enc:v1:…`, AAD
-      `ai-provider:<id>`, responses only carry `hasKey`), one default,
+- [x] Dashboard `/ai`: three tabs — Агент (one global agent, no account/chat
+      selector), Скиллы, Автоматизации; souls moved to the «Настройки ИИ»
+      dialog on `/accounts`; bot panel removed.
+- [x] Settings: `/settings` and the old `/settings/{accounts,proxy,logs}` routes
+      redirect to the AI-only `/settings/ai` (providers, legacy card, STT,
+      permissions, MCP + tools).
+- [x] Providers: presets (`opencode-go` with the OpenCode token and the Go base
+      URL, `custom`), encrypted keys (`enc:v1:…`, AAD `ai-provider:<id>`,
+      responses only carry `hasKey`/`keySource`), one default,
       `resolve()` provider → `AiSetting` → env, `import-settings`,
       `POST /ai/providers/:id/test` (8 s, key never echoed).
+- [x] Dynamic models: `GET /ai/providers/:id/models` (`<baseUrl>/models`, 10 s,
+      5 min cache, `source: provider|stored`), `PUT .../models` saves the chosen
+      list and repairs a stale default.
+- [x] Provider limits: `AiProvider.limits` (`maxPerHour`/`maxPerDay`),
+      `GET/PATCH /ai/providers/:id/limits`, real OpenCode Go usage meters
+      (`rolling`/`weekly`/`monthly` from `/inference/go/v1/usage`) plus local
+      `AgentRun` counters (`observed`); `source: provider|manual`. Stored limits
+      are not enforced in the LLM path.
+- [x] Shared key-candidate chain for `models`/`limits`/`test`: OpenCode token →
+      stored key → `AiSetting` key → `AI_API_KEY`, deduped, `401/403` moves on.
+- [x] Per-account capabilities: `AiAccountSetting` deltas,
+      `GET/PATCH /accounts/:id/ai-settings`, `null` removes an override,
+      `AiAccountPolicyService` merges per key and still applies allowlists and
+      `dryRun`; the registry filters tools by the effective set.
 - [x] Per-chat access and blacklist: `AiChatAccess` + `AiChatBlock`, whole-chat
       `threadId = 0` vs forum topic/comment thread, block > row > soul > deny,
       10 s decision cache, one-time `ai.access.seed` from soul `chatIds`,
       `ai-access`/`ai-block`/`ai-warning` endpoints, `AI_BLOCK_AFTER_WARNINGS`
       (default 3, internal `blockedBy = "warning"` rows).
-- [x] Speech-to-text: remote LAN LXC (OpenAI-compatible, `/health` probe cached
-      60 s, 300 s budget) → local Parakeet TDT 0.6B v3 (`sherpa-onnx-node`) →
-      whisper.cpp → `null`; explicit `undici` agent bypasses `HTTP(S)_PROXY`
-      for private hosts; voice notes and `audio/*` documents are transcribed in
-      the DM autopilot (`dm.autopilot.voice`, `speech.transcribe`), and the
-      transcription endpoint falls back on `PREMIUM_REQUIRED`
-      (`messaging.transcribe.local`).
+- [x] Per-chat audit: `AiChatEvent` (`warning`/`block`/`unblock`/`clear`/
+      `access`), `GET .../ai-events`, warning clear without unblock
+      (`DELETE .../ai-warnings`), chat log filters with a deep link to
+      `/logs?accountId=&chatId=&level=` (`/logs/stats` takes the same filters).
+- [x] Speech-to-text: Parakeet TDT 0.6B v3 only — `sttEngine`
+      `remote|local|disabled`, remote LAN LXC (OpenAI-compatible, `/health`
+      probe cached 60 s, 300 s budget) or local `sherpa-onnx`; no automatic local
+      failover unless `STT_LOCAL_FALLBACK=on`, whisper only via
+      `STT_ENGINE=whisper`; fixed model `parakeet-tdt-0.6b-v3`; explicit
+      `undici` agent bypasses `HTTP(S)_PROXY` for private hosts; voice notes and
+      `audio/*` documents are transcribed in the DM autopilot
+      (`dm.autopilot.voice`, `speech.transcribe`), and the transcription
+      endpoint falls back on `PREMIUM_REQUIRED` (`messaging.transcribe.local`).
 - [x] Automations per chat: `chatId`/`threadId` binding, `createdBy`
       (`user`/`soul`/`assistant`), IANA `timezone` for `daily`,
       `selfPausedAt`/`selfPauseReason`, chat card endpoint, pause/resume by chat
@@ -155,18 +185,26 @@ Reference: `docs/ai.md`. Code: `apps/api/src/ai`, `ai-access`, `ai-providers`,
 - [x] Reasoning stays local: `AgentRun.reasoning` and `messageIds`,
       `ai.reply`/`ai.draft` carry `reasoning` for the dashboard; only reply text
       is sent to Telegram.
-- [x] Tools: 45 in the registry (39 with default capabilities), including
+- [x] Reasoning stream: `ai.thinking` (`start` → throttled `delta` → `done`
+      with the full text) from the autopilot, the strip above the composer, and
+      `LlmService.chatStream()` (SSE) with a blocking fallback.
+- [x] Messenger merge: live bubbles and history are merged by id and then by a
+      ±5 s signature (temporary TDLib id vs the real one), reasoning is remapped
+      and kept once per `runId` (`apps/dashboard/src/lib/message-merge.ts`).
+- [x] Tools: 45 in the registry (38 with default capabilities, because
+      `delete`/`policy`/`admin` are off), including
       `ai_access_get/set`, `chat_warn/block/unblock`,
       `automation_pause_chat/resume_chat`; muting via `ai_access_set` and the
       blacklist sit behind `admin`.
 - [x] Messenger UI: AI chip in the chat header (allow/mute, block, unblock),
-      full access editor in the info panel and comment-thread drawer, own voice
-      bubble with transcription.
+      tabbed info panel (Обзор · Доступ ИИ · Память · Скиллы · Автоматизации ·
+      Медиа · Ссылки · Опросы · Логи, + Похожие/Управление), own voice bubble
+      with transcription.
 
 Live checks:
 - [x] Agent answered through `POST /ai/chat` after calling `accounts_list`
       (2 steps: the tool call + the answer).
-- [x] MCP: `initialize`, `tools/list` (39 tools with default capabilities,
+- [x] MCP: `initialize`, `tools/list` (38 tools with default capabilities,
       because `delete`/`policy`/`admin` are off) and `tools/call accounts_list`
       over `POST /mcp` with the Bearer token.
 - [x] dry-run send: `messages_send` returned
@@ -181,8 +219,15 @@ Live checks:
 - [x] Soul settings are merged: `PUT {settings:{maxPerHour:7}}` kept the
       existing `chatIds` and other values.
 - [x] Attached-but-disabled skills stay attached in `SoulView.skills`.
-- [x] API suite: 54 files, 697 tests passed (config, memory, agent, MCP,
-      autopilot, bots, automations, providers, per-chat access, speech).
+- [x] API suite: 60 files, 801 tests passed (config, memory, agent, LLM
+      streaming/fallback, MCP, autopilot, presence, bots, automations,
+      providers/presets/models/limits, per-chat access/events/skills, memory,
+      speech, logs).
+
+Not yet re-checked live after the second batch (unit tests and the builds cover
+it): provider presets/models/limits against OpenCode Go, the `ai.thinking` strip
+in a real autopilot reply, per-account permission deltas and per-chat skills on a
+live Telegram account.
 
 ## Still on mtcute (works only while the old session exists)
 `resolveChat`, chat settings/delete, and the admin tools (members, bans, rights,

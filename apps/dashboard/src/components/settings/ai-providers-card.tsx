@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  type AiProviderPreset,
   type AiProviderTestResult,
   type AiProviderView,
   type AiReasoningEffort,
@@ -9,6 +10,7 @@ import {
   createAiProvider,
   deleteAiProvider,
   importAiSettings,
+  listAiProviderPresets,
   setDefaultAiProvider,
   testAiProvider,
   updateAiProvider,
@@ -20,46 +22,65 @@ import {
   GhostButton,
   inputClass,
   OkBanner,
-  Pill,
   PrimaryButton,
   Toggle,
 } from "../dashboard/ai-ui";
+import { AiProviderRow } from "./ai-provider-row";
 
 type Pending =
-  | { kind: "create" }
-  | { kind: "import" }
+  | { kind: "create" | "import" }
   | { kind: "default" | "delete" | "toggle" | "test"; id: string }
   | null;
 
 interface FormState {
+  preset: string;
   name: string;
   baseUrl: string;
-  models: string;
-  defaultModel: string;
   reasoningEffort: AiReasoningEffort;
   apiKey: string;
   isDefault: boolean;
 }
 
+/** Minimal fallback so the form still opens if `/presets` is unreachable. */
+const FALLBACK_PRESETS: AiProviderPreset[] = [
+  {
+    id: "opencode-go",
+    name: "OpenCode Go",
+    kind: "openai-compatible",
+    baseUrl: "https://opencode.ai/inference/go/openai/v1",
+    keySource: "opencode",
+  },
+  {
+    id: "custom",
+    name: "Свой провайдер",
+    kind: "openai-compatible",
+    baseUrl: "",
+    keySource: "stored",
+  },
+];
+
 const EMPTY_FORM: FormState = {
+  preset: "custom",
   name: "",
   baseUrl: "",
-  models: "",
-  defaultModel: "",
   reasoningEffort: "low",
   apiKey: "",
   isDefault: false,
 };
 
-function parseModels(raw: string): string[] {
-  return [
-    ...new Set(
-      raw
-        .split(/[\s,]+/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
+function formForPreset(
+  presetId: string,
+  presets: AiProviderPreset[],
+): FormState {
+  const preset = presets.find((item) => item.id === presetId);
+  return {
+    preset: presetId,
+    name: preset?.name ?? "",
+    baseUrl: preset?.baseUrl ?? "",
+    reasoningEffort: "low",
+    apiKey: "",
+    isDefault: false,
+  };
 }
 
 function isHttpUrl(value: string): boolean {
@@ -81,8 +102,9 @@ export function AiProvidersCard({
   error: string | null;
   onRefresh: () => Promise<void>;
 }) {
+  const [presets, setPresets] = useState<AiProviderPreset[]>(FALLBACK_PRESETS);
   const [formOpen, setFormOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<AiProviderView | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [pending, setPending] = useState<Pending>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -91,29 +113,43 @@ export function AiProvidersCard({
 
   const busy = pending !== null;
 
+  useEffect(() => {
+    let cancelled = false;
+    listAiProviderPresets()
+      .then((list) => {
+        if (!cancelled && list.length > 0) setPresets(list);
+      })
+      .catch(() => {
+        // The fallback list keeps the form usable; creation still validates.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const closeForm = () => {
     setFormOpen(false);
-    setEditingId(null);
+    setEditing(null);
     setForm(EMPTY_FORM);
     setActionError(null);
   };
 
   const openCreate = () => {
     setFormOpen(true);
-    setEditingId(null);
-    setForm(EMPTY_FORM);
+    setEditing(null);
+    setForm(formForPreset(presets[0]?.id ?? "opencode-go", presets));
     setActionError(null);
     setStatus(null);
   };
 
   const openEdit = (provider: AiProviderView) => {
+    const presetId = provider.preset ?? "custom";
     setFormOpen(true);
-    setEditingId(provider.id);
+    setEditing(provider);
     setForm({
+      preset: presetId,
       name: provider.name,
       baseUrl: provider.baseUrl,
-      models: provider.models.join(", "),
-      defaultModel: provider.defaultModel ?? "",
       reasoningEffort: provider.reasoningEffort,
       apiKey: "",
       isDefault: provider.isDefault,
@@ -125,8 +161,8 @@ export function AiProvidersCard({
   const submit = async () => {
     const name = form.name.trim();
     const baseUrl = form.baseUrl.trim();
-    const defaultModel = form.defaultModel.trim();
-    const models = parseModels(form.models);
+    const preset = presets.find((item) => item.id === form.preset);
+    const opencode = preset?.keySource === "opencode";
     if (!name) {
       setActionError("Укажите название провайдера");
       return;
@@ -137,10 +173,6 @@ export function AiProvidersCard({
       );
       return;
     }
-    if (models.length === 0 && !defaultModel) {
-      setActionError("Добавьте хотя бы одну модель или модель по умолчанию");
-      return;
-    }
 
     setPending({ kind: "create" });
     setActionError(null);
@@ -149,18 +181,25 @@ export function AiProvidersCard({
       const body: Record<string, unknown> = {
         name,
         baseUrl,
-        models,
-        defaultModel: defaultModel || null,
         reasoningEffort: form.reasoningEffort,
         isDefault: form.isDefault,
-        ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
+        ...(opencode ? {} : { kind: preset?.kind ?? "openai-compatible" }),
+        ...(!opencode && form.apiKey.trim()
+          ? { apiKey: form.apiKey.trim() }
+          : {}),
       };
-      if (editingId) {
-        await updateAiProvider(editingId, body);
+      if (editing) {
+        await updateAiProvider(editing.id, body);
         setStatus(`Провайдер «${name}» сохранён`);
       } else {
-        await createAiProvider({ ...body, enabled: true });
-        setStatus(`Провайдер «${name}» добавлен`);
+        await createAiProvider({
+          ...body,
+          preset: form.preset,
+          enabled: true,
+        });
+        setStatus(
+          `Провайдер «${name}» добавлен. Модель и лимиты — в карточке ниже.`,
+        );
       }
       closeForm();
       await onRefresh();
@@ -270,7 +309,7 @@ export function AiProvidersCard({
   return (
     <Card
       title="Провайдеры"
-      description="OpenAI-совместимые LLM. По умолчанию используется первый включённый провайдер с бейджем."
+      description="OpenAI-совместимые LLM. Модель выбирается из списка провайдера, лимиты — у каждого провайдера свои."
       actions={
         <PrimaryButton onClick={openCreate} disabled={busy || formOpen}>
           Добавить провайдера
@@ -283,8 +322,9 @@ export function AiProvidersCard({
 
       {formOpen && (
         <ProviderForm
-          editing={editingId !== null}
+          editing={editing}
           form={form}
+          presets={presets}
           onChange={setForm}
           onSubmit={submit}
           onCancel={closeForm}
@@ -299,8 +339,8 @@ export function AiProvidersCard({
           <div className="rounded-lg border border-dashed border-zinc-700 p-4">
             <p className="text-sm text-zinc-300">Провайдеров пока нет.</p>
             <p className="mt-1 text-xs text-zinc-500">
-              Добавьте провайдера вручную или импортируйте текущие настройки
-              модели. Пока список пуст, работает устаревший блок ниже.
+              Добавьте OpenCode Go или своего провайдера. Пока список пуст,
+              работает устаревший блок ниже.
             </p>
             <div className="mt-3">
               <GhostButton onClick={() => void importCurrent()} disabled={busy}>
@@ -314,16 +354,18 @@ export function AiProvidersCard({
       ) : (
         <ul className="grid gap-2">
           {providers.map((provider) => (
-            <ProviderRow
+            <AiProviderRow
               key={provider.id}
               provider={provider}
-              pending={pending}
+              busy={busy}
+              testing={pending?.kind === "test" && pending.id === provider.id}
               test={tests[provider.id]}
               onDefault={() => void setDefault(provider)}
               onToggle={() => void toggleEnabled(provider)}
               onTest={() => void runTest(provider)}
               onEdit={() => openEdit(provider)}
               onDelete={() => void remove(provider)}
+              onChanged={onRefresh}
             />
           ))}
         </ul>
@@ -335,19 +377,24 @@ export function AiProvidersCard({
 function ProviderForm({
   editing,
   form,
+  presets,
   onChange,
   onSubmit,
   onCancel,
   busy,
 }: {
-  editing: boolean;
+  editing: AiProviderView | null;
   form: FormState;
+  presets: AiProviderPreset[];
   onChange: (form: FormState) => void;
   onSubmit: () => void;
   onCancel: () => void;
   busy: boolean;
 }) {
   const update = (patch: Partial<FormState>) => onChange({ ...form, ...patch });
+  const preset = presets.find((item) => item.id === form.preset);
+  const opencode = preset?.keySource === "opencode";
+  const editOpencode = editing?.keySource === "opencode";
 
   return (
     <div className="mb-3 rounded-lg border border-sky-900/50 bg-sky-950/10 p-3">
@@ -355,80 +402,101 @@ function ProviderForm({
         {editing ? "Изменить провайдера" : "Новый провайдер"}
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
+        {!editing && (
+          <Field
+            label="Тип провайдера"
+            hint="OpenCode Go берёт токен из OpenCode, ключ не нужен."
+            className="sm:col-span-2"
+          >
+            <select
+              value={form.preset}
+              onChange={(event) =>
+                onChange(formForPreset(event.target.value, presets))
+              }
+              autoComplete="off"
+              name="ct-provider-preset"
+              className={inputClass}
+            >
+              {presets.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.id === "custom" ? "Свой провайдер" : item.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        {editing && (
+          <p className="text-[11px] text-zinc-400 sm:col-span-2">
+            Тип: {editOpencode ? "OpenCode Go" : "Свой провайдер"}
+          </p>
+        )}
+
         <Field label="Название">
           <input
             value={form.name}
             onChange={(event) => update({ name: event.target.value })}
+            autoComplete="off"
+            name="ct-provider-name"
             className={inputClass}
-            placeholder="DeepSeek"
+            placeholder="Мой провайдер"
           />
         </Field>
-        <Field label="Base URL" hint="Например https://api.deepseek.com/v1">
+        <Field
+          label="Base URL"
+          hint={
+            opencode || editOpencode
+              ? "Задан пресетом OpenCode Go"
+              : "Например https://api.deepseek.com/v1"
+          }
+        >
           <input
             value={form.baseUrl}
             onChange={(event) => update({ baseUrl: event.target.value })}
+            readOnly={opencode || editOpencode}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-provider-base-url"
             className={inputClass}
             placeholder="https://api.deepseek.com/v1"
           />
         </Field>
-        <Field
-          label="Модели"
-          hint="Через запятую или с новой строки"
-          className="sm:col-span-2"
-        >
-          <textarea
-            value={form.models}
-            onChange={(event) => update({ models: event.target.value })}
-            className={`${inputClass} min-h-16 resize-y font-mono text-xs`}
-            placeholder="deepseek-chat, deepseek-reasoner"
-          />
-        </Field>
-        <Field
-          label="Модель по умолчанию"
-          hint="Можно не указывать, если есть список моделей"
-        >
-          <input
-            value={form.defaultModel}
-            onChange={(event) => update({ defaultModel: event.target.value })}
-            className={inputClass}
-            placeholder="deepseek-chat"
-          />
-        </Field>
-        <Field label="Размышления модели">
-          <select
-            value={form.reasoningEffort}
-            onChange={(event) =>
-              update({
-                reasoningEffort: event.target.value as AiReasoningEffort,
-              })
+
+        {!opencode && !editOpencode && (
+          <Field
+            label={editing ? "Заменить API-ключ" : "API-ключ (необязательно)"}
+            hint={
+              editing
+                ? "Пустое поле оставляет сохранённый ключ."
+                : "Можно добавить позже. Ключ не отображается."
             }
-            className={inputClass}
+            className="sm:col-span-2"
           >
-            <option value="off">off</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </select>
-        </Field>
-        <Field
-          label={editing ? "Заменить API-ключ" : "API-ключ (необязательно)"}
-          hint={
-            editing
-              ? "Пустое поле оставляет сохранённый ключ."
-              : "Можно добавить позже. Ключ не отображается."
-          }
-          className="sm:col-span-2"
-        >
-          <input
-            type="password"
-            value={form.apiKey}
-            onChange={(event) => update({ apiKey: event.target.value })}
-            autoComplete="off"
-            className={inputClass}
-            placeholder={editing ? "новый ключ (необязательно)" : "sk-…"}
-          />
-        </Field>
+            <input
+              type="password"
+              value={form.apiKey}
+              onChange={(event) => update({ apiKey: event.target.value })}
+              autoComplete="off"
+              spellCheck={false}
+              name="ct-provider-secret"
+              className={inputClass}
+              placeholder={editing ? "новый ключ (необязательно)" : "sk-…"}
+            />
+          </Field>
+        )}
+
+        {(opencode || editOpencode) && (
+          <p className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-1.5 text-[11px] text-zinc-400 sm:col-span-2">
+            API-ключ не запрашивается: используется токен OpenCode/Orca на этом
+            компьютере.
+          </p>
+        )}
       </div>
+
+      <p className="mt-3 text-[11px] text-zinc-500">
+        Модель выбирается в карточке провайдера после сохранения — отдельно для
+        каждого провайдера.
+      </p>
 
       <div className="mt-3">
         <Toggle
@@ -447,130 +515,5 @@ function ProviderForm({
         </GhostButton>
       </div>
     </div>
-  );
-}
-
-function ProviderRow({
-  provider,
-  pending,
-  test,
-  onDefault,
-  onToggle,
-  onTest,
-  onEdit,
-  onDelete,
-}: {
-  provider: AiProviderView;
-  pending: Pending;
-  test?: AiProviderTestResult;
-  onDefault: () => void;
-  onToggle: () => void;
-  onTest: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  const busy = pending !== null;
-  const testing = pending?.kind === "test" && pending.id === provider.id;
-  const modelList =
-    provider.defaultModel && !provider.models.includes(provider.defaultModel)
-      ? [provider.defaultModel, ...provider.models]
-      : provider.models;
-
-  return (
-    <li
-      className={`rounded-lg border p-3 ${
-        provider.enabled
-          ? "border-zinc-800 bg-zinc-950/40"
-          : "border-zinc-800/60 bg-zinc-950/20 opacity-70"
-      }`}
-    >
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="truncate text-sm font-medium text-zinc-200">
-              {provider.name}
-            </span>
-            {provider.isDefault && <Pill tone="sky">по умолчанию</Pill>}
-            <Pill tone={provider.hasKey ? "green" : "red"}>
-              {provider.hasKey ? "ключ задан" : "ключ не задан"}
-            </Pill>
-            <Pill>{provider.kind}</Pill>
-            {!provider.enabled && <Pill tone="amber">выключен</Pill>}
-          </div>
-          <p
-            className="mt-1 truncate font-mono text-[11px] text-zinc-500"
-            title={provider.baseUrl}
-          >
-            {provider.baseUrl}
-          </p>
-          {modelList.length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {modelList.map((model) => (
-                <Pill
-                  key={model}
-                  tone={model === provider.defaultModel ? "sky" : "zinc"}
-                >
-                  {model}
-                </Pill>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <label
-            className="flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-400"
-            title="Выключенный провайдер не используется для запросов"
-          >
-            <input
-              type="checkbox"
-              checked={provider.enabled}
-              disabled={busy}
-              onChange={onToggle}
-              aria-label={`Провайдер ${provider.name} включён`}
-              className="h-3.5 w-3.5 accent-sky-500"
-            />
-            включён
-          </label>
-          {!provider.isDefault && (
-            <GhostButton onClick={onDefault} disabled={busy}>
-              По умолчанию
-            </GhostButton>
-          )}
-          <GhostButton onClick={onTest} disabled={busy}>
-            {testing ? "Проверка…" : "Проверить"}
-          </GhostButton>
-          <GhostButton onClick={onEdit} disabled={busy}>
-            Изменить
-          </GhostButton>
-          <GhostButton onClick={onDelete} disabled={busy} danger>
-            Удалить
-          </GhostButton>
-        </div>
-      </div>
-
-      {testing && (
-        <p className="mt-2 flex items-center gap-2 text-[11px] text-zinc-400">
-          <span
-            aria-hidden="true"
-            className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-500 border-t-transparent"
-          />
-          Проверяем соединение…
-        </p>
-      )}
-      {!testing && test && (
-        <p
-          className={`mt-2 break-words text-[11px] ${
-            test.ok ? "text-emerald-300" : "text-red-300"
-          }`}
-        >
-          {test.ok
-            ? `ok · HTTP ${test.status ?? "—"} · ${test.latencyMs} мс`
-            : `Ошибка${test.status ? ` (HTTP ${test.status})` : ""}: ${
-                test.error ?? "провайдер не ответил"
-              }`}
-        </p>
-      )}
-    </li>
   );
 }

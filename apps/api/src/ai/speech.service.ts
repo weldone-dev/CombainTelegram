@@ -13,12 +13,10 @@ import { emitLog } from '../logs/log-sink.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 
-/** Local engine preference from the `STT_ENGINE` env. */
-export type SttEngineMode = 'parakeet' | 'whisper' | 'auto';
-/** Engine that actually produced a transcript. */
+/** Engine selection persisted in `AiSetting.sttEngine` (and `STT_ENGINE`). */
+export type SttSelection = 'remote' | 'local' | 'disabled';
+/** Engine that actually produced a transcript (whisper is internal only). */
 export type SttEngine = 'remote' | 'parakeet' | 'whisper';
-/** Engine selection persisted in `AiSetting.sttEngine`. */
-export type SttSelection = SttEngineMode | 'remote' | 'disabled';
 
 export interface SpeechInput {
   data: Buffer;
@@ -86,13 +84,6 @@ const DEFAULT_STT_MODEL = 'parakeet-tdt-0.6b-v3';
 /** Sealed secrets in plain `String` columns share this envelope prefix. */
 const STT_SECRET_PREFIX = 'enc:v1:';
 const AAD_STT_KEY = 'ai:stt-key';
-const STT_SELECTIONS: SttSelection[] = [
-  'auto',
-  'remote',
-  'parakeet',
-  'whisper',
-  'disabled',
-];
 /** Long notes take a while on the LXC, so the remote call gets its own budget. */
 const REMOTE_TIMEOUT_MS = 300_000;
 const REMOTE_PROBE_TIMEOUT_MS = 5_000;
@@ -100,7 +91,8 @@ const REMOTE_PROBE_TIMEOUT_MS = 5_000;
 const REMOTE_PROBE_TTL_MS = 60_000;
 /** How long a cached AI settings row is trusted, milliseconds. */
 const REMOTE_CONFIG_TTL_MS = 30_000;
-const PARAKEET_FILES = [
+/** Model files the local Parakeet recognizer needs; also used by the probe. */
+export const PARAKEET_FILES = [
   'encoder.int8.onnx',
   'decoder.int8.onnx',
   'joiner.int8.onnx',
@@ -174,6 +166,11 @@ function fileExists(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Directory of the local Parakeet ONNX model (`PARAKEET_MODEL_DIR`). */
+export function parakeetModelDirectory(): string {
+  return absolutePath(envValue('PARAKEET_MODEL_DIR') ?? DEFAULT_PARAKEET_DIR);
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -547,22 +544,25 @@ async function loadSherpaRecognizer(directory: string): Promise<{
 }
 
 /**
- * Local speech-to-text for voice notes, with an optional HTTP engine.
+ * Speech-to-text for voice notes: Parakeet TDT 0.6B v3, remote or local.
  *
- * Engine precedence is controlled by `AiSetting.sttEngine`, or by the
- * `STT_ENGINE` env when it is set (env wins):
+ * `AiSetting.sttEngine` is the user's choice, and the `STT_ENGINE` env wins
+ * when it is set:
  *
- * - `remote`   — the OpenAI-compatible endpoint only; a failure returns `null`,
- *                there is no local failover;
- * - `parakeet` — local Parakeet TDT via sherpa-onnx only;
- * - `whisper`  — the whisper.cpp CLI only;
- * - `disabled` — transcription is off;
- * - `auto`     — remote endpoint, then Parakeet, then whisper, then `null`.
+ * - `remote`   — the Parakeet HTTP service only. A failure returns `null`
+ *                unless `STT_LOCAL_FALLBACK=on`, so a misconfigured LXC is
+ *                visible instead of silently turning into local decoding;
+ * - `local`    — the local Parakeet TDT recognizer only;
+ * - `disabled` — transcription is off.
  *
- * `STT_REMOTE=off` removes the remote engine from every selection. Telegram's
- * own transcription needs Premium, so everything happens in this process:
- * ffmpeg converts the note to 16 kHz mono WAV and the chosen engine turns that
- * into text.
+ * Whisper is an internal last resort: it is reachable only through
+ * `STT_ENGINE=whisper` or the opt-in `STT_LOCAL_FALLBACK=on` chain, never
+ * through the settings row. `STT_REMOTE=off` removes the remote engine from
+ * every selection.
+ *
+ * Telegram's own transcription needs Premium, so everything happens in this
+ * process: ffmpeg converts the note to 16 kHz mono WAV and the chosen engine
+ * turns that into text.
  *
  * `transcribe` never throws: a missing binary, a dead model, a timeout or an
  * empty result all return `null` so the caller can answer the peer anyway.
@@ -585,8 +585,11 @@ export class SpeechService implements OnModuleInit {
   };
   /** Cached HTTP engine config; `null` means the remote engine is off. */
   private remote: RemoteSpeechTarget | null = null;
-  /** Engine persisted in `AiSetting.sttEngine`. */
-  private sttEngineSetting: SttSelection = 'auto';
+  /**
+   * Engine persisted in `AiSetting.sttEngine`, mapped to
+   * remote|local|disabled.
+   */
+  private sttEngineSetting: SttSelection = 'remote';
   private remoteLoadedAt = 0;
   private remoteRefresh: Promise<void> | null = null;
   /** Result of the last `/health` probe and when it ran. */
@@ -798,42 +801,61 @@ export class SpeechService implements OnModuleInit {
   /**
    * Engines that can run, in preference order.
    *
-   * `STT_ENGINE` wins when set; otherwise the persisted
-   * `AiSetting.sttEngine` decides, and `auto`/an unknown value keeps the full
-   * chain remote → Parakeet → whisper.
+   * `STT_ENGINE` wins when set (legacy names are mapped); otherwise the
+   * persisted `AiSetting.sttEngine` decides. `remote` stays remote-only unless
+   * `STT_LOCAL_FALLBACK=on` explicitly re-enables the local chain, and
+   * `local` never reaches for whisper.
    */
   private engines(): SttEngine[] {
-    const selection = this.selection();
+    const env = this.envSelection();
+    if (env === 'disabled') return [];
+    if (env === 'whisper') return this.whisperReady() ? ['whisper'] : [];
+    if (env === 'remote') return this.remoteChain();
+    if (env === 'local') return this.parakeetReady() ? ['parakeet'] : [];
+
+    const selection = this.sttEngineSetting;
     if (selection === 'disabled') return [];
-    if (selection === 'remote') {
-      return this.remote ? ['remote'] : [];
-    }
-    if (selection === 'parakeet') {
-      return this.parakeetReady() ? ['parakeet'] : [];
-    }
-    if (selection === 'whisper') {
-      return this.whisperReady() ? ['whisper'] : [];
-    }
-    const engines: SttEngine[] = [];
-    if (this.remote) engines.push('remote');
+    if (selection === 'remote') return this.remoteChain();
+    return this.parakeetReady() ? ['parakeet'] : [];
+  }
+
+  /**
+   * The remote engine, optionally followed by the local chain when
+   * `STT_LOCAL_FALLBACK=on`. Off by default so a dead LXC is visible.
+   */
+  private remoteChain(): SttEngine[] {
+    if (!this.remote) return [];
+    if (!this.localFallback()) return ['remote'];
+    const engines: SttEngine[] = ['remote'];
     if (this.parakeetReady()) engines.push('parakeet');
+    // Whisper stays an internal last resort, never a selectable engine.
     if (this.whisperReady()) engines.push('whisper');
     return engines;
   }
 
-  /** The env overrides the row; an unset/invalid env defers to the row. */
-  private selection(): SttSelection {
+  /**
+   * `STT_ENGINE` as a selection, or `null` when it is unset/unusable.
+   * `whisper` is kept for the internal env-only path; `auto`, `parakeet` and
+   * any unknown value are mapped like a legacy stored row.
+   */
+  private envSelection(): SttSelection | 'whisper' | null {
     const env = envValue('STT_ENGINE')?.toLowerCase();
-    if (env === 'auto' || env === 'parakeet' || env === 'whisper') {
-      return env;
-    }
-    return this.sttEngineSetting;
+    if (!env) return null;
+    if (env === 'whisper') return 'whisper';
+    if (env === 'remote' || env === 'local' || env === 'disabled') return env;
+    if (env === 'parakeet') return 'local';
+    if (env === 'auto') return this.remote ? 'remote' : 'local';
+    return null;
+  }
+
+  /** `STT_LOCAL_FALLBACK=on` re-enables local decoding after a remote failure. */
+  private localFallback(): boolean {
+    const value = envValue('STT_LOCAL_FALLBACK')?.toLowerCase();
+    return value === 'on' || value === 'true' || value === '1' || value === 'yes';
   }
 
   private parakeetDirectory(): string {
-    return absolutePath(
-      envValue('PARAKEET_MODEL_DIR') ?? DEFAULT_PARAKEET_DIR,
-    );
+    return parakeetModelDirectory();
   }
 
   private parakeetReady(): boolean {
@@ -884,10 +906,13 @@ export class SpeechService implements OnModuleInit {
             );
           }
         }
-        this.sttEngineSetting = parseSttSelection(row?.sttEngine);
-        // Env vars override the row; the built-in LXC is the last resort, so
-        // a fresh install transcribes without any configuration.
+        // The built-in LXC is always available unless `STT_REMOTE=off`, so it
+        // counts as "configured" when mapping legacy `auto` rows.
         this.remote = this.remoteTarget(row);
+        this.sttEngineSetting = parseSttSelection(
+          row?.sttEngine,
+          this.remote !== null,
+        );
       } finally {
         this.remoteLoadedAt = Date.now();
         this.remoteRefresh = null;
@@ -903,15 +928,19 @@ export class SpeechService implements OnModuleInit {
    * the `enc:v1:` blob never reaches an `Authorization` header.
    */
   private remoteTarget(row: AiSettingModel | null): RemoteSpeechTarget | null {
-    if (row?.sttEngine === 'disabled') return null;
-    // Local-only deployments (and tests) turn the network engine off entirely.
+    // `disabled` and `STT_REMOTE=off` remove the network engine entirely.
+    if (parseSttSelection(row?.sttEngine, true) === 'disabled') return null;
     if (envValue('STT_REMOTE')?.toLowerCase() === 'off') return null;
     const baseUrl =
       envValue('STT_BASE_URL') ||
       row?.sttBaseUrl?.trim() ||
       DEFAULT_STT_BASE_URL;
-    const model =
-      envValue('STT_MODEL') || row?.sttModel?.trim() || DEFAULT_STT_MODEL;
+    // The engine is fixed to Parakeet, so legacy model ids are not forwarded.
+    const storedModel =
+      envValue('STT_MODEL') || row?.sttModel?.trim() || '';
+    const model = /^parakeet/i.test(storedModel)
+      ? storedModel
+      : DEFAULT_STT_MODEL;
     return {
       baseUrl,
       model,
@@ -1285,10 +1314,23 @@ export class SpeechService implements OnModuleInit {
   }
 }
 
-/** Normalises the persisted `AiSetting.sttEngine`; unknown values mean `auto`. */
-export function parseSttSelection(value: unknown): SttSelection {
+/**
+ * Maps a persisted `AiSetting.sttEngine` (or a dashboard payload) onto the
+ * three supported choices. Legacy rows keep working:
+ *
+ * - `remote`            → `remote`
+ * - `local`, `parakeet` → `local`
+ * - `disabled`          → `disabled`
+ * - `auto`, unknown, or a legacy `whisper` row → `remote` when a remote
+ *   endpoint is configured, `local` otherwise.
+ */
+export function parseSttSelection(
+  value: unknown,
+  remoteConfigured = true,
+): SttSelection {
   const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return (STT_SELECTIONS as string[]).includes(raw)
-    ? (raw as SttSelection)
-    : 'auto';
+  if (raw === 'disabled') return 'disabled';
+  if (raw === 'local' || raw === 'parakeet') return 'local';
+  if (raw === 'remote') return 'remote';
+  return remoteConfigured ? 'remote' : 'local';
 }

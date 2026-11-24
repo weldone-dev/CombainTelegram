@@ -8,25 +8,22 @@ import {
 } from "../../lib/ai-api";
 import { AgentChatPanel } from "./ai-agent-chat";
 import { AutomationsPanel } from "./ai-automations";
-import { BotsPanel } from "./ai-bots";
 import { SkillsPanel } from "./ai-skills";
-import { SoulsPanel } from "./ai-souls";
 import { ErrorBanner } from "./ai-ui";
 
-type Tab = "agent" | "souls" | "skills" | "automations" | "bots";
+type Tab = "agent" | "skills" | "automations";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "agent", label: "Агент" },
-  { id: "souls", label: "Души" },
   { id: "skills", label: "Скиллы" },
   { id: "automations", label: "Автоматизации" },
-  { id: "bots", label: "Боты" },
 ];
 
 /**
  * Agent-facing AI workspace. Provider, model, permissions and MCP live in
  * «Настройки → AI»; this page only needs the current settings to show a small
- * model status badge and to pass them to the agent chat.
+ * model status badge and to pass them to the agent chat. Souls are configured
+ * per account on the account screen.
  */
 export function AiPage() {
   const [tab, setTab] = useState<Tab>("agent");
@@ -95,10 +92,8 @@ export function AiPage() {
                 <AgentChatPanel settings={settings} />
               </div>
             )}
-            {tab === "souls" && <SoulsPanel />}
             {tab === "skills" && <SkillsPanel />}
             {tab === "automations" && <AutomationsPanel />}
-            {tab === "bots" && <BotsPanel />}
           </>
         )}
       </div>

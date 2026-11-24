@@ -4,25 +4,42 @@ import { PolicyError } from './ai-policy.service.js';
 import { DEFAULT_CAPABILITIES, type AiCapabilities } from './ai.types.js';
 
 function harness(
-  overrides: { caps?: Partial<AiCapabilities>; dryRun?: boolean } = {},
+  overrides: {
+    caps?: Partial<AiCapabilities>;
+    dryRun?: boolean;
+    /** Per-account capability overrides, mirroring `AiAccountPolicyService`. */
+    accountCaps?: Record<string, Partial<AiCapabilities>>;
+  } = {},
 ) {
   const caps = { ...DEFAULT_CAPABILITIES, ...overrides.caps };
+  const capsFor = (accountId: string | null): AiCapabilities =>
+    accountId && overrides.accountCaps?.[accountId]
+      ? { ...caps, ...overrides.accountCaps[accountId] }
+      : caps;
   const messaging = {
     sendMessage: vi.fn(async () => ({ id: 1 })),
     getChat: vi.fn(async () => ({ id: 42, type: 'user', title: 'Peer' })),
   };
   const policy = {
-    capabilities: vi.fn(async () => caps),
-    // Same rule as the real AiPolicyService: a disabled capability is denied.
-    assert: vi.fn(async (capability: keyof AiCapabilities) => {
-      if (!caps[capability]) {
-        throw new PolicyError(
-          `Capability "${capability}" is disabled for the AI/MCP. Enable it in AI permissions.`,
-          'CAPABILITY_DISABLED',
-        );
-      }
-      return overrides.dryRun ?? true;
-    }),
+    capabilities: vi.fn(async (accountId: string | null = null) =>
+      capsFor(accountId),
+    ),
+    // Same rule as the real resolver: the effective capability of the calling
+    // account decides, an account override wins over the global one.
+    assert: vi.fn(
+      async (
+        capability: keyof AiCapabilities,
+        ctx?: { accountId?: string | null },
+      ) => {
+        if (!capsFor(ctx?.accountId ?? null)[capability]) {
+          throw new PolicyError(
+            `Capability "${capability}" is disabled for the AI/MCP. Enable it in AI permissions.`,
+            'CAPABILITY_DISABLED',
+          );
+        }
+        return overrides.dryRun ?? true;
+      },
+    ),
     evaluate: vi.fn(async () => ({
       allowed: true,
       dryRun: overrides.dryRun ?? true,
@@ -376,5 +393,84 @@ describe('AgentToolsService', () => {
     expect(access.setAccess).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 42, enabled: false }),
     );
+  });
+
+  it('denies a tool when the account override disables a globally allowed capability', async () => {
+    const denied = harness({ accountCaps: { 'account-1': { send: false } } });
+    const result = await denied.service.execute(
+      'messages_send',
+      { accountId: 'account-1', chatId: 42, text: 'hello' },
+      ctx,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('CAPABILITY_DISABLED');
+    expect(denied.messaging.sendMessage).not.toHaveBeenCalled();
+
+    // The same call is allowed for an account without an override.
+    const allowed = harness();
+    const ok = await allowed.service.execute(
+      'messages_send',
+      { accountId: 'account-1', chatId: 42, text: 'hello' },
+      ctx,
+    );
+    expect(ok.ok).toBe(true);
+  });
+
+  it('grants a tool when the account override enables a globally disabled capability', async () => {
+    const granted = harness({
+      caps: { delete: false },
+      accountCaps: { 'account-1': { delete: true } },
+    });
+    const result = await granted.service.execute(
+      'messages_delete',
+      { accountId: 'account-1', chatId: 42, messageId: 7 },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.dryRun).toBe(true);
+
+    // Without the account the global policy still denies it.
+    const global = harness({ caps: { delete: false } });
+    const denied = await global.service.execute(
+      'messages_delete',
+      { chatId: 42, messageId: 7 },
+      { ...ctx, accountId: null },
+    );
+    expect(denied.ok).toBe(false);
+    expect(denied.code).toBe('CAPABILITY_DISABLED');
+  });
+
+  it('filters tool schemas by the effective capabilities of the account', async () => {
+    const { service, policy } = harness({
+      accountCaps: { 'account-1': { send: false, automations: false } },
+    });
+    const names = (await service.schemas(ctx, null)).map(
+      (schema) => schema.function.name,
+    );
+    expect(names).not.toContain('messages_send');
+    expect(names).not.toContain('automation_pause_chat');
+    expect(names).toContain('accounts_list');
+    expect(policy.capabilities).toHaveBeenCalledWith('account-1');
+  });
+
+  it('keeps the global behaviour when no account is in context', async () => {
+    const { service, policy } = harness({ caps: { send: false } });
+    const result = await service.execute(
+      'messages_send',
+      { chatId: 42, text: 'hello' },
+      { ...ctx, accountId: null },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('CAPABILITY_DISABLED');
+    expect(policy.assert).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ accountId: null }),
+    );
+
+    const schemas = await service.schemas({ ...ctx, accountId: null }, null);
+    expect(schemas.map((schema) => schema.function.name)).not.toContain(
+      'messages_send',
+    );
+    expect(policy.capabilities).toHaveBeenCalledWith(null);
   });
 });

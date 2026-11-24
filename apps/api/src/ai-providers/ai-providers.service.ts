@@ -8,10 +8,31 @@ import { notFound } from '../common/api-error.js';
 import { parseBoolean, requireString } from '../common/validation.js';
 import { emitLog } from '../logs/log-sink.js';
 import type { ReasoningEffort } from '../ai/ai.types.js';
+import {
+  AI_PROVIDER_PRESETS,
+  keySourceOf,
+  mergeLimits,
+  modelsEndpoint,
+  opencodeUsageEndpoint,
+  parseLimits,
+  parseModelsPayload,
+  parseUsagePayload,
+  requirePreset,
+} from './ai-providers.presets.js';
+import { readOpencodeToken } from './opencode-token.js';
 import type {
   AiProviderCreateInput,
   AiProviderDeleteResult,
   AiProviderImportResult,
+  AiProviderLimits,
+  AiProviderLimitsInput,
+  AiProviderLimitsUpdateResult,
+  AiProviderLimitsView,
+  AiProviderModelInfo,
+  AiProviderModelsInput,
+  AiProviderModelsView,
+  AiProviderObservedUsage,
+  AiProviderPreset,
   AiProviderTestResult,
   AiProviderUpdateInput,
   AiProviderView,
@@ -25,6 +46,13 @@ const SETTINGS_KEY_AAD = 'ai:api-key';
 const SECRET_PREFIX = 'enc:v1:';
 /** Short timeout: a provider test must never hang the dashboard. */
 const TEST_TIMEOUT_MS = 8_000;
+/** Model and usage calls to the provider; the dashboard waits for these. */
+const PROVIDER_TIMEOUT_MS = 10_000;
+/** A provider model list changes rarely: keep it for five minutes. */
+const MODEL_CACHE_TTL_MS = 5 * 60_000;
+/** Local counters reported next to the stored limits. */
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
 
 const REASONING_EFFORTS: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
 
@@ -127,6 +155,11 @@ function errorMessage(raw: string): string {
 @Injectable()
 export class AiProvidersService implements OnModuleInit {
   private readonly logger = new Logger(AiProvidersService.name);
+  /** `<baseUrl>/models` answers, keyed by provider id (5 min TTL). */
+  private readonly modelCache = new Map<
+    string,
+    { baseUrl: string; at: number; models: AiProviderModelInfo[] }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -155,12 +188,34 @@ export class AiProvidersService implements OnModuleInit {
     return rows.map((row) => this.view(row));
   }
 
+  /** Presets the dashboard offers instead of a hand-filled provider form. */
+  presets(): AiProviderPreset[] {
+    return [...AI_PROVIDER_PRESETS];
+  }
+
   async create(input: AiProviderCreateInput): Promise<AiProviderView> {
-    const name = requireString(input.name, 'name', { max: 80 });
-    const baseUrl = normalizeBaseUrl(input.baseUrl);
-    const kind = optionalText(input.kind) ?? 'openai-compatible';
-    const models = parseStringArray(input.models);
-    const defaultModel = optionalText(input.defaultModel);
+    const preset = requirePreset(input.preset);
+    // A preset only fills defaults: name, base URL, kind and the model stay
+    // overridable, exactly like a hand-created provider.
+    const name = requireString(
+      text(input.name) || (preset?.name ?? ''),
+      'name',
+      { max: 80 },
+    );
+    const baseUrl = normalizeBaseUrl(
+      text(input.baseUrl) || (preset?.baseUrl ?? ''),
+    );
+    const kind = optionalText(input.kind) ?? preset?.kind ?? 'openai-compatible';
+    const defaultModel =
+      input.defaultModel === undefined
+        ? (preset?.defaultModel ?? null)
+        : optionalText(input.defaultModel);
+    const models =
+      input.models === undefined
+        ? defaultModel
+          ? [defaultModel]
+          : []
+        : parseStringArray(input.models);
     const reasoningEffort = parseReasoningEffort(input.reasoningEffort);
     const enabled =
       input.enabled === undefined ? true : parseBoolean(input.enabled, true);
@@ -169,7 +224,11 @@ export class AiProvidersService implements OnModuleInit {
         ? false
         : parseBoolean(input.isDefault, false);
     const id = randomUUID();
-    const apiKey = optionalText(input.apiKey);
+    // `opencode` presets draw the key from Orca's login: store nothing, even
+    // when the dashboard still posts an apiKey field.
+    const keySource = keySourceOf(preset?.id);
+    const apiKey =
+      keySource === 'opencode' ? null : optionalText(input.apiKey);
 
     const row = (await this.prisma.$transaction(async (tx) => {
       const total = await tx.aiProvider.count();
@@ -187,6 +246,7 @@ export class AiProvidersService implements OnModuleInit {
           id,
           name,
           kind,
+          preset: preset?.id ?? null,
           baseUrl,
           apiKey: apiKey ? this.encryptKey(id, apiKey) : null,
           models: JSON.stringify(models),
@@ -251,6 +311,10 @@ export class AiProvidersService implements OnModuleInit {
 
     if (Object.keys(data).length === 0) return this.view(existing);
 
+    if (data.baseUrl !== undefined && data.baseUrl !== existing.baseUrl) {
+      this.modelCache.delete(existing.id);
+    }
+
     const row = (await this.prisma.$transaction(async (tx) => {
       if (data.isDefault) {
         await tx.aiProvider.updateMany({
@@ -271,6 +335,7 @@ export class AiProvidersService implements OnModuleInit {
    */
   async remove(id: string): Promise<AiProviderDeleteResult> {
     const existing = await this.requireProvider(id);
+    this.modelCache.delete(existing.id);
     const promotedId = await this.prisma.$transaction(async (tx) => {
       await tx.aiProvider.delete({ where: { id: existing.id } });
       if (!existing.isDefault) return null;
@@ -330,25 +395,31 @@ export class AiProvidersService implements OnModuleInit {
       };
     }
 
-    const key = this.readKey(provider);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const pending = fetch(chatEndpoint(baseUrl), {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(key ? { authorization: `Bearer ${key}` } : {}),
-          ...extraHeaders(),
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: 'ping' }],
-          max_tokens: 1,
-          temperature: 0,
-        }),
-        signal: controller.signal,
+      // Same key chain and headers as `models()`: a preset provider with no
+      // stored key (OpenCode Go) must be testable too.
+      const body = JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+        temperature: 0,
       });
+      const pending = this.requestWithCandidates(
+        provider,
+        chatEndpoint(baseUrl),
+        (key) => ({
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(key ? { authorization: `Bearer ${key}` } : {}),
+            ...extraHeaders(),
+          },
+          body,
+          signal: controller.signal,
+        }),
+      );
       void pending.catch(() => undefined);
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
@@ -358,8 +429,7 @@ export class AiProvidersService implements OnModuleInit {
           );
         }, TEST_TIMEOUT_MS);
       });
-      const response = await Promise.race([pending, timeout]);
-      const raw = await response.text().catch(() => '');
+      const { response, raw } = await Promise.race([pending, timeout]);
       const latencyMs = Date.now() - started;
       if (!response.ok) {
         return {
@@ -397,6 +467,268 @@ export class AiProvidersService implements OnModuleInit {
       };
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The models the provider itself offers (`GET <baseUrl>/models`), so the
+   * dashboard never asks the user to type a model id. Cached for five minutes;
+   * never throws — on failure the list stored on the row comes back with
+   * `source: 'stored'` and an `error` for the UI.
+   */
+  async models(id: string): Promise<AiProviderModelsView> {
+    const provider = await this.requireProvider(id);
+    const baseUrl = text(provider.baseUrl);
+    const stored: AiProviderModelInfo[] = parseStringArray(provider.models).map(
+      (model) => ({ id: model }),
+    );
+    if (!baseUrl) {
+      return {
+        models: stored,
+        source: 'stored',
+        error: 'The provider has no base URL',
+      };
+    }
+
+    const cached = this.modelCache.get(provider.id);
+    if (
+      cached &&
+      cached.baseUrl === baseUrl &&
+      Date.now() - cached.at < MODEL_CACHE_TTL_MS
+    ) {
+      return {
+        models: cached.models,
+        source: 'provider',
+        cached: true,
+        fetchedAt: new Date(cached.at).toISOString(),
+      };
+    }
+
+    try {
+      const { response, raw } = await this.getFromProvider(
+        provider,
+        modelsEndpoint(baseUrl),
+      );
+      if (!response.ok) {
+        return { models: stored, source: 'stored', error: errorMessage(raw) };
+      }
+      const parsed = this.parseJson(raw);
+      // Some gateways answer 200 with an OpenAI error envelope.
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        (parsed as { error?: unknown }).error
+      ) {
+        return { models: stored, source: 'stored', error: errorMessage(raw) };
+      }
+      const models = parseModelsPayload(parsed);
+      if (models.length === 0) {
+        return {
+          models: stored,
+          source: 'stored',
+          error: 'The provider returned no models',
+        };
+      }
+      const at = Date.now();
+      this.modelCache.set(provider.id, { baseUrl, at, models });
+      return {
+        models,
+        source: 'provider',
+        fetchedAt: new Date(at).toISOString(),
+      };
+    } catch (error) {
+      return {
+        models: stored,
+        source: 'stored',
+        error: (error as Error).message.slice(0, 300),
+      };
+    }
+  }
+
+  /**
+   * Stored limits plus, when the provider really exposes one, its usage/quota.
+   * OpenCode Go documents `GET https://opencode.ai/inference/go/v1/usage`
+   * (rolling / weekly / monthly meters); other providers have no such endpoint,
+   * so they report `source: 'manual'`. Local `AgentRun` counters are always
+   * added when they can be read.
+   */
+  async limits(id: string): Promise<AiProviderLimitsView> {
+    const provider = await this.requireProvider(id);
+    const limits = parseLimits(provider.limits);
+    const checkedAt = new Date().toISOString();
+    const observed = await this.observedUsage();
+    const endpoint = opencodeUsageEndpoint(text(provider.baseUrl));
+    if (!endpoint) {
+      return { source: 'manual', limits, observed, checkedAt };
+    }
+
+    try {
+      const { response, raw } = await this.getFromProvider(provider, endpoint);
+      if (!response.ok) {
+        return {
+          source: 'manual',
+          limits,
+          observed,
+          checkedAt,
+          error: errorMessage(raw),
+        };
+      }
+      const usage = parseUsagePayload(this.parseJson(raw));
+      if (!usage) {
+        return {
+          source: 'manual',
+          limits,
+          observed,
+          checkedAt,
+          error: 'The provider returned no usage data',
+        };
+      }
+      return { source: 'provider', limits, observed, usage, checkedAt };
+    } catch (error) {
+      return {
+        source: 'manual',
+        limits,
+        observed,
+        checkedAt,
+        error: (error as Error).message.slice(0, 300),
+      };
+    }
+  }
+
+  /** `PATCH /ai/providers/:id/limits`; `0` means unlimited. */
+  async updateLimits(
+    id: string,
+    input: AiProviderLimitsInput = {},
+  ): Promise<AiProviderLimitsUpdateResult> {
+    const existing = await this.requireProvider(id);
+    const limits: AiProviderLimits = mergeLimits(
+      parseLimits(existing.limits),
+      (input ?? {}) as Record<string, unknown>,
+    );
+    await this.prisma.aiProvider.update({
+      where: { id: existing.id },
+      data: { limits: JSON.stringify(limits) },
+    });
+    return { limits };
+  }
+
+  /**
+   * `PUT /ai/providers/:id/models`: persists the list the dashboard picked
+   * (usually the one `GET .../models` just fetched). When no `defaultModel` is
+   * given and the current one is gone, the first model becomes the default so
+   * the resolver never points at a model the provider no longer lists.
+   */
+  async saveModels(
+    id: string,
+    input: AiProviderModelsInput = {},
+  ): Promise<AiProviderView> {
+    const existing = await this.requireProvider(id);
+    const update: AiProviderUpdateInput = {};
+    if (input.models !== undefined) {
+      update.models = input.models;
+      const models = parseStringArray(input.models);
+      const current = optionalText(existing.defaultModel);
+      if (
+        input.defaultModel === undefined &&
+        (!current || !models.includes(current))
+      ) {
+        update.defaultModel = models[0] ?? null;
+      }
+    }
+    if (input.defaultModel !== undefined) {
+      update.defaultModel = input.defaultModel;
+    }
+    return this.update(id, update);
+  }
+
+  /** Local request counters next to the provider quota; cheap and safe. */
+  private async observedUsage(): Promise<AiProviderObservedUsage | undefined> {
+    const now = Date.now();
+    try {
+      const [lastHour, lastDay] = await Promise.all([
+        this.prisma.agentRun.count({
+          where: { createdAt: { gte: new Date(now - HOUR_MS) } },
+        }),
+        this.prisma.agentRun.count({
+          where: { createdAt: { gte: new Date(now - DAY_MS) } },
+        }),
+      ]);
+      return { lastHour, lastDay };
+    } catch {
+      // Older databases without AgentRun still get the limits.
+      return undefined;
+    }
+  }
+
+  /**
+   * Key candidates for a provider call, most specific first: the OpenCode
+   * token for `opencode` presets, then the stored key, the legacy settings key
+   * and `AI_API_KEY`. Deduplicated; a single `null` (unauthenticated) when
+   * nothing is configured, which is how local providers work.
+   */
+  private async keyCandidates(
+    row: AiProviderModel,
+  ): Promise<(string | null)[]> {
+    const candidates: string[] = [];
+    const add = (value: string | null | undefined): void => {
+      const key = value?.trim();
+      if (key && !candidates.includes(key)) candidates.push(key);
+    };
+    if (keySourceOf(row.preset) === 'opencode') add(readOpencodeToken());
+    add(this.readKey(row));
+    add(await this.settingsKey());
+    add(text(process.env.AI_API_KEY) || null);
+    return candidates.length > 0 ? candidates : [null];
+  }
+
+  /**
+   * One request per key candidate until the provider accepts it. The chain is
+   * shared by `models()`, `limits()` and `test()` so they cannot drift:
+   * OpenCode token (presets) → stored key → legacy settings key → `AI_API_KEY`,
+   * deduplicated, ending with a single unauthenticated attempt when nothing is
+   * configured. A 401/403 moves on to the next candidate (an expired OpenCode
+   * token must not hide a working `AI_API_KEY`); transport errors are not
+   * retried because every candidate would hit the same network.
+   */
+  private async requestWithCandidates(
+    row: AiProviderModel,
+    url: string,
+    init: (key: string | null) => RequestInit,
+  ): Promise<{ response: Response; raw: string; key: string | null }> {
+    const keys = await this.keyCandidates(row);
+    let last: { response: Response; raw: string; key: string | null } | null =
+      null;
+    for (const key of keys) {
+      const response = await fetch(url, init(key));
+      const raw = await response.text().catch(() => '');
+      last = { response, raw, key };
+      if (response.status !== 401 && response.status !== 403) return last;
+    }
+    if (!last) throw new Error('The provider did not answer');
+    return last;
+  }
+
+  /** GET through the shared key chain, with the provider-call timeout. */
+  private async getFromProvider(
+    row: AiProviderModel,
+    url: string,
+  ): Promise<{ response: Response; raw: string }> {
+    return this.requestWithCandidates(row, url, (key) => ({
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        ...(key ? { authorization: `Bearer ${key}` } : {}),
+        ...extraHeaders(),
+      },
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    }));
+  }
+
+  private parseJson(raw: string): unknown {
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return null;
     }
   }
 
@@ -490,10 +822,13 @@ export class AiProvidersService implements OnModuleInit {
       id: row.id,
       name: row.name,
       kind: row.kind,
+      preset: row.preset ?? null,
+      keySource: keySourceOf(row.preset),
       baseUrl: row.baseUrl,
       models: parseStringArray(row.models),
       defaultModel: row.defaultModel,
       reasoningEffort: this.parseEffort(row.reasoningEffort),
+      limits: parseLimits(row.limits),
       isDefault: row.isDefault,
       enabled: row.enabled,
       hasKey: Boolean(row.apiKey),

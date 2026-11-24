@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { AiChatAccessModel, AiChatBlockModel } from '@repo/database';
 import { notFound } from '../common/api-error.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AiChatEventsService } from './ai-chat-events.service.js';
 
 /**
  * `AiChatBlock.blockedBy` of a row that only carries the warning counter.
@@ -147,7 +148,10 @@ function toBlockView(row: AiChatBlockModel): AiChatBlockView {
  */
 @Injectable()
 export class AiAccessService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: AiChatEventsService,
+  ) {}
 
   /**
    * Decides whether the AI may act in `chatId` / `threadId`. A positive thread
@@ -241,7 +245,17 @@ export class AiAccessService {
       update,
     });
 
-    return this.view(userId, accountId, chatId, threadId);
+    const view = await this.view(userId, accountId, chatId, threadId);
+    await this.events.record({
+      accountId,
+      chatId,
+      threadId,
+      kind: 'access',
+      reason: this.accessReason(input),
+      warnings: view.warnings,
+      actor: 'user',
+    });
+    return view;
   }
 
   /** Removes the access row of exactly this chat/topic. */
@@ -252,9 +266,20 @@ export class AiAccessService {
     threadId = 0,
   ): Promise<{ removed: boolean }> {
     await this.requireAccount(userId, accountId);
+    const thread = this.thread(threadId);
     const { count } = await this.prisma.aiChatAccess.deleteMany({
-      where: { accountId, chatId: BigInt(chatId), threadId: this.thread(threadId) },
+      where: { accountId, chatId: BigInt(chatId), threadId: thread },
     });
+    if (count > 0) {
+      await this.events.record({
+        accountId,
+        chatId,
+        threadId: thread,
+        kind: 'access',
+        reason: 'removed',
+        actor: 'user',
+      });
+    }
     return { removed: count > 0 };
   }
 
@@ -288,7 +313,17 @@ export class AiAccessService {
       update,
     });
 
-    return this.view(userId, accountId, chatId, threadId);
+    const view = await this.view(userId, accountId, chatId, threadId);
+    await this.events.record({
+      accountId,
+      chatId,
+      threadId,
+      kind: 'block',
+      reason: view.reason,
+      warnings: view.warnings,
+      actor: blockedBy,
+    });
+    return view;
   }
 
   /** Lifts the block and drops the warning counter (unblock = clean slate). */
@@ -299,9 +334,22 @@ export class AiAccessService {
     threadId = 0,
   ): Promise<AiUnblockResult> {
     await this.requireAccount(userId, accountId);
+    const thread = this.thread(threadId);
+    const existing = await this.blockRow(accountId, chatId, thread);
     const { count } = await this.prisma.aiChatBlock.deleteMany({
-      where: { accountId, chatId: BigInt(chatId), threadId: this.thread(threadId) },
+      where: { accountId, chatId: BigInt(chatId), threadId: thread },
     });
+    if (count > 0) {
+      await this.events.record({
+        accountId,
+        chatId,
+        threadId: thread,
+        kind: 'unblock',
+        reason: existing?.reason ?? null,
+        warnings: 0,
+        actor: 'user',
+      });
+    }
     return { removed: count > 0, warnings: 0, blocked: false };
   }
 
@@ -323,11 +371,12 @@ export class AiAccessService {
     const warnings = (existing?.warnings ?? 0) + 1;
     const blocked = warnings >= this.blockAfterWarnings();
     const reason = input.reason ?? existing?.reason ?? null;
+    const actor = this.blockedBy(input.blockedBy);
 
     if (existing) {
       const data: Record<string, unknown> = { warnings };
       if (blocked) {
-        data.blockedBy = this.blockedBy(input.blockedBy);
+        data.blockedBy = actor;
         data.reason = reason;
       }
       await this.prisma.aiChatBlock.update({
@@ -343,8 +392,30 @@ export class AiAccessService {
           threadId,
           reason,
           warnings,
-          blockedBy: blocked ? this.blockedBy(input.blockedBy) : WARNING_ONLY,
+          blockedBy: blocked ? actor : WARNING_ONLY,
         },
+      });
+    }
+
+    await this.events.record({
+      accountId,
+      chatId,
+      threadId,
+      kind: 'warning',
+      reason,
+      warnings,
+      actor,
+    });
+    // Escalation is a second, distinct state change worth its own row.
+    if (blocked) {
+      await this.events.record({
+        accountId,
+        chatId,
+        threadId,
+        kind: 'block',
+        reason,
+        warnings,
+        actor,
       });
     }
 
@@ -440,6 +511,12 @@ export class AiAccessService {
 
   private blockedBy(value: BlockedBy | undefined): BlockedBy {
     return value === 'soul' ? 'soul' : 'user';
+  }
+
+  /** Short reason stored on an `access` event. */
+  private accessReason(input: SetAccessInput): string | null {
+    if (input.note) return input.note;
+    return input.enabled === false ? 'disabled' : 'enabled';
   }
 
   /** `0` for the whole chat, a positive thread id otherwise. */

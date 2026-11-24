@@ -1,4 +1,7 @@
 import { ConfigService } from '@nestjs/config';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetch as httpFetch } from 'undici';
 import type { AiSettingModel } from '@repo/database';
@@ -431,12 +434,16 @@ async function updateError(
 }
 
 describe('AiConfigService speech-to-text settings', () => {
+  beforeEach(() => {
+    clearSttEnv();
+  });
+
   it('returns the stt fields from GET /ai/settings without the key', async () => {
     const h = harness({
       existing: row({
         sttEngine: 'remote',
         sttBaseUrl: 'https://stt.test/v1',
-        sttModel: 'whisper-large-v3',
+        sttModel: 'parakeet-tdt-0.6b-v3',
         sttLanguage: 'ru',
         sttApiKey: 'stt-secret-value',
       }),
@@ -447,7 +454,7 @@ describe('AiConfigService speech-to-text settings', () => {
     expect(view).toMatchObject({
       sttEngine: 'remote',
       sttBaseUrl: 'https://stt.test/v1',
-      sttModel: 'whisper-large-v3',
+      sttModel: 'parakeet-tdt-0.6b-v3',
       sttLanguage: 'ru',
       hasSttKey: true,
     });
@@ -469,9 +476,10 @@ describe('AiConfigService speech-to-text settings', () => {
     const view = await h.service.view();
 
     expect(view).toMatchObject({
-      sttEngine: 'auto',
+      // Legacy `auto` maps to remote because the built-in LXC is configured.
+      sttEngine: 'remote',
       sttBaseUrl: '',
-      sttModel: null,
+      sttModel: 'parakeet-tdt-0.6b-v3',
       sttLanguage: 'auto',
       hasSttKey: false,
     });
@@ -484,33 +492,33 @@ describe('AiConfigService speech-to-text settings', () => {
     const put = await ctrl.updateSettings({
       sttEngine: 'remote',
       sttBaseUrl: 'https://stt.example.com/v1',
-      sttModel: 'whisper-large-v3',
+      sttModel: 'parakeet-tdt-0.6b-v3',
       sttLanguage: 'ru',
     });
     expect(put).toMatchObject({
       sttEngine: 'remote',
       sttBaseUrl: 'https://stt.example.com/v1',
-      sttModel: 'whisper-large-v3',
+      sttModel: 'parakeet-tdt-0.6b-v3',
       sttLanguage: 'ru',
       hasSttKey: false,
     });
     expect(lastSettingsUpdate(h.prisma).data).toMatchObject({
       sttEngine: 'remote',
       sttBaseUrl: 'https://stt.example.com/v1',
-      sttModel: 'whisper-large-v3',
+      sttModel: 'parakeet-tdt-0.6b-v3',
       sttLanguage: 'ru',
     });
 
     const patched = await ctrl.patchSettings({
-      sttEngine: 'parakeet',
+      sttEngine: 'local',
       sttLanguage: 'en',
     });
     expect(patched).toMatchObject({
-      sttEngine: 'parakeet',
+      sttEngine: 'local',
       sttLanguage: 'en',
       // Untouched fields survive a partial update.
       sttBaseUrl: 'https://stt.example.com/v1',
-      sttModel: 'whisper-large-v3',
+      sttModel: 'parakeet-tdt-0.6b-v3',
     });
 
     const cleared = await ctrl.patchSettings({
@@ -520,7 +528,8 @@ describe('AiConfigService speech-to-text settings', () => {
     });
     expect(cleared).toMatchObject({
       sttBaseUrl: '',
-      sttModel: null,
+      // An empty model means the Parakeet default.
+      sttModel: 'parakeet-tdt-0.6b-v3',
       sttLanguage: 'auto',
     });
   });
@@ -568,6 +577,12 @@ describe('AiConfigService speech-to-text settings', () => {
     expect(badEngine.getStatus()).toBe(400);
     expect(badEngine.response).toMatchObject({ code: 'INVALID_STT_ENGINE' });
 
+    // Whisper is an internal fallback, never a selectable engine.
+    const whisper = await updateError(h.service, { sttEngine: 'whisper' });
+    expect(whisper.getStatus()).toBe(400);
+    expect(whisper.response).toMatchObject({ code: 'INVALID_STT_ENGINE' });
+    expect(JSON.stringify(whisper.response)).toContain('internal fallback');
+
     for (const value of [
       'ftp://stt.local/v1',
       'not a url',
@@ -580,11 +595,11 @@ describe('AiConfigService speech-to-text settings', () => {
 
     expect(h.prisma.aiSetting.update).not.toHaveBeenCalled();
     // Nothing was persisted by the failed writes.
-    expect((await h.service.view()).sttEngine).toBe('auto');
+    expect((await h.service.view()).sttEngine).toBe('remote');
 
     // Unknown engines are still tolerated when reading a stored row.
     const stored = harness({ existing: row({ sttEngine: 'openai' }) });
-    expect((await stored.service.view()).sttEngine).toBe('auto');
+    expect((await stored.service.view()).sttEngine).toBe('remote');
 
     // A trailing-slash URL is accepted and kept as sent.
     const ok = await h.service.update({
@@ -595,6 +610,66 @@ describe('AiConfigService speech-to-text settings', () => {
       sttEngine: 'remote',
       sttBaseUrl: 'http://192.168.31.108:5092/v1/',
     });
+  });
+
+  it('maps legacy engine names and keeps only remote, local and disabled', async () => {
+    const h = harness();
+
+    // `auto` maps to remote while a remote endpoint is configured.
+    expect((await h.service.update({ sttEngine: 'auto' })).sttEngine).toBe(
+      'remote',
+    );
+    // `parakeet` collapses into `local`.
+    expect((await h.service.update({ sttEngine: 'parakeet' })).sttEngine).toBe(
+      'local',
+    );
+    expect((await h.service.update({ sttEngine: 'local' })).sttEngine).toBe(
+      'local',
+    );
+    expect((await h.service.update({ sttEngine: 'disabled' })).sttEngine).toBe(
+      'disabled',
+    );
+
+    // Legacy stored names are mapped on read as well.
+    const parakeet = harness({ existing: row({ sttEngine: 'parakeet' }) });
+    expect((await parakeet.service.view()).sttEngine).toBe('local');
+    const whisper = harness({ existing: row({ sttEngine: 'whisper' }) });
+    expect((await whisper.service.view()).sttEngine).toBe('remote');
+
+    // Without a remote endpoint (STT_REMOTE=off) `auto` falls back to local.
+    vi.stubEnv('STT_REMOTE', 'off');
+    expect((await h.service.update({ sttEngine: 'auto' })).sttEngine).toBe(
+      'local',
+    );
+    const storedAuto = harness({ existing: row({ sttEngine: 'auto' }) });
+    expect((await storedAuto.service.view()).sttEngine).toBe('local');
+  });
+
+  it('validates the model against Parakeet', async () => {
+    const h = harness();
+    const ctrl = controller(h.service);
+
+    // Empty clears to the default.
+    expect(
+      (await ctrl.patchSettings({ sttModel: '' })).sttModel,
+    ).toBe('parakeet-tdt-0.6b-v3');
+    expect(
+      (await ctrl.patchSettings({ sttModel: 'parakeet-tdt-0.6b-v3' })).sttModel,
+    ).toBe('parakeet-tdt-0.6b-v3');
+
+    for (const value of ['whisper-large-v3', 'gpt-4o-transcribe', 'tiny']) {
+      const bad = await updateError(h.service, { sttModel: value });
+      expect(bad.getStatus()).toBe(400);
+      expect(bad.response).toMatchObject({ code: 'INVALID_STT_MODEL' });
+    }
+
+    // A legacy foreign model id is never shown: the view reports the default.
+    const legacy = harness({
+      existing: row({ sttModel: 'whisper-large-v3' }),
+    });
+    expect((await legacy.service.view()).sttModel).toBe(
+      'parakeet-tdt-0.6b-v3',
+    );
   });
 
   it('does not touch stt fields when the payload omits them', async () => {
@@ -694,28 +769,82 @@ describe('AiConfigService STT probe', () => {
     expect(init.body).toBeUndefined();
   });
 
-  it('skips the probe for local and disabled engines', async () => {
-    const parakeet = harness({ existing: row({ sttEngine: 'parakeet' }) });
-    await expect(parakeet.service.sttTest()).resolves.toMatchObject({
+  it('checks the local Parakeet files without decoding', async () => {
+    const directory = join(tmpdir(), `stt-probe-${process.pid}-ok`);
+    mkdirSync(directory, { recursive: true });
+    for (const name of [
+      'encoder.int8.onnx',
+      'decoder.int8.onnx',
+      'joiner.int8.onnx',
+      'tokens.txt',
+    ]) {
+      writeFileSync(join(directory, name), 'x');
+    }
+    vi.stubEnv('PARAKEET_MODEL_DIR', directory);
+
+    const local = harness({ existing: row({ sttEngine: 'local' }) });
+    await expect(local.service.sttTest()).resolves.toEqual({
       ok: true,
       status: null,
       latencyMs: 0,
       engine: 'local',
+      detail: 'parakeet-tdt-0.6b-v3',
     });
 
+    // The legacy name is the same local engine.
+    const parakeet = harness({ existing: row({ sttEngine: 'parakeet' }) });
+    await expect(parakeet.service.sttTest()).resolves.toMatchObject({
+      ok: true,
+      engine: 'local',
+      detail: 'parakeet-tdt-0.6b-v3',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports missing local model files instead of decoding', async () => {
+    vi.stubEnv('PARAKEET_MODEL_DIR', join(tmpdir(), `stt-probe-${process.pid}-missing`));
+    const h = harness({ existing: row({ sttEngine: 'local' }) });
+
+    const result = await h.service.sttTest();
+
+    expect(result).toMatchObject({ ok: false, status: null, engine: 'local' });
+    expect(result.detail).toContain('missing parakeet model files');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a disabled engine as off', async () => {
     const disabled = harness({ existing: row({ sttEngine: 'disabled' }) });
-    await expect(disabled.service.sttTest()).resolves.toMatchObject({
+
+    await expect(disabled.service.sttTest()).resolves.toEqual({
       ok: false,
       status: null,
+      latencyMs: 0,
       engine: 'local',
+      detail: 'disabled',
     });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
-    // `STT_REMOTE=off` also turns the network engine off.
-    const h = harness({ existing: row({ sttEngine: 'auto' }) });
+  it('maps a legacy "auto" row to local when STT_REMOTE=off', async () => {
+    const directory = join(tmpdir(), `stt-probe-${process.pid}-auto`);
+    mkdirSync(directory, { recursive: true });
+    for (const name of [
+      'encoder.int8.onnx',
+      'decoder.int8.onnx',
+      'joiner.int8.onnx',
+      'tokens.txt',
+    ]) {
+      writeFileSync(join(directory, name), 'x');
+    }
+    vi.stubEnv('PARAKEET_MODEL_DIR', directory);
     vi.stubEnv('STT_REMOTE', 'off');
+
+    const h = harness({ existing: row({ sttEngine: 'auto' }) });
     await expect(h.service.sttTest()).resolves.toMatchObject({
       ok: true,
       engine: 'local',
+      detail: 'parakeet-tdt-0.6b-v3',
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -729,12 +858,31 @@ describe('AiConfigService STT probe', () => {
     const [firstUrl] = fetchMock.mock.calls[0] as [string, unknown];
     expect(firstUrl).toBe('http://10.0.0.5:5092/health');
 
+    // `whisper` is env-only: reported as the internal local fallback.
     vi.stubEnv('STT_ENGINE', 'whisper');
     await expect(h.service.sttTest()).resolves.toMatchObject({
       ok: true,
       engine: 'local',
+      detail: 'whisper (internal fallback)',
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Legacy `parakeet` maps to a local probe, never a network call.
+    vi.stubEnv('STT_ENGINE', 'parakeet');
+    vi.stubEnv('PARAKEET_MODEL_DIR', join(tmpdir(), `stt-probe-${process.pid}-env`));
+    await expect(h.service.sttTest()).resolves.toMatchObject({
+      ok: false,
+      engine: 'local',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // The env still wins over a stored remote choice.
+    vi.stubEnv('STT_ENGINE', 'disabled');
+    await expect(h.service.sttTest()).resolves.toMatchObject({
+      ok: false,
+      engine: 'local',
+      detail: 'disabled',
+    });
   });
 
   it('exposes the probe through POST /ai/stt/test', async () => {

@@ -55,15 +55,21 @@ export interface AiPolicyView {
   ownerTgUserIds: string[];
 }
 
-/** Engine preference for voice-note transcription. */
-export type SttEngine = 'auto' | 'remote' | 'parakeet' | 'whisper' | 'disabled';
+/**
+ * Voice-note transcription engine. `remote` is the Parakeet HTTP service,
+ * `local` is Parakeet TDT 0.6B v3 on this machine, `disabled` turns
+ * transcription off. Whisper exists only as an internal last resort and is
+ * never an accepted setting.
+ */
+export type SttEngine = 'remote' | 'local' | 'disabled';
 
 /** Speech-to-text settings shared by the dashboard and `SpeechService`. */
 export interface SttSettingsView {
   sttEngine: SttEngine;
   /** Empty means the built-in remote service. */
   sttBaseUrl: string;
-  sttModel: string | null;
+  /** Parakeet model id; defaults to `parakeet-tdt-0.6b-v3`. */
+  sttModel: string;
   /** `auto` or a locale such as `ru`. */
   sttLanguage: string;
   /** True when a key is stored; the key itself is never returned. */
@@ -75,7 +81,10 @@ export interface SttTestResult {
   ok: boolean;
   status: number | null;
   latencyMs: number;
-  /** `remote` = the HTTP service was probed; `local` = parakeet/whisper/off. */
+  /**
+   * `remote` = the HTTP `/health` probe; `local` = the local Parakeet model
+   * (or the internal whisper fallback) or a disabled engine.
+   */
   engine: 'remote' | 'local';
   detail?: string;
 }
@@ -119,6 +128,7 @@ export interface AiSettingsUpdate {
   sttEngine?: unknown;
   /** Empty string falls back to the built-in remote service. */
   sttBaseUrl?: unknown;
+  /** Empty means `parakeet-tdt-0.6b-v3`; other values must start with `parakeet`. */
   sttModel?: unknown;
   /** Empty string means `auto`. */
   sttLanguage?: unknown;
@@ -191,6 +201,30 @@ export interface LlmReply {
   model: string;
 }
 
+/**
+ * Live callbacks for a streaming chat completion. Tool names and arguments
+ * never reach them: only the model's reasoning and the final answer.
+ */
+export interface LlmStreamHandlers {
+  /** `reasoning_content` / `reasoning` deltas, as they arrive. */
+  onReasoningDelta?: (text: string) => void;
+  /** Final answer text deltas, as they arrive. */
+  onContentDelta?: (text: string) => void;
+}
+
+/** WS payload of `ai.thinking`: start, throttled deltas, then done. */
+export interface AiThinkingPayload {
+  accountId: string;
+  chatId: number;
+  runId: string;
+  /** `start` opens the bubble; `done` closes it and carries the full text. */
+  phase?: 'start' | 'done';
+  /** Only on delta events. */
+  delta?: string;
+  /** Only on `done`. */
+  reasoning?: string | null;
+}
+
 /** Result of one tool invocation, as shown to the model and to MCP clients. */
 export interface ToolResult {
   ok: boolean;
@@ -239,6 +273,11 @@ export interface AgentRunInput {
   systemExtra?: string;
   /** Skill slugs to include in addition to the soul's skills. */
   skillSlugs?: string[];
+  /**
+   * When true, `skillSlugs` replaces the soul's skill set instead of extending
+   * it. Used by the autopilot, where a per-chat override may drop soul skills.
+   */
+  replaceSoulSkills?: boolean;
   /** Restrict the tool set to these names (used by bots/skills). */
   tools?: string[];
   /** Conversation history to continue (without the system prompt). */
@@ -246,6 +285,13 @@ export interface AgentRunInput {
   model?: string;
   temperature?: number;
   maxSteps?: number;
+  /**
+   * Streams the model's reasoning text of every LLM round, tool rounds
+   * included. Omit it to keep the blocking `chat()` path.
+   */
+  onReasoningDelta?: (text: string) => void;
+  /** Called with the persisted run id before the first LLM round. */
+  onRunStart?: (runId: string) => void;
 }
 
 export interface AgentTraceEntry {

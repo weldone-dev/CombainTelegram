@@ -135,6 +135,9 @@ export function AiMcpCard({
             readOnly
             value={endpoint}
             onFocus={(event) => event.currentTarget.select()}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-mcp-endpoint"
             className={inputClass}
           />
         </Field>
@@ -148,6 +151,8 @@ export function AiMcpCard({
             value={token}
             onFocus={(event) => event.currentTarget.select()}
             autoComplete="off"
+            spellCheck={false}
+            name="ct-mcp-token"
             className={`${inputClass} font-mono text-xs`}
           />
         </Field>

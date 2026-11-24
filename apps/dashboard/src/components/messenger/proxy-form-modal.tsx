@@ -119,6 +119,7 @@ export function ProxyFormModal({
                 }
                 placeholder="Германия 1"
                 className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+                autoComplete="off"
               />
             </label>
             <label className="block text-xs text-zinc-400">
@@ -145,6 +146,11 @@ export function ProxyFormModal({
                   setForm({ ...form, host: event.target.value })
                 }
                 placeholder="127.0.0.1"
+                autoComplete="off"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                name="ct-proxy-host"
                 className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
               />
             </label>
@@ -158,6 +164,7 @@ export function ProxyFormModal({
                 inputMode="numeric"
                 placeholder="1080"
                 className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+                autoComplete="off"
               />
             </label>
             {form.kind !== "mtproto" && (
@@ -168,6 +175,11 @@ export function ProxyFormModal({
                   onChange={(event) =>
                     setForm({ ...form, username: event.target.value })
                   }
+                  autoComplete="off"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  name="ct-proxy-username"
                   className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
                 />
               </label>
@@ -185,6 +197,11 @@ export function ProxyFormModal({
                   })
                 }
                 placeholder={initial ? "оставьте пустым, чтобы не менять" : ""}
+                autoComplete="off"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                name="ct-proxy-secret"
                 className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
               />
               {initial && (
@@ -200,6 +217,7 @@ export function ProxyFormModal({
                           secret: "",
                         })
                       }
+                      autoComplete="off"
                     />
                     Удалить сохранённый секрет
                   </label>
@@ -221,6 +239,7 @@ export function ProxyFormModal({
                 onChange={(event) =>
                   setForm({ ...form, enabled: event.target.checked })
                 }
+                autoComplete="off"
               />
               Включён
             </label>

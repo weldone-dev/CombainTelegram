@@ -523,6 +523,7 @@ export function AutomationsPanel() {
                   setDraft({ ...draft, name: event.target.value })
                 }
                 className={inputClass}
+                autoComplete="off"
               />
             </Field>
             <Field label="Аккаунт">
@@ -553,6 +554,7 @@ export function AutomationsPanel() {
                 className={inputClass}
                 placeholder="Europe/Moscow"
                 spellCheck={false}
+                autoComplete="off"
               />
             </Field>
             <Field
@@ -567,6 +569,7 @@ export function AutomationsPanel() {
                 className={inputClass}
                 inputMode="numeric"
                 placeholder="например -1001878340462"
+                autoComplete="off"
               />
             </Field>
             <Field
@@ -581,6 +584,7 @@ export function AutomationsPanel() {
                 className={inputClass}
                 inputMode="numeric"
                 placeholder="0 = весь чат"
+                autoComplete="off"
               />
             </Field>
             <Field label="Описание" className="sm:col-span-2">
@@ -590,6 +594,7 @@ export function AutomationsPanel() {
                   setDraft({ ...draft, description: event.target.value })
                 }
                 className={inputClass}
+                autoComplete="off"
               />
             </Field>
           </div>
@@ -627,6 +632,7 @@ export function AutomationsPanel() {
                 setDraft({ ...draft, enabled: event.target.checked })
               }
               className="mt-0.5 h-3.5 w-3.5 accent-sky-500"
+              autoComplete="off"
             />
             <span>
               <span className="block">Включена</span>
@@ -675,6 +681,7 @@ export function AutomationsPanel() {
                     }
                     className={inputClass}
                     inputMode="numeric"
+                    autoComplete="off"
                   />
                 </Field>
               )}
@@ -687,6 +694,7 @@ export function AutomationsPanel() {
                     }
                     className={inputClass}
                     placeholder="09:00"
+                    autoComplete="off"
                   />
                 </Field>
               )}
@@ -700,6 +708,7 @@ export function AutomationsPanel() {
                       }
                       className={inputClass}
                       placeholder="пусто = любое сообщение"
+                      autoComplete="off"
                     />
                   </Field>
                   <Field label="Только эти chat id">
@@ -713,6 +722,7 @@ export function AutomationsPanel() {
                       }
                       className={inputClass}
                       placeholder="через запятую"
+                      autoComplete="off"
                     />
                   </Field>
                 </>
@@ -758,6 +768,7 @@ export function AutomationsPanel() {
                       }
                       className={textareaClass}
                       placeholder="Проверь новые сообщения и составь короткую сводку."
+                      autoComplete="off"
                     />
                   </Field>
                   <Field
@@ -775,6 +786,7 @@ export function AutomationsPanel() {
                       }
                       className={inputClass}
                       placeholder="telegram-assistant, dm-assistant"
+                      autoComplete="off"
                     />
                   </Field>
                 </>
@@ -787,6 +799,7 @@ export function AutomationsPanel() {
                       setDraft({ ...draft, text: event.target.value })
                     }
                     className={textareaClass}
+                    autoComplete="off"
                   />
                 </Field>
               )}
@@ -805,6 +818,7 @@ export function AutomationsPanel() {
                   }
                   className={inputClass}
                   inputMode="numeric"
+                  autoComplete="off"
                 />
               </Field>
               {draft.actionType === "agent" && (
@@ -819,6 +833,7 @@ export function AutomationsPanel() {
                       })
                     }
                     className="h-3.5 w-3.5 accent-sky-500"
+                    autoComplete="off"
                   />
                   <span>
                     Отправить ответ агента в чат (нужен chat id)

@@ -491,6 +491,11 @@ export function SessionsModal({
                         onChange={(event) => setAddPhone(event.target.value)}
                         placeholder="+1 555 000 1234"
                         inputMode="tel"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        name="ct-session-phone"
                         className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                       />
                     </label>
@@ -503,6 +508,7 @@ export function SessionsModal({
                       onChange={(event) => setAddLabel(event.target.value)}
                       placeholder="Например, рабочий ноутбук"
                       className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
+                      autoComplete="off"
                     />
                   </label>
 
@@ -619,7 +625,11 @@ export function SessionsModal({
                         onChange={(event) => setAddCode(event.target.value)}
                         placeholder="12345"
                         inputMode="numeric"
-                        autoComplete="one-time-code"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        name="ct-session-code"
                         className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                       />
                       <button
@@ -645,7 +655,11 @@ export function SessionsModal({
                         value={addPassword}
                         onChange={(event) => setAddPassword(event.target.value)}
                         placeholder="Пароль двухэтапной проверки"
-                        autoComplete="current-password"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        name="ct-session-password"
                         className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                       />
                       <button
@@ -899,6 +913,7 @@ export function SessionsModal({
                 checked={deleteRevoke}
                 onChange={(event) => setDeleteRevoke(event.target.checked)}
                 className="mt-0.5"
+                autoComplete="off"
               />
               <span>
                 Также завершить сессию на сервере

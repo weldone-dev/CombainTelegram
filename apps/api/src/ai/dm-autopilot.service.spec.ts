@@ -9,6 +9,9 @@ import type {
 import type { AiAccessDecision } from '../ai-access/ai-access.service.js';
 import type { MessageView } from '../messaging/message-view.js';
 import type { RealtimeEvent } from '../realtime/realtime.service.js';
+import { setLogSink } from '../logs/log-sink.js';
+import type { LogInput } from '../logs/log-sink.js';
+import type { AgentRunInput } from './ai.types.js';
 import { DEFAULT_SOUL_SETTINGS } from './ai.types.js';
 import { DmAutopilotService } from './dm-autopilot.service.js';
 import { SoulsService } from './souls.service.js';
@@ -142,6 +145,7 @@ function harness(
     soul?: SoulModel | null;
     perHour?: number;
     perChat?: number;
+    skills?: { slugs: string[]; source: 'chat' | 'soul' };
     accessFor?: (
       chatId: number,
       threadId: number,
@@ -196,6 +200,10 @@ function harness(
       canSendMessages: true,
       inviteLink: null,
     })),
+    listMessages: vi.fn(async () => ({
+      messages: [] as MessageView[],
+      nextOffsetId: null,
+    })),
   };
   const events = new Subject<RealtimeEvent>();
   const realtime = {
@@ -205,7 +213,7 @@ function harness(
   const updates = { startForUser: vi.fn(async () => undefined) };
   const tdUpdates = { startForUser: vi.fn(async () => undefined) };
   const agent = {
-    run: vi.fn(async () => ({
+    run: vi.fn(async (_input: AgentRunInput) => ({
       runId: 'run-1',
       text: 'Hello back',
       model: 'main-model',
@@ -265,6 +273,11 @@ function harness(
     ),
   };
   const agentRuns = { attachMessages: vi.fn(async () => undefined) };
+  const chatSkills = {
+    resolve: vi.fn(
+      async () => options.skills ?? { slugs: [] as string[], source: 'soul' },
+    ),
+  };
 
   const service = new DmAutopilotService(
     prisma as never,
@@ -280,6 +293,7 @@ function harness(
     speech as never,
     aiAccess as never,
     agentRuns as never,
+    chatSkills as never,
   );
   const internals = service as unknown as Internals;
   const tokenFor = (): number => internals.nextToken(`account-1:${CHAT_ID}`);
@@ -302,6 +316,7 @@ function harness(
     modelSpy,
     aiAccess,
     agentRuns,
+    chatSkills,
   };
 }
 
@@ -1302,7 +1317,12 @@ describe('DmAutopilotService.reply', () => {
     );
     expect(h.agent.run).toHaveBeenCalledWith(
       expect.objectContaining({
-        prompt: expect.stringContaining('не говори, что у тебя нет наушников'),
+        prompt: expect.stringContaining('не расслышал'),
+      }),
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.not.stringContaining('нет наушников'),
       }),
     );
     expect(h.memory.append).toHaveBeenCalledWith(
@@ -1877,6 +1897,629 @@ describe('DmAutopilotService.reply', () => {
         reasoning: 'SECRET THOUGHTS',
       }),
     );
+  });
+
+  it('emits ai.thinking start, throttled deltas and done, never to Telegram', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    const reasoning =
+      'короткий ещё немного текстадальше и ещё одна фраза';
+    h.agent.run.mockImplementation(async (input: AgentRunInput) => {
+      input.onRunStart?.('run-1');
+      input.onReasoningDelta?.('короткий'); // 8 chars: buffered
+      vi.advanceTimersByTime(200);
+      input.onReasoningDelta?.(' ещё немного текста'); // flush
+      vi.advanceTimersByTime(50);
+      input.onReasoningDelta?.('дальше'); // too soon and too short
+      vi.advanceTimersByTime(150);
+      input.onReasoningDelta?.(' и ещё одна фраза'); // flush
+      return {
+        runId: 'run-1',
+        text: 'Ответ',
+        reasoning,
+        model: 'main-model',
+        steps: 1,
+        trace: [],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    });
+
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
+    );
+
+    const thinking = h.realtime.emitToUser.mock.calls
+      .filter(([, event]) => event === 'ai.thinking')
+      .map(([, , payload]) => payload);
+    expect(thinking).toEqual([
+      {
+        accountId: 'account-1',
+        chatId: CHAT_ID,
+        runId: 'run-1',
+        phase: 'start',
+      },
+      {
+        accountId: 'account-1',
+        chatId: CHAT_ID,
+        runId: 'run-1',
+        delta: 'короткий ещё немного текста',
+      },
+      {
+        accountId: 'account-1',
+        chatId: CHAT_ID,
+        runId: 'run-1',
+        delta: 'дальше и ещё одна фраза',
+      },
+      {
+        accountId: 'account-1',
+        chatId: CHAT_ID,
+        runId: 'run-1',
+        phase: 'done',
+        reasoning,
+      },
+    ]);
+
+    // Reasoning stays on the dashboard side; Telegram gets the answer only.
+    expect(h.messaging.sendMessage).toHaveBeenCalledTimes(1);
+    expect(h.messaging.sendMessage).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { text: 'Ответ', replyToId: 1001 },
+    );
+    const sentTexts = h.messaging.sendMessage.mock.calls.map(
+      (call) => (call[3] as { text: string }).text,
+    );
+    expect(sentTexts.join('\n')).not.toContain('ещё немного');
+  });
+
+  it('reuses the last voice transcript for a text-only follow-up', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const logs: LogInput[] = [];
+    setLogSink((entry) => logs.push(entry));
+    try {
+      const h = harness({
+        soul: soulRow({
+          settings: JSON.stringify({
+            ...DEFAULT_SOUL_SETTINGS,
+            chatIds: [CHAT_ID],
+            replyDelayMs: 0,
+            typing: false,
+          }),
+        }),
+      });
+      const media = {
+        kind: 'voice' as const,
+        mimeType: 'audio/ogg',
+        fileName: null,
+        size: 5,
+        downloadable: true,
+      };
+      h.messaging.downloadMedia.mockResolvedValueOnce({
+        data: Buffer.from('voice'),
+        mimeType: 'audio/ogg',
+        fileName: 'voice.ogg',
+        disposition: 'inline',
+        length: 5,
+      });
+      h.speech.transcribe.mockResolvedValueOnce({
+        text: 'меня зовут Роман',
+        language: 'ru',
+        durationMs: 1000,
+      });
+
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        message({ id: 1001, text: '[voice]', mediaType: 'voice', media }),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1001, text: '[voice]', media }],
+      );
+      h.agent.run.mockClear();
+
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        message({ id: 1002, text: 'Что я сказал в этом голосовом?' }),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1002, text: 'Что я сказал в этом голосовом?' }],
+      );
+
+      const prompt = (
+        h.agent.run.mock.calls[0]?.[0] as { prompt: string } | undefined
+      )?.prompt;
+      expect(prompt).toContain('меня зовут Роман');
+      expect(prompt).toContain('уже расшифровано');
+      // No "не расслышал" excuse when the transcript is at hand.
+      expect(prompt).not.toContain('не расслышал');
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          action: 'dm.autopilot.voice',
+          status: 'ok',
+          details: expect.objectContaining({ reused: true }),
+        }),
+      );
+    } finally {
+      setLogSink(null);
+    }
+  });
+});
+
+describe('DmAutopilotService voice follow-up lookup', () => {
+  const VOICE_MEDIA = {
+    kind: 'voice' as const,
+    mimeType: 'audio/ogg',
+    fileName: null,
+    size: 5,
+    downloadable: true,
+  };
+  const FILE_MEDIA = {
+    kind: 'document' as const,
+    mimeType: 'application/pdf',
+    fileName: 'file.pdf',
+    size: 5,
+    downloadable: true,
+  };
+  const MINUTE = 60_000;
+  const HOUR = 60 * MINUTE;
+
+  function fastSoul(): SoulModel {
+    return soulRow({
+      settings: JSON.stringify({
+        ...DEFAULT_SOUL_SETTINGS,
+        chatIds: [CHAT_ID],
+        replyDelayMs: 0,
+        typing: false,
+      }),
+    });
+  }
+
+  function voiceAt(id: number, date = NOW.toISOString()): MessageView {
+    return message({
+      id,
+      text: '',
+      date,
+      mediaType: 'voice',
+      media: VOICE_MEDIA,
+      isVoice: true,
+    });
+  }
+
+  function question(id: number, text: string, replyToId: number | null = null) {
+    return message({ id, text, replyToId });
+  }
+
+  function promptOf(h: ReturnType<typeof harness>): string {
+    const input = h.agent.run.mock.calls[0]?.[0] as
+      | { prompt: string }
+      | undefined;
+    return input?.prompt ?? '';
+  }
+
+  it('transcribes the voice message the peer replied to', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const logs: LogInput[] = [];
+    setLogSink((entry) => logs.push(entry));
+    try {
+      const h = harness({ soul: fastSoul() });
+      h.messaging.listMessages.mockResolvedValueOnce({
+        messages: [voiceAt(900)],
+        nextOffsetId: null,
+      });
+      h.speech.transcribe.mockResolvedValueOnce({
+        text: 'я сказал что позвоню вечером',
+        language: 'ru',
+        durationMs: 900,
+      });
+
+      const text = 'что я сказал в этом голосовом?';
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        question(1002, text, 900),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1002, text, replyToId: 900 }],
+      );
+
+      // The quoted message is read directly, not the whole history.
+      expect(h.messaging.listMessages).toHaveBeenCalledWith(
+        'user-1',
+        'account-1',
+        String(CHAT_ID),
+        { limit: 1, offsetId: 901 },
+      );
+      expect(h.messaging.downloadMedia).toHaveBeenCalledWith(
+        'user-1',
+        'account-1',
+        String(CHAT_ID),
+        '900',
+      );
+      const prompt = promptOf(h);
+      expect(prompt).toContain('я сказал что позвоню вечером');
+      expect(prompt).toContain('уже расшифровано');
+      expect(prompt).not.toContain('не расслышал');
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          action: 'dm.autopilot.voice',
+          status: 'ok',
+          details: expect.objectContaining({
+            messageId: 900,
+            source: 'onDemand',
+          }),
+        }),
+      );
+    } finally {
+      setLogSink(null);
+    }
+  });
+
+  it('finds the newest voice note when the question is not a reply', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({ soul: fastSoul() });
+    h.messaging.listMessages.mockResolvedValueOnce({
+      messages: [
+        message({ id: 1005, text: 'смотри' }),
+        voiceAt(1004, new Date(NOW.getTime() - 5 * MINUTE).toISOString()),
+        voiceAt(1003, new Date(NOW.getTime() - 10 * MINUTE).toISOString()),
+      ],
+      nextOffsetId: null,
+    });
+    h.speech.transcribe.mockResolvedValueOnce({
+      text: 'свежая расшифровка',
+      language: 'ru',
+      durationMs: 800,
+    });
+
+    const text = 'прослушай то что я тебе скинул';
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      question(1100, text),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1100, text }],
+    );
+
+    expect(h.messaging.listMessages).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { limit: 50 },
+    );
+    // The newest voice note, not the older one and not the text message.
+    expect(h.messaging.downloadMedia).toHaveBeenCalledTimes(1);
+    expect(h.messaging.downloadMedia).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      '1004',
+    );
+    expect(promptOf(h)).toContain('свежая расшифровка');
+  });
+
+  it('ignores a voice note older than 24 hours', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({ soul: fastSoul() });
+    h.messaging.listMessages.mockResolvedValueOnce({
+      messages: [
+        voiceAt(1004, new Date(NOW.getTime() - 25 * HOUR).toISOString()),
+      ],
+      nextOffsetId: null,
+    });
+
+    const text = 'что я сказал в голосовом?';
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      question(1100, text),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1100, text }],
+    );
+
+    expect(h.messaging.downloadMedia).not.toHaveBeenCalled();
+    expect(h.speech.transcribe).not.toHaveBeenCalled();
+    const prompt = promptOf(h);
+    expect(prompt).not.toContain('уже расшифровано');
+    expect(prompt).not.toContain('не расслышал');
+  });
+
+  it('does not treat «скинул файл» as a voice reference without audio nearby', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({ soul: fastSoul() });
+    h.messaging.listMessages.mockResolvedValueOnce({
+      messages: [
+        message({
+          id: 1005,
+          text: 'файл',
+          mediaType: 'document',
+          media: FILE_MEDIA,
+        }),
+        message({ id: 1004, text: 'вот документ' }),
+      ],
+      nextOffsetId: null,
+    });
+
+    const text = 'я скинул файл, посмотри';
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      question(1100, text),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1100, text }],
+    );
+
+    expect(h.messaging.listMessages).toHaveBeenCalled();
+    expect(h.messaging.downloadMedia).not.toHaveBeenCalled();
+    expect(h.speech.transcribe).not.toHaveBeenCalled();
+    const prompt = promptOf(h);
+    expect(prompt).not.toContain('голосовое сообщение, которое уже расшифровано');
+    expect(prompt).not.toContain('не расслышал');
+  });
+
+  it('adds an honest line when the on-demand transcription fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const logs: LogInput[] = [];
+    setLogSink((entry) => logs.push(entry));
+    try {
+      const h = harness({ soul: fastSoul() });
+      h.messaging.listMessages.mockResolvedValueOnce({
+        messages: [voiceAt(1004)],
+        nextOffsetId: null,
+      });
+      h.speech.transcribe.mockResolvedValueOnce(null);
+
+      const text = 'прослушай голосовое';
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        question(1100, text),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1100, text }],
+      );
+
+      const prompt = promptOf(h);
+      expect(prompt).toContain('Голосовое не удалось расшифровать');
+      expect(prompt).toContain('не расслышал');
+      // The model is never told that headphones or sound are missing.
+      expect(prompt).not.toContain('нет наушников');
+      expect(prompt).not.toContain('наушников нет');
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          action: 'dm.autopilot.voice',
+          status: 'failed',
+          details: expect.objectContaining({
+            messageId: 1004,
+            source: 'failed',
+          }),
+        }),
+      );
+      // The failure never blocks the reply.
+      expect(h.messaging.sendMessage).toHaveBeenCalled();
+    } finally {
+      setLogSink(null);
+    }
+  });
+
+  it('caches a transcript per message for a day and downloads it once', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const logs: LogInput[] = [];
+    setLogSink((entry) => logs.push(entry));
+    try {
+      const h = harness({ soul: fastSoul() });
+      h.messaging.listMessages.mockResolvedValue({
+        messages: [
+          voiceAt(1004, new Date(NOW.getTime() - HOUR).toISOString()),
+        ],
+        nextOffsetId: null,
+      });
+      h.messaging.downloadMedia.mockResolvedValue({
+        data: Buffer.from('voice'),
+        mimeType: 'audio/ogg',
+        fileName: 'voice.ogg',
+        disposition: 'inline',
+        length: 5,
+      });
+      h.speech.transcribe.mockResolvedValue({
+        text: 'текст голосового',
+        language: 'ru',
+        durationMs: 700,
+      });
+
+      const first = 'что я сказал в голосовом?';
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        question(1100, first),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1100, text: first }],
+      );
+      expect(h.messaging.downloadMedia).toHaveBeenCalledTimes(1);
+      expect(promptOf(h)).toContain('текст голосового');
+
+      // Four minutes later the 3-minute prompt cache is stale, but the
+      // per-message transcript is still fresh.
+      vi.setSystemTime(new Date(NOW.getTime() + 4 * MINUTE));
+      h.agent.run.mockClear();
+
+      const second = 'а что там было в голосовом?';
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        question(1101, second),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1101, text: second }],
+      );
+
+      expect(h.messaging.downloadMedia).toHaveBeenCalledTimes(1);
+      expect(h.speech.transcribe).toHaveBeenCalledTimes(1);
+      expect(promptOf(h)).toContain('текст голосового');
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          action: 'dm.autopilot.voice',
+          status: 'ok',
+          details: expect.objectContaining({
+            messageId: 1004,
+            source: 'cached',
+          }),
+        }),
+      );
+    } finally {
+      setLogSink(null);
+    }
+  });
+});
+
+describe('DmAutopilotService per-chat skills', () => {
+  function skillHarness(skills: { slugs: string[]; source: 'chat' | 'soul' }) {
+    return harness({
+      skills,
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+  }
+
+  it('uses the chat override instead of the soul skill set', async () => {
+    const logs: LogInput[] = [];
+    setLogSink((entry) => logs.push(entry));
+    try {
+      const h = skillHarness({ slugs: ['chat-skill'], source: 'chat' });
+
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        message(),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1001, text: 'Hi there' }],
+      );
+
+      expect(h.chatSkills.resolve).toHaveBeenCalledWith(
+        'account-1',
+        CHAT_ID,
+        0,
+      );
+      expect(h.agent.run).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skillSlugs: ['chat-skill'],
+          // The override is authoritative: soul skills are not added on top.
+          replaceSoulSkills: true,
+        }),
+      );
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          action: 'dm.autopilot.reply',
+          details: expect.objectContaining({
+            skillsSource: 'chat',
+            skills: ['chat-skill'],
+          }),
+        }),
+      );
+    } finally {
+      setLogSink(null);
+    }
+  });
+
+  it('resolves the override of the forum topic the access gate saw', async () => {
+    const h = skillHarness({ slugs: ['topic-skill'], source: 'chat' });
+
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
+      7,
+    );
+
+    expect(h.aiAccess.accessFor).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      7,
+    );
+    expect(h.chatSkills.resolve).toHaveBeenCalledWith('account-1', CHAT_ID, 7);
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({ skillSlugs: ['topic-skill'] }),
+    );
+  });
+
+  it('falls back to the soul skills when no override exists', async () => {
+    const logs: LogInput[] = [];
+    setLogSink((entry) => logs.push(entry));
+    try {
+      const h = skillHarness({ slugs: ['soul-skill'], source: 'soul' });
+
+      await h.internals.reply(
+        'user-1',
+        'account-1',
+        CHAT_ID,
+        message(),
+        'Peer',
+        h.tokenFor(),
+        [{ id: 1001, text: 'Hi there' }],
+      );
+
+      expect(h.agent.run).toHaveBeenCalledWith(
+        expect.objectContaining({ skillSlugs: ['soul-skill'] }),
+      );
+      expect(logs).toContainEqual(
+        expect.objectContaining({
+          action: 'dm.autopilot.reply',
+          details: expect.objectContaining({ skillsSource: 'soul' }),
+        }),
+      );
+    } finally {
+      setLogSink(null);
+    }
   });
 });
 

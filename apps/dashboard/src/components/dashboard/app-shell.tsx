@@ -26,12 +26,9 @@ const PAGE_TITLES: Record<string, string> = {
   "/proxies": "Прокси",
   "/chats": "Чаты",
   "/logs": "Логи",
-  "/ai": "AI и души",
+  "/ai": "AI",
   "/settings": "Настройки",
   "/settings/ai": "Настройки · AI",
-  "/settings/proxy": "Настройки · Прокси",
-  "/settings/accounts": "Настройки · Аккаунты",
-  "/settings/logs": "Настройки · Логи",
 };
 
 /** Exact title first, then the longest matching route prefix. */

@@ -114,8 +114,10 @@ RPC-вызовы пишутся отдельными записями `source=te
 
 ### `GET /logs/stats`
 
-`{ total, byLevel, bySource, oldest, newest }` — для заголовка страницы и
-быстрой оценки.
+`{ total, byLevel, bySource, byProxy, oldest, newest }` — для заголовка
+страницы и быстрой оценки. Принимает те же `domain`, `accountId` и `chatId`,
+что и `GET /logs`, поэтому счётчики вкладки «Логи» в карточке чата совпадают с
+её списком записей.
 
 ### `GET /logs/:id`
 

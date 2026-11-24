@@ -258,7 +258,11 @@ export function TdlibAccountPanel({
                       setMigrationPassword(event.target.value)
                     }
                     placeholder="Пароль двухэтапной проверки"
-                    autoComplete="current-password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    name="ct-tdlib-migration-password"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <button
@@ -360,7 +364,11 @@ export function TdlibAccountPanel({
                     value={cloudPassword}
                     onChange={(event) => setCloudPassword(event.target.value)}
                     placeholder="Пароль Telegram (2FA)"
-                    autoComplete="new-password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    name="ct-tdlib-cloud-password"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <div className="flex gap-2">

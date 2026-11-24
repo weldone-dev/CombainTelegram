@@ -248,6 +248,7 @@ export function AiAccessSection({
                 placeholder="Почему ИИ разрешён или выключен"
                 maxLength={1000}
                 className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+                autoComplete="off"
               />
               <button
                 type="button"
@@ -316,6 +317,7 @@ export function AiAccessSection({
                   aria-label="Причина блокировки ИИ"
                   maxLength={1000}
                   className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-red-500 focus:outline-none"
+                  autoComplete="off"
                 />
                 <button
                   type="button"

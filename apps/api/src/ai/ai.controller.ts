@@ -142,7 +142,11 @@ export class AiController {
     return this.config.update(body);
   }
 
-  /** Probes the configured remote speech-to-text service. No key is returned. */
+  /**
+   * Probes the selected speech-to-text engine: `/health` for the remote
+   * Parakeet service, a model-file check for the local one, `disabled` for off.
+   * No key is returned.
+   */
   @Post('stt/test')
   async sttTest() {
     return this.config.sttTest();

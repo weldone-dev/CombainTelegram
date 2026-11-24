@@ -5,7 +5,8 @@ import { LogsService } from '../logs/logs.service.js';
 import { emitLog } from '../logs/log-sink.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AiConfigService } from './ai-config.service.js';
-import { AiPolicyService, PolicyError } from './ai-policy.service.js';
+import { PolicyError } from './ai-policy.service.js';
+import { AiAccountPolicyService } from '../ai-account/ai-account-policy.service.js';
 import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
@@ -86,8 +87,9 @@ function trimMessage(message: {
 
 /**
  * The single tool registry shared by the UI agent, MCP clients, bots and
- * automations. Every call passes through {@link AiPolicyService}; write tools
- * respect `dryRun` and are logged.
+ * automations. Every call passes through {@link AiAccountPolicyService}, which
+ * layers the account's overrides on the global {@link AiPolicyService}; write
+ * tools respect `dryRun` and are logged.
  */
 @Injectable()
 export class AgentToolsService {
@@ -102,7 +104,7 @@ export class AgentToolsService {
     private readonly memory: MemoryService,
     private readonly skills: SkillsService,
     private readonly config: AiConfigService,
-    private readonly policy: AiPolicyService,
+    private readonly policy: AiAccountPolicyService,
     private readonly automations: AutomationsService,
     private readonly bots: BotsService,
     private readonly prisma: PrismaService,
@@ -125,7 +127,7 @@ export class AgentToolsService {
     ctx: ToolContext,
     filter?: string[] | null,
   ): Promise<ToolSchema[]> {
-    const caps = await this.policy.capabilities();
+    const caps = await this.policy.capabilities(ctx.accountId);
     return this.tools
       .filter((tool) => caps[tool.capability])
       .filter((tool) => !tool.sources || tool.sources.includes(ctx.source))
@@ -856,7 +858,7 @@ export class AgentToolsService {
         const accountId = this.requireAccount(args, ctx);
         const chatId = this.requireChat(args, ctx);
         const replyToId = number(args.replyToId) ?? undefined;
-        const caps = await this.policy.capabilities();
+        const caps = await this.policy.capabilities(accountId);
         if (!caps.sendUnknown) {
           try {
             await this.messaging.getChat(ctx.userId, accountId, String(chatId));

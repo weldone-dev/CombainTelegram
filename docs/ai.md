@@ -1,9 +1,10 @@
 # AI, souls, memory and MCP
 
-Status: implemented 2026-11-24 (`897e420`). Code:
-`apps/api/src/ai`, `apps/api/src/ai-access`, `apps/api/src/ai-providers`,
-`apps/api/src/mcp`, `apps/api/src/bots`, `apps/api/src/automations`; UI: `/ai`,
-AI settings at `/settings/ai` in the dashboard.
+Status: implemented 2026-11-24 (`897e420`; second batch in the working tree).
+Code: `apps/api/src/ai`, `apps/api/src/ai-access`, `apps/api/src/ai-account`,
+`apps/api/src/ai-chat`, `apps/api/src/ai-providers`, `apps/api/src/mcp`,
+`apps/api/src/bots`, `apps/api/src/automations`; UI: `/ai`, AI settings at
+`/settings/ai` (the only settings page), per-account AI dialog on `/accounts`.
 
 ## 1. What this layer is
 
@@ -16,23 +17,32 @@ A local AI layer on top of the multi-account Telegram app:
   boundaries, language, optional model override and autopilot settings.
 - **Memory** — two levels per personal chat: a short-term buffer of recent
   turns and a long-term rolling summary plus extracted facts.
-- **Skills** — reusable markdown instruction packs attached to souls and bots.
+- **Skills** — reusable markdown instruction packs attached to souls, bots and
+  single chats/topics.
 - **Automations** — schedule or incoming-message triggers with an agent,
   message or memory action; can be bound to one chat/topic and paused for it.
 - **Bots** — one shared soul-creator bot and one assistant bot per account over
-  the Telegram Bot API (long polling, no webhooks).
+  the Telegram Bot API (long polling, no webhooks). REST/MCP only: the
+  dashboard has no bot UI.
 - **MCP** — a Streamable HTTP MCP endpoint (`POST /mcp`) that exposes the same
   tools to external clients (Claude Desktop, Codex, Orca, custom agents).
-- **Providers** — a list of OpenAI-compatible LLM endpoints with an encrypted
-  key each and one default.
-- **Speech-to-text** — local (Parakeet TDT / whisper.cpp) or LAN transcription
-  of voice notes, used by the DM autopilot and the transcription endpoint.
-- **Per-chat access** — an allow/mute row and a blacklist per chat or forum
-  topic, independent of the soul's own chat allowlist.
+- **Providers** — a list of OpenAI-compatible LLM endpoints created from a
+  preset (`opencode-go`, `custom`), each with an encrypted key (or the local
+  OpenCode token), a live model list and its own limits.
+- **Speech-to-text** — Parakeet TDT 0.6B v3 only: the remote LAN service or the
+  local `sherpa-onnx` model.
+- **Per-chat access and state** — an allow/mute row, a blacklist and a warning
+  counter, a skill override, a read-only memory view and an audit trail per
+  chat or forum topic, independent of the soul's own chat allowlist.
+- **Per-account capabilities** — a delta on top of the global permission policy,
+  so one account can lose (or gain) a capability without touching the rest.
 
-There is exactly **one tool registry** (`AgentToolsService`) and **one policy**
-(`AiPolicyService`). The dashboard agent, MCP clients, bots and automations all
-call the same registry, so a tool is either allowed for everyone or for nobody.
+There is exactly **one tool registry** (`AgentToolsService`) and **one policy
+entry point** (`AiAccountPolicyService`, which layers the account overrides on
+`AiPolicyService`). The dashboard agent, MCP clients, bots and automations all
+call the same registry and the same policy code, so a tool cannot be disabled for
+one surface and forgotten in another; only the capability verdict (global, then
+the account delta) differs.
 Every agent invocation is stored in `AgentRun` with its `source` (`ui`, `mcp`,
 `dm`, `bot`, `automation`, `soul-creator`, `test`) and a tool-call trace.
 
@@ -73,14 +83,14 @@ The table describes the legacy single-provider fields. A configured default
 fallback, the environment the last resort.
 
 `AI_BASE_URL`, `AI_MODEL`, `AI_FAST_MODEL` and `AI_API_KEY` are read at runtime;
-a value saved in the UI wins over the environment. The dashboard
-(Настройки → AI) can edit the URL, both models, temperature, the step
-budget and the key. The key is stored as an AES-256-GCM envelope
+a value saved in the UI wins over the environment. The legacy card on
+Настройки → AI (shown only while the provider list is empty) is read-only: it
+prints the URL, both models, temperature, the step budget, the reasoning effort
+and where the key came from. The key itself is stored as an AES-256-GCM envelope
 (`SessionCryptoService`, AAD `ai:api-key`) and is never returned in full — the
-settings show `…1234` and where the key came from (`env`/`db`). An empty API key
-field clears the stored key; the environment key, if any, is used again. With an
-effective default provider these legacy fields only apply once that provider is
-disabled or has no URL/model.
+settings show `…1234` and `env`/`db`. A stored key is edited or cleared through
+`PUT /ai/settings`; with an effective default provider these legacy fields only
+apply once that provider is disabled or has no URL/model.
 
 The MCP token is generated once (64 hex chars) and stored encrypted with AAD
 `ai:mcp-token`. With `MCP_TOKEN` set and nothing stored yet, the env value is
@@ -88,12 +98,25 @@ used; after `POST /ai/mcp/rotate` the database value always wins.
 
 ### Providers
 
-`AiProvider` is the provider list shown at `/settings/ai`: `name`, `kind`,
-`baseUrl`, JSON `models`, `defaultModel`, `reasoningEffort`, `isDefault`,
-`enabled` and `apiKey`. The key is encrypted with `SessionCryptoService`
-(AAD `ai-provider:<id>`) and stored in the row as `enc:v1:<base64 envelope>`;
-responses only carry `hasKey`, never the value. Rows written by hand with a
-plain key still work.
+`AiProvider` is the provider list behind `/settings/ai`: `name`, `kind`,
+`preset`, `baseUrl`, JSON `models`, `defaultModel`, `reasoningEffort`,
+`isDefault`, `enabled`, `apiKey` and JSON `limits`. The key is encrypted with
+`SessionCryptoService` (AAD `ai-provider:<id>`) and stored in the row as
+`enc:v1:<base64 envelope>`; responses only carry `hasKey` and `keySource`,
+never the value. Rows written by hand with a plain key still work.
+
+Presets (`GET /ai/providers/presets`):
+
+| Preset | Base URL | Key | Default model |
+| --- | --- | --- | --- |
+| `opencode-go` | `https://opencode.ai/inference/go/openai/v1` | OpenCode token, `keySource: "opencode"` (nothing is stored on the row) | `deepseek-v4.1-flash` |
+| `custom` | empty, filled by hand | stored key, `keySource: "stored"` | – |
+
+A preset only supplies defaults: name, base URL, kind and the model stay
+editable, exactly like a hand-created provider. An unknown `preset` on create is
+`400 INVALID_PRESET`; the update route does not change the stored preset.
+`keySource` is derived from the stored preset, so an `opencode-go` row never
+carries a key and still works (§ "OpenCode Go via Orca").
 
 Rules:
 
@@ -104,10 +127,65 @@ Rules:
   provider (`promotedId` in the answer);
 - `POST /ai/providers/:id/test` sends one minimal `chat/completions`
   (`max_tokens: 1`, `temperature: 0`, 8 s budget) and returns
-  `{ ok, status, latencyMs, error? }`; the key is never echoed;
+  `{ ok, status, latencyMs, error? }`; a provider without a URL or a model
+  answers `ok: false` with the reason, and the key is never echoed;
 - `POST /ai/providers/import-settings` copies the current `AiSetting`
   (URL, model, key, effort) into a first provider. It runs once at boot and is
   idempotent: nothing happens when a provider already exists.
+
+#### Models
+
+`GET /ai/providers/:id/models` asks the provider itself
+(`<baseUrl>/models`, 10 s budget) so the dashboard never asks for a model id by
+hand:
+
+- `{ data: [...] }`, `{ models: [...] }` and a bare array are accepted; ids are
+  deduplicated, and an entry may carry `label` and `type`;
+- the answer is cached in memory per provider for **5 min** (dropped only when
+  the base URL changes or the row is deleted); a cache hit adds
+  `cached: true` and `fetchedAt`;
+- `source: "provider"` means a live list; on any failure the list stored on the
+  row comes back as `source: "stored"` together with `error`, so the UI always
+  has something to offer;
+- `PUT /ai/providers/:id/models { models, defaultModel? }` saves the chosen
+  list; if the current `defaultModel` is no longer listed, the first model
+  becomes the default.
+
+#### Limits and usage
+
+`GET /ai/providers/:id/limits` returns
+`{ source, limits, observed?, usage?, error?, checkedAt }`:
+
+- `limits` — the stored JSON `{ maxPerHour?, maxPerDay? }`; absent or `0` means
+  unlimited. `PATCH /ai/providers/:id/limits` merges a patch: `undefined` keeps
+  a value, `null` removes it, anything that is not a non-negative integer is
+  `400 INVALID_LIMIT`;
+- `observed` — local `AgentRun` counters for the last hour and the last day
+  (`{ lastHour, lastDay }`). These are app-wide, not per provider;
+- `usage` — real provider quota meters, `rolling` (OpenCode Go's 5-hour
+  window), `weekly` and `monthly`, each `{ status, percent 0–100, resetsAt }`.
+  Only OpenCode Go exposes them, at
+  `https://opencode.ai/inference/go/v1/usage`; the URL is rebuilt from the
+  origin whenever `baseUrl` points at `opencode.ai/inference/go…`, because the
+  chat path (`/inference/go/openai/v1`) is not the usage path;
+- `source: "provider"` only when that usage call really answered; every other
+  provider — and any failure — reports `source: "manual"` with the stored
+  limits and counters plus `error`.
+
+The stored limits are **informational**: nothing in the LLM path throttles on
+them yet (§15). The limits that are enforced are the soul's own
+`maxPerHour`/`maxPerChatPerDay` (§4).
+
+#### Key candidates
+
+`models()`, `limits()` and `test()` share one chain, most specific first:
+OpenCode token (only for an `opencode` preset) → stored provider key → legacy
+`AiSetting` key → `AI_API_KEY`. Candidates are deduplicated and the chain ends
+with a single unauthenticated attempt when nothing is configured, which is how
+a local Ollama-style endpoint works. A `401`/`403` moves on to the next
+candidate (an expired OpenCode token must not hide a working `AI_API_KEY`);
+transport errors are not retried because every candidate would hit the same
+network. One implementation, so the three calls cannot drift.
 
 `AiConfigService.resolved()` asks `AiProvidersService.resolve()` first: the
 default enabled provider with a non-empty `baseUrl` and a model (`defaultModel`,
@@ -133,7 +211,8 @@ model thinks, the indicator starts only when there is text to type. For DM
 replies the run also records the ids of the bubbles it produced
 (`AgentRun.messageIds`, a JSON array), and the `ai.reply`/`ai.draft` payload
 carries `reasoning`; only the reply text is passed to `sendMessage`, reasoning
-is never sent to Telegram.
+is never sent to Telegram. While the model works, the autopilot also streams the
+reasoning to the dashboard as `ai.thinking` events (§13).
 
 ### OpenCode Go via Orca
 
@@ -160,6 +239,12 @@ it. `OPENCODE_DB` overrides the path. Without the database source, copy `access`
 from `opencode auth export` into `AI_API_KEY` and refresh it manually before it
 expires.
 
+The same token backs the `opencode-go` provider preset: that row stores no key
+and `models`, `limits` and `test` read `AI_API_KEY_SOURCE=opencode` as the first
+candidate. With the variable unset the preset has no key at all (chat falls back
+to the stored/`AiSetting`/`AI_API_KEY` chain), so set it once before creating the
+provider.
+
 DeepSeek `deepseek-chat` is the model used for the live checks below; other
 OpenAI-compatible providers are drop-in replacements.
 
@@ -179,20 +264,25 @@ OpenAI-compatible providers are drop-in replacements.
 | `Automation` | optional `accountId`, `chatId`, `threadId` (`0` = whole chat), `soulId`, `createdBy` (`user`/`soul`/`assistant`), IANA `timezone`, `enabled`, `triggerType`, JSON `trigger`, `actionType`, JSON `action`, `selfPausedAt`, `selfPauseReason`, `lastRunAt`, `nextRunAt`, `runCount` | trigger → action rule, optionally bound to one chat/topic |
 | `AutomationRun` | `automationId`, `status`, JSON `input`, `output`, `error`, timestamps | run history |
 | `AiSetting` | singleton `default`: provider, endpoints, models, encrypted keys, `reasoningEffort`, STT columns, `dryRun`, JSON capabilities/allowlists | provider fallback + permission policy |
-| `AiProvider` | `name`, `kind`, `baseUrl`, `apiKey` (`enc:v1:…`), JSON `models`, `defaultModel`, `reasoningEffort`, `isDefault`, `enabled` | configurable LLM endpoints, one default |
+| `AiProvider` | `name`, `kind`, `preset` (null = custom), `baseUrl`, `apiKey` (`enc:v1:…`), JSON `models`, `defaultModel`, `reasoningEffort`, JSON `limits`, `isDefault`, `enabled` | configurable LLM endpoints, one default |
 | `AiChatAccess` | `userId`, `accountId`, `chatId`, `threadId` (`0` = whole chat), optional `soulId`, `enabled`, `note`; unique per account+chat+thread | per-chat/topic allow-mute for the soul |
 | `AiChatBlock` | `accountId`, `chatId`, `threadId`, `reason`, `warnings`, `blockedBy` (`user`/`soul`/`warning`); unique per account+chat+thread | blacklist; a `warning` row is only a counter |
+| `AiChatSkill` | `accountId`, `chatId`, `threadId` (`0` = whole chat), JSON `skillSlugs`; unique per account+chat+thread | skill override for one chat/topic |
+| `AiChatEvent` | `accountId`, `chatId`, `threadId`, `kind` (`warning`/`block`/`unblock`/`clear`/`access`), `reason`, `warnings`, `actor` (`user`/`soul`/`system`) | append-only audit trail of AI decisions about a chat |
+| `AiAccountSetting` | unique `accountId`, JSON `permissions` (`{}` = inherit the global policy) | per-account capability overrides |
 | `AgentRun` | optional `accountId`/`soulId`/`chatId`, `source`, `prompt`, `output`, `reasoning`, JSON `messageIds`, `model`, `steps`, JSON `trace`, token counts, `status` | every agent invocation |
 
 Migrations: `20261123230239_ai_souls`, `20261123230327_ai_secrets`,
 `20261123231007_ai_api_key_envelope`, `20261124122851_reasoning_effort`
 (`reasoning`, `reasoningEffort`), `20261124152734_ai_chat_controls`
 (`AiChatAccess`, `AiChatBlock`, `AiProvider`, `AgentRun.messageIds`, automation
-chat binding, STT columns). The tables have no user foreign key — the app is
+chat binding, STT columns), `20261124174416_ai_account_controls`
+(`AiChatSkill`, `AiChatEvent`, `AiAccountSetting`, `AiProvider.preset`/`limits`).
+The tables have no user foreign key — the app is
 single-user; `Soul.accountId` and `TelegramBot.accountId` are unique,
-`Automation.accountId` is optional (null = global rule). Access and block rows
-cascade with the account (and with the soul), `Automation.soulId` becomes null
-when the soul is deleted.
+`Automation.accountId` is optional (null = global rule). Access, block, skill,
+event and account-setting rows cascade with the account (access and block also
+with the soul), `Automation.soulId` becomes null when the soul is deleted.
 
 ## 4. Souls and autopilot
 
@@ -256,7 +346,10 @@ no dashboard open) and:
    rows;
 5. runs the agent with `source = "dm"`, the persona and memory, no tools
    (`tools: []`) and the last 10 turns as history, then appends the incoming
-   message to memory; when `peerProfile` is on, the system prompt also carries
+   message to memory; the skill set is resolved per chat/topic first — an
+   `AiChatSkill` row for this conversation replaces the soul's skills (§6) — and
+   is passed as authoritative (`replaceSoulSkills`), so an override that drops a
+   skill is honoured; when `peerProfile` is on, the system prompt also carries
    the peer's username and profile bio (`getChatInfo`), so the soul knows who it
    is talking to; photos and image documents up to 5 MB are downloaded and sent
    to the model as `image_url` content parts (max 2 images, 5 MB total), so a
@@ -385,7 +478,17 @@ Blacklist and warnings:
   `AiChatBlock` row with `blockedBy = "warning"`; at `AI_BLOCK_AFTER_WARNINGS`
   (default 3) the same row turns into a real block attributed to `user` or
   `soul`. An already blocked chat is not counted further, and warning-only rows
-  are hidden from the block list.
+  are hidden from the block list;
+- `DELETE .../chats/:chatId/ai-warnings` zeroes the counter **without**
+  unblocking: a row blocked by `user`/`soul` keeps denying access, only its
+  `warnings` becomes 0 (`{ removed, warnings, blocked }`);
+- every state change appends an `AiChatEvent` (`warning`, `block`, `unblock`,
+  `clear`, `access`) with the reason, the resulting counter and the actor
+  (`user`/`soul`/`system`). The write is best-effort — a failed audit row is
+  logged (`ai.chat.event.record`) and never fails the block itself.
+  `GET .../chats/:chatId/ai-events?threadId=&limit=` returns newest first
+  (default 50, max 200), exact thread: a topic's history does not include the
+  whole-chat rows.
 
 ### Voice notes
 
@@ -394,9 +497,26 @@ Voice notes and `audio/*` documents are transcribed by `SpeechService`
 because `AiModule` (autopilot) and `MessagingModule` (transcription endpoint)
 need the same instance and importing `AiModule` back would close a cycle.
 
-Engine order: OpenAI-compatible remote → local Parakeet TDT 0.6B v3 →
-whisper.cpp CLI → `null`. `transcribe()` never throws: a missing binary, a dead
-model, a timeout or empty text returns `null` and the caller answers anyway.
+The engine is Parakeet TDT 0.6B v3 in one of two places, chosen by
+`AiSetting.sttEngine` (`STT_ENGINE` wins when set):
+
+| `sttEngine` | What runs | Fallback |
+| --- | --- | --- |
+| `remote` (default) | the LAN Parakeet HTTP service only | none, unless `STT_LOCAL_FALLBACK=on` |
+| `local` | the local Parakeet TDT model via `sherpa-onnx-node` | none |
+| `disabled` | nothing; `transcribe()` returns `null` | – |
+
+Legacy stored values are mapped on read: `parakeet` → `local`, `auto`, an
+unknown value or a legacy `whisper` row → `remote` when a remote endpoint is
+configured and `local` otherwise. `whisper.cpp` is an
+**internal** last resort: it is reachable only through `STT_ENGINE=whisper` or
+the opt-in `STT_LOCAL_FALLBACK=on` chain, never through the settings row, and
+`sttEngine: "whisper"` is rejected with `400 INVALID_STT_ENGINE`. The model id is
+fixed: `sttModel` must be empty (→ `parakeet-tdt-0.6b-v3`) or start with
+`parakeet`, otherwise `400 INVALID_STT_MODEL`.
+
+`transcribe()` never throws: a missing binary, a dead model, a timeout or empty
+text returns `null` and the caller answers anyway.
 
 Remote engine:
 
@@ -406,15 +526,17 @@ Remote engine:
   `response_format=json`; a `Bearer` header is sent only when a key is stored
   (the LXC needs none, there is no auth);
 - `GET <origin>/health` is probed first (5 s timeout); the result is cached
-  60 s, so a dead LXC costs one probe per minute and the local engines take
-  over;
+  60 s, so a dead LXC costs one probe per minute. With `sttEngine = "remote"`
+  the note then simply fails (`null`) unless `STT_LOCAL_FALLBACK=on`, which
+  re-enables the local chain remote → Parakeet → whisper for this case;
 - 300 s budget. The returned language is ignored (the LXC hardcodes
   `english`), so `language` is always null;
 - configuration is re-read at most every 30 s: `STT_BASE_URL`/`STT_MODEL`
   override the `AiSetting.sttBaseUrl/sttModel` columns, which override the
-  defaults; `STT_REMOTE=off` or `sttEngine = "disabled"` disables the network
-  engine. `AiSetting.sttApiKey` is read from the row; `sttLanguage` is stored
-  but the engine does not use it yet.
+  defaults; a stored model that does not start with `parakeet` is replaced by
+  `parakeet-tdt-0.6b-v3`. `STT_REMOTE=off` or `sttEngine = "disabled"` disables
+  the network engine. `AiSetting.sttApiKey` is read from the row; `sttLanguage`
+  is stored but the engine does not use it yet.
 - **LAN proxy bypass:** the workstation exports `HTTP(S)_PROXY` and that proxy
   answers 503 for private addresses. Requests to a private host (`localhost`,
   `*.localhost`, `10/8`, `127/8`, `192.168/16`, `172.16–31`, `169.254/16`) go
@@ -436,11 +558,14 @@ Local engines (CPU):
   fixed windows;
 - whisper.cpp CLI (`WHISPER_BIN`, default `whisper-cli`; `WHISPER_MODEL`,
   default `~/.local/share/combain/whisper/ggml-small.bin`; `WHISPER_LANG`,
-  default `auto`) runs with `-oj` and its JSON is parsed defensively;
-- neither local engine reports a language: `language` is null, there is no
+  default `auto`) runs with `-oj` and its JSON is parsed defensively; it is an
+  internal env-only path (`STT_ENGINE=whisper`), never selected by the settings
+  row;
+- the local Parakeet engine reports no language: `language` is null, there is no
   detection;
-- `STT_ENGINE=parakeet|whisper` forces one local engine and skips the network
-  (`auto` is the default chain);
+- `STT_ENGINE` accepts `remote|local|disabled` and wins over the stored row;
+  legacy `parakeet` maps to `local`, `auto` maps to `remote` (or `local` when
+  `STT_REMOTE=off`), and `whisper` forces the internal CLI;
 - at most 2 jobs run at once, input is capped at 25 MB, and the local chain
   shares one deadline (`WHISPER_TIMEOUT_MS`, default 120 s).
 
@@ -503,6 +628,11 @@ Views and edits:
 
 - `GET /accounts/:accountId/soul/memory?chatId=` returns summary, facts, up to
   50 turns and counts. Without `chatId` only account-wide facts are shown.
+- `GET /accounts/:accountId/chats/:chatId/memory?limit=` is the read-only view of
+  one chat for the info panel: `{ shortTerm: [{ role, content, createdAt }],
+  longTerm: { summary, facts: [{ kind, content, importance, createdAt }] } }`.
+  `limit` is capped at 200 (default 50); it never writes, compaction stays in
+  `MemoryService`.
 - Facts can be added in the UI / `POST .../memory/facts` / `memory_add`.
   Deleting one fact is UI/REST only (`DELETE .../memory/facts/:factId`); there
   is no `memory_delete` tool.
@@ -532,13 +662,35 @@ Tool allowlists: when any attached skill has a non-empty `tools` array, the
 agent is restricted to the **union** of those arrays (`AgentService` +
 `SkillsService.toolsFor`). A skill with an empty array contributes nothing; if
 all attached skills are empty, no tool filter is applied and every tool allowed
-by the policy is visible.
+by the policy is visible. The rule applies to the effective set, so a per-chat
+override changes the tool allowlist for that conversation as well.
 
 Slugs must match `[a-z0-9][a-z0-9_-]{1,63}` and are unique. System skills cannot
 be deleted (`SYSTEM_SKILL`), but they can be edited and disabled. `enabled:
 false` removes a skill from prompts and from soul/bot attachment lists. Attach to
 a soul via `PUT /accounts/:id/soul { skillSlugs }` (replaces the set) and to a
 bot via `PUT /ai/bots/:id/skills { skillSlugs }`.
+
+### Skills per chat
+
+`AiChatSkill` stores one set per `accountId + chatId + threadId`
+(`0` = whole chat). It **replaces** the soul's set for that conversation:
+
+- `GET /accounts/:id/chats/:chatId/ai-skills?threadId=` → `{ effective,
+  source: "chat"|"soul", defaults, skills }`, where `defaults` is the soul's own
+  set (used by the "reset" button in the UI) and `skills` is the catalogue rows
+  for `effective` in order;
+- `PUT ... { skillSlugs, threadId? }` replaces the override. Slugs are trimmed,
+  deduplicated, capped at 100, and every one must exist (otherwise
+  `400 SKILL_NOT_FOUND` with the missing list);
+- `DELETE ...` drops the row so the soul's skills apply again.
+
+Resolution (`AiChatSkillsService.resolve`): a stored row wins **even when its
+array is empty** — "no skills in this chat" is a deliberate state, not a fallback
+— and without a row the soul decides. The DM autopilot is the only consumer
+today: it passes the resolved list with `replaceSoulSkills: true`, so the
+override is authoritative. The dashboard agent, bots and automations still union
+their `skillSlugs` with the soul's skills.
 
 ## 7. Bots
 
@@ -554,9 +706,12 @@ BotFather setup:
 1. Open `@BotFather` in Telegram, send `/newbot`, choose a name and a username
    ending in `bot`.
 2. Copy the token (format `123456789:AA…`).
-3. In the dashboard open AI → Боты and paste it into the shared card or into an
-   account card. Saving validates the token with `getMe` and fills in the
-   username/title; `/check` repeats `getMe` and re-enables the bot.
+3. Configure it through the API or an MCP client:
+   `PUT /ai/bots/shared` for the shared bot or
+   `PUT /ai/bots/accounts/:accountId` for an account. Saving validates the token
+   with `getMe` and fills in the username/title; `POST /ai/bots/:id/check`
+   repeats `getMe` and re-enables the bot. There is no bot panel in the
+   dashboard any more.
 4. The token is encrypted with AAD `bot:<id>` and never returned by the API or
    tools — only `hasToken: true`. Pasting a new token replaces it.
 
@@ -690,6 +845,32 @@ record who owns it; a soul may only be paired with its own account
    (`send`/`edit`/`delete`/`react`) — reads are not limited by it;
 4. `dryRun = policy.dryRun && isWriteCapability && source !== "dm"`.
 
+### Per-account capabilities
+
+`AiAccountPolicyService` wraps that gate with a per-account delta and is what
+`AgentToolsService` actually injects:
+
+- `AiAccountSetting.permissions` holds only the overrides; `{}` (the default for
+  an account without a row) means "inherit everything";
+- `GET /accounts/:id/ai-settings` returns `{ permissions, effective, defaults }`
+  (stored deltas, defaults merged with them, and the global policy they inherit
+  from), `PATCH /accounts/:id/ai-settings` merges a patch where `null` removes a
+  key. A non-boolean value is `400 VALIDATION_ERROR`, so a dashboard typo cannot
+  silently leave an account unrestricted;
+- per key, an override wins; every other capability keeps the global value
+  (`mergeCapabilities`). The UI shows three states per capability: inherit,
+  allow, deny;
+- when the effective value equals the global one, the call is delegated
+  unchanged to `AiPolicyService`, so there is still one implementation of the
+  allowlists, dry-run and logging;
+- a denied override answers `CAPABILITY_DISABLED` and logs `ai.policy.deny` with
+  `details.scope = "account"`;
+- a granting override (turning on something the global policy denies) still goes
+  through `allowAccountIds`, the chat block/allow lists and `dryRun`
+  (`evaluateGranted`), so it cannot bypass them;
+- the tool registry asks `capabilities(ctx.accountId)`, so the LLM schema and
+  MCP `tools/list` hide tools the account denies (and expose ones it grants).
+
 `AgentToolsService.execute()` additionally enforces per-tool `sources`
 restrictions, rejects a call that targets another account from a scoped surface
 (`ACCOUNT_SCOPE`), and audits every result as `ai.tool.<name>` (source `mcp` for
@@ -740,7 +921,7 @@ Implemented methods:
 | --- | --- |
 | `initialize` | protocol version, capabilities, server info, instructions |
 | `ping` | `{}` |
-| `tools/list` | tools whose capability is enabled (45 registered; 39 with defaults) |
+| `tools/list` | tools whose capability is enabled (45 registered; 38 with the defaults, because `delete`/`policy`/`admin` are off) |
 | `tools/call` | `{ content: [{ type: "text", text: <JSON> }] }`; `isError` on failure |
 | `prompts/list` | every skill as a prompt (name = slug, no arguments) |
 | `prompts/get` | the skill's `instructions` as one user message |
@@ -790,7 +971,10 @@ curl -s http://127.0.0.1:3001/mcp \
 ## 11. Tools
 
 45 tools are registered; `GET /ai/tools` lists them regardless of policy, while
-`tools/list` (MCP) and the LLM schema hide tools whose capability is off.
+`tools/list` (MCP) and the LLM schema hide tools whose capability is off. With
+an account in scope the effective set is the account's overrides on top of the
+global capabilities (§9), so the same tool can be visible for one account and
+hidden for another.
 
 | Group | Tools | Capability |
 | --- | --- | --- |
@@ -819,7 +1003,8 @@ characters, because it is shown to the owner in the chat card.
 ## 12. REST surface
 
 ```text
-GET/PUT /ai/settings                    provider, models, key hint, dryRun, MCP endpoint+token
+GET/PUT/PATCH /ai/settings              providers fallback, models, key hint, dryRun, STT, MCP endpoint+token
+POST    /ai/stt/test                    probe the selected STT engine (`/health` or the local model files)
 PUT     /ai/policy                      capabilities, allowlists, dryRun
 POST    /ai/test                        one-shot LLM check without tools
 GET     /ai/tools                       registry (name, capability, write)
@@ -828,7 +1013,12 @@ GET     /ai/runs?accountId=&chatId=&source=&limit=   agent runs with traces (lim
 GET     /ai/runs/:id                    one run: reasoning, messageIds, trace
 
 GET/POST /ai/providers                  list (default first) / create
+GET     /ai/providers/presets           opencode-go | custom
 PATCH/DELETE /ai/providers/:id          update / delete (promotes a new default)
+GET     /ai/providers/:id/models        live <baseUrl>/models (5 min cache) or the stored list
+PUT     /ai/providers/:id/models        { models, defaultModel? } save the chosen list
+GET     /ai/providers/:id/limits        stored limits + local counters + OpenCode Go usage meters
+PATCH   /ai/providers/:id/limits        { maxPerHour?, maxPerDay? } (null removes a value)
 POST    /ai/providers/:id/default       make the single default
 POST    /ai/providers/:id/test          one minimal chat completion (8 s)
 POST    /ai/providers/import-settings   copy AiSetting into a provider (idempotent)
@@ -843,12 +1033,19 @@ POST    /accounts/:accountId/soul/memory/facts      { chatId?, content, kind?, i
 DELETE  /accounts/:accountId/soul/memory/facts/:factId
 DELETE  /accounts/:accountId/soul/memory/chats/:chatId
 
+GET/PATCH /accounts/:accountId/ai-settings                 { permissions, effective, defaults } / patch overrides
+GET     /accounts/:accountId/chats/:chatId/memory?limit=   read-only short-term + long-term view
+
 GET     /accounts/:accountId/ai-access                      access rows + active blocks
 GET/PUT /accounts/:accountId/chats/:chatId/ai-access?threadId=   decision / allow, mute, re-scope
 DELETE  /accounts/:accountId/chats/:chatId/ai-access?threadId=   drop the row (falls back to the soul, then deny)
 POST    /accounts/:accountId/chats/:chatId/ai-block         { reason?, blockedBy?, threadId? } block now
 DELETE  /accounts/:accountId/chats/:chatId/ai-block?threadId=    unblock, reset warnings
 POST    /accounts/:accountId/chats/:chatId/ai-warning       { reason?, threadId? } one warning
+DELETE  /accounts/:accountId/chats/:chatId/ai-warnings?threadId= reset the counter, keep the block
+GET     /accounts/:accountId/chats/:chatId/ai-events?threadId=&limit=  audit trail, newest first
+
+GET/PUT/DELETE /accounts/:accountId/chats/:chatId/ai-skills?threadId=  skill override of one chat/topic
 
 GET/POST /ai/skills
 PATCH/DELETE /ai/skills/:id
@@ -873,35 +1070,118 @@ POST/GET/DELETE /mcp                     MCP endpoint (Bearer token)
 ```
 
 `/ai/chat` accepts either `prompt` or a `messages` transcript (roles
-`user`/`assistant`). Errors are `{ code, message }`; LLM failures are
+`user`/`assistant`), plus optional `accountId`/`chatId`/`skillSlugs`. The
+dashboard sends neither scope, so a UI run is global; tools still name the
+account they touch. Errors are `{ code, message }`; LLM failures are
 `502 AI_FAILED`, invalid input `400`. There is no route to delete a soul. The
 dashboard endpoints themselves have no auth (single-user mode); MCP is the only
 token-protected surface.
 
 ## 13. Dashboard `/ai`
 
-The sidebar entry is “AI” (page title “AI и души”). The page has five tabs:
+The sidebar entry is “AI” (page title “AI”) and the page has three tabs:
 
 | Tab | What it does |
 | --- | --- |
-| Агент | chat with the agent, account selector (all/one), trace badges per tool call (`dry` for simulated), “Новый диалог” |
-| Души | per-account persona editor, autopilot mode (off/draft/auto), allowlist and limits, temperature, memory panel (chat id, summary, facts, turns, manual compaction) |
+| Агент | one global chat with the agent, trace badges per tool call (`dry` for simulated), the areas the registry actually exposes, “Новый диалог” |
 | Скиллы | create/edit/disable/delete skills, edit instructions and tool list |
 | Автоматизации | editor for trigger/action, enable toggle, “Run”, last 30 runs |
-| Боты | shared bot card, per-account cards, token, username, allowlist, skills, “Проверить” |
 
-Provider list, model/URL/key, temperature, max steps, reasoning effort, dryRun,
-capability toggles, account/chat allowlists, owner ids, MCP endpoint + token +
-rotate and the grouped tool list live on **Настройки → AI** (`/settings/ai`);
-`/ai` only reads the settings for a small model badge.
+The agent is **global**: there is no account or chat selector any more. The
+header lists the capabilities derived from `GET /ai/tools`, and `POST /ai/chat`
+is sent without `accountId`/`chatId` (the API still accepts both for scripts and
+MCP-style callers). Souls, per-account permissions and bots are not on this
+page: souls and capability overrides live on `/accounts`, bots are API/MCP only.
+
+**Настройки → AI** (`/settings/ai`) is now the only settings page. `/settings`
+redirects there, and the old `/settings/accounts`, `/settings/proxy`,
+`/settings/logs` bookmarks redirect to it as well; accounts, proxies and logs
+have their own top-level pages. The page carries the provider list
+(preset picker, model list, test, limits and usage meters), the read-only
+legacy `AiSetting` card (only while the provider list is empty), STT, the
+capability toggles with account/chat allowlists and owner ids, and the MCP card
+with the endpoint, token, rotate button and the grouped tool list.
+
+**Аккаунты** has a «Настройки ИИ» button per account that opens a dialog with two
+tabs:
+
+- **Душа** — the soul form: name, essence, tone, goals, boundaries, language,
+  extra instructions, model, temperature, autopilot mode (off/draft/auto),
+  reply delay, hourly/daily limits, typing speed, presence timings and the
+  attached skills. The API upserts, so the same form creates a missing soul;
+- **Права ИИ** — per-account capability overrides: every capability can be
+  inherited, allowed or denied; only the changed keys are PATCHed (`null`
+  removes an override).
 
 In the messenger, the chat header carries an AI chip: neutral when no rule
 exists, emerald when the soul answers there, red for a blocked chat. Its menu
 allows/mutes the chat (`ИИ: разрешить`/`ИИ: запретить`), blocks it with a
-reason, or lifts the block. The full editor (access row, assigned soul, note,
-warning counter, block) sits in the chat info panel for the whole chat and in
-the comment-thread drawer, where it can target the open thread or the whole
-chat. Voice notes render in their own player with a transcription button.
+reason, or lifts the block. The info panel is tabbed: **Обзор · Доступ ИИ ·
+Память · Скиллы · Автоматизации · Медиа · Ссылки · Опросы · Логи** (+
+«Похожие», + «Управление» for groups the account administers, and the same tabs
+in the comment-thread drawer scoped to the open thread):
+
+| Tab | What it does |
+| --- | --- |
+| Доступ ИИ | access row (allow/mute, note, assigned soul), warning counter with «Сбросить предупреждения» (keeps an existing block), block/unblock and the event history |
+| Память | short-term turns, the rolling summary and the chat's facts (read-only) |
+| Скиллы | the chat/topic override, its source (`chat`/`soul`) and «сбросить» back to the soul's set |
+| Автоматизации | the automations bound to this chat/topic with their last run |
+| Логи | structured entries of this account/chat with a level filter and a deep link to `/logs?accountId=&chatId=&level=` |
+
+Обзор, Медиа, Ссылки, Опросы, Похожие and Управление are unchanged (chat facts,
+media tabs, similar channels, admin tools).
+
+Voice notes render in their own player with a transcription button.
+
+### Reasoning stream
+
+While the autopilot waits for the model, the dashboard shows a strip directly
+above the composer («Агент думает…», local-only). It is fed by WS `ai.thinking`
+events for the open account/chat:
+
+| Phase | Payload | Meaning |
+| --- | --- | --- |
+| `start` | `{ accountId, chatId, runId, phase: "start" }` | opens the strip as soon as the `AgentRun` row exists |
+| delta | `{ …, runId, delta }` | a throttled chunk of `reasoning_content` (at most one per 100 ms and only once ≥16 chars accumulated) |
+| `done` | `{ …, runId, phase: "done", reasoning }` | closes the strip and carries the complete reasoning; the strip fades out |
+
+Only the DM autopilot attaches a reasoning listener (`AgentService` falls back
+to the blocking `chat()` when none is given), so bots, automations and UI runs do
+not stream. Nothing in this path touches Telegram: the strip is local UI, and
+`sendMessage` receives only the reply text. After the run the same reasoning is
+persisted in `AgentRun` and shown under the bubble as the collapsible
+«Размышления» block (`ai.reply` carries it too, so it appears without a
+refetch).
+
+### Duplicate bubbles (client-side merge)
+
+TDLib answers a send with a **temporary** message id; the real id only arrives
+with `updateMessageSendSucceeded` (or a later history refetch). The API already
+returns the real id when the confirmation arrives inside `SEND_WAIT_TIMEOUT_MS`,
+but a slow one leaves the temporary id in the transcript, and the same bubble can
+also arrive twice through `message.new` and a page load.
+
+The dashboard therefore merges every incoming bubble with the local list
+(`apps/dashboard/src/lib/message-merge.ts`):
+
+1. a numeric id match wins (ids are normalised with `Number`);
+2. otherwise `isSameBubble` recognises a temporary/real pair by the same
+   `chatId`, direction, exact text, media kind, reply target and a **±5 s**
+   window on `date`;
+3. the non-temporary id survives, the existing bubble keeps its slot (the list
+   is re-sorted newest-first) and local metadata is moved;
+4. `remapReasoning` follows id hops (temp → temp → real) and `putReasoning`
+   keeps **one reasoning block per `runId`**, so a duplicate `ai.reply` moves the
+   block instead of decorating two bubbles.
+
+This is the pitfall to keep in mind for later work: the signature is a
+heuristic, not an identity. Two genuinely different bubbles with identical short
+text, sent in the same direction within 5 s and with the same reply/media shape,
+collapse into one. A new field that changes a bubble's shape (a draft flag, a
+different media descriptor, a forward header) must be added to `isSameBubble`,
+or temp/real pairs will show up twice again. Reasoning must always go through
+`remapReasoning`/`putReasoning`, never be keyed by the id that just arrived.
 
 ## 14. Safety rules
 
@@ -913,13 +1193,22 @@ chat. Voice notes render in their own player with a transcription button.
 - A blocked chat/topic is a hard drop: no agent call, no `typing…`, no read
   receipt, only a debug entry (`dm.autopilot.blocked`). A warning (`chat_warn`)
   does not stop the chat by itself; the one at `AI_BLOCK_AFTER_WARNINGS`
-  (default 3) turns it into a block.
+  (default 3) turns it into a block. Clearing warnings keeps an existing block.
 - Provider keys are sealed per provider (AAD `ai-provider:<id>`) and masked as
-  `hasKey`. The STT endpoint, model and key live in `AiSetting`/env and have no
-  REST surface yet, so they cannot be read back from the dashboard.
-- Speech audio leaves the machine only when the remote engine is enabled (the
-  LAN LXC); the local engines keep it inside the process. Model files and
+  `hasKey`; an `opencode-go` row stores no key at all and uses the local OpenCode
+  token. The STT engine, base URL and language are editable at `/settings/ai`
+  (`PATCH /ai/settings`, `POST /ai/stt/test`); the model is fixed to Parakeet and
+  is shown read-only, and the optional STT key (usually unset, the LAN service
+  has no auth) is set through the API and only reported as `hasSttKey`.
+- Provider limits and usage meters are display-only: they are stored and
+  reported but never throttle a request. Only the soul's `maxPerHour` /
+  `maxPerChatPerDay` stop replies.
+- Speech audio leaves the machine only when the remote engine is selected (the
+  LAN LXC); the local engine keeps it inside the process. Model files and
   ffmpeg are installed outside the app and are not managed by it.
+- `ai.thinking`, `ai.reply` and `AgentRun.reasoning` are dashboard-only. The
+  model's reasoning never reaches Telegram, and the strip above the composer is
+  never part of a sent message.
 - Bots refuse users who are not owners (unless the allowlist is empty because no
   account is attached — attach one first).
 - API keys and bot tokens are encrypted (AES-256-GCM envelope), masked in
@@ -945,6 +1234,7 @@ chat. Voice notes render in their own player with a transcription button.
   15 s granularity.
 - Bots: long polling needs outbound `api.telegram.org`, one poller per token
   (`409` otherwise), text and private chats only, and a bot cannot start a DM.
+  There is no dashboard UI for bots; tokens are set through REST/MCP only.
 - MCP is HTTP-only (no stdio binary), stateless, with no server-initiated SSE.
   When the `mcp` capability is off, every method except `initialize`, `ping`
   and notifications answers `-32001`; access also needs the bearer token.
@@ -954,8 +1244,26 @@ chat. Voice notes render in their own player with a transcription button.
   `automations_list` and `bots_list` only show its own account, and a tool call
   naming another account is refused (`ACCOUNT_SCOPE`).
 - `Soul.settings` is merged on `PUT`; omitted keys keep their current values.
-- Agent output is buffered (no streaming); each tool result is truncated to
+- The dashboard agent is global: a UI run has no account or chat scope, so it
+  relies on the tool arguments (`POST /ai/chat` still accepts `accountId` and
+  `chatId` for scripts).
+- Agent output text is buffered (no token streaming); only the autopilot's
+  reasoning is streamed (`ai.thinking`), and each `delta` carries the chunk
+  accumulated since the previous emit, not the whole text — the complete
+  reasoning arrives with `done` and `ai.reply`. Each tool result is truncated to
   6 000 chars in the model context and each step to 1 800 completion tokens.
+- Provider limits (`maxPerHour`/`maxPerDay`) are not enforced anywhere; they are
+  stored, shown with the local `observed` counters and the provider's own usage
+  meters, and nothing more. The counters are app-wide, not per provider, and the
+  meters exist only for OpenCode Go.
+- Per-chat skills replace the soul's set for that chat/topic (an empty override
+  means "no skills"), and only the DM autopilot reads them; a chat override does
+  not narrow the UI agent, bots or automations.
+- A temporary TDLib message id can still reach the dashboard when the send
+  confirmation arrives after `SEND_WAIT_TIMEOUT_MS`. The client merge (±5 s
+  signature, §13) hides it, but the heuristic can collapse two genuinely
+  different bubbles with the same text sent within 5 s — and it must be extended
+  whenever a bubble gains a new distinguishing field.
 - Speech-to-text detects no language (`language` is always null; the LXC's
   hardcoded `english` is ignored), needs ffmpeg plus the model files on the
   host, and keeps the recognizer in memory for the whole process
@@ -969,9 +1277,20 @@ chat. Voice notes render in their own player with a transcription button.
 - The one-time `ai.access.seed` turns the soul's `chatIds` into explicit rows;
   after that, editing `chatIds` no longer changes access for those chats.
 - Only the default provider is used; per-task provider selection is not
-  implemented. A provider without its own key silently falls back to the
+  implemented (a provider row has its own limits, but they are not consulted per
+  request). A provider without its own key silently falls back to the
   `AiSetting` key and then to `AI_API_KEY`, and `AI_API_KEY_SOURCE=opencode`
   wins over every stored key.
+- The dashboard no longer edits the legacy `temperature`/`maxSteps` or API-key
+  fields: the legacy card is read-only and those values are changed through
+  `PUT /ai/settings`. A provider row carries its own `reasoningEffort`, but
+  temperature stays global (or per soul, which wins for its own replies).
+- The model list is cached for 5 min per provider and only invalidated by a base
+  URL change or a delete; a model added by the provider shows up after the TTL
+  (the UI refresh does not bypass the cache).
+- An account override can grant a globally disabled capability; only the
+  account/chat allowlists and `dryRun` still apply, so `policy` and `admin`
+  remain the capabilities to keep off unless the account really needs them.
 - The automation editor edits trigger/action only; chat/thread binding,
   timezone and self-pause are API/tool fields. `POST /ai/automations/:id/run`
   runs immediately even for a self-paused row, while the `automation_run` tool

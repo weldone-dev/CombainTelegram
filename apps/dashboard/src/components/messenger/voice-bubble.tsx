@@ -276,6 +276,7 @@ export function VoiceBubble({
                   aria-label="Позиция воспроизведения"
                   title="Перемотать"
                   className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-transparent opacity-0 disabled:cursor-default"
+                  autoComplete="off"
                 />
               </div>
               <div className="flex items-center justify-between text-[11px] leading-tight tabular-nums opacity-75">

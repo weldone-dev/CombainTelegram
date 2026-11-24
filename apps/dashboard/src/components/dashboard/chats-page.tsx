@@ -1,8 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listChatRuns } from "../../lib/ai-api";
 import { ApiError, apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
+import {
+  mergeMessages,
+  putReasoning,
+  remapReasoning,
+} from "../../lib/message-merge";
 import {
   deleteMessage as deleteMessageRequest,
   INITIAL_CHAT_LIMIT,
@@ -40,6 +46,7 @@ import type {
   FolderView,
   ForwardResult,
   MessageHistoryView,
+  MessageReasoningView,
   MessageView,
   RealtimeDeletedEvent,
   RealtimeMessageEvent,
@@ -107,6 +114,13 @@ export function ChatsPage() {
   chatsRef.current = chats;
   const messagesRef = useRef<MessageView[]>([]);
   messagesRef.current = messages;
+  const [reasoningByMessage, setReasoningByMessage] = useState<
+    Map<number, MessageReasoningView>
+  >(() => new Map());
+  const reasoningRef = useRef(reasoningByMessage);
+  reasoningRef.current = reasoningByMessage;
+  /** `<accountId>:<chatId>` whose transcript is currently in `messagesRef`. */
+  const messagesChatRef = useRef<string | null>(null);
   const selectedAccountIdRef = useRef<string | null>(null);
   selectedAccountIdRef.current = selectedAccountId;
   const selectedChatIdRef = useRef<number | null>(null);
@@ -261,13 +275,54 @@ export function ChatsPage() {
     }
   }, []);
 
+  /**
+   * Merges live and fetched bubbles and keeps the local reasoning map in sync
+   * when a temporary id is replaced by the real Telegram id.
+   */
+  const applyMessages = useCallback(
+    (
+      incoming: MessageView | MessageView[],
+      options: { preferIncoming?: boolean } = {},
+    ) => {
+      const result = mergeMessages(messagesRef.current, incoming, options);
+      messagesRef.current = result.messages;
+      setMessages(result.messages);
+      if (result.remapped.size > 0) {
+        const nextReasoning = remapReasoning(
+          reasoningRef.current,
+          result.remapped,
+        );
+        reasoningRef.current = nextReasoning;
+        setReasoningByMessage(nextReasoning);
+      }
+      return result;
+    },
+    [],
+  );
+
+  const rememberReasoning = useCallback(
+    (messageId: number, entry: MessageReasoningView) => {
+      const next = putReasoning(reasoningRef.current, messageId, entry);
+      reasoningRef.current = next;
+      setReasoningByMessage(next);
+    },
+    [],
+  );
+
   const loadMessages = useCallback(
     async (accountId: string, chatId: number, newerThanId?: number) => {
       const requestId = messagesRequestRef.current + 1;
       messagesRequestRef.current = requestId;
-      // Never leave the previous chat's transcript under the new header while
-      // the history request is in flight.
-      setMessages([]);
+      // A reconnect/refresh of the same chat keeps live bubbles so a late
+      // temporary-id reply is merged with the fetched page instead of lost.
+      const chatKey = `${accountId}:${chatId}`;
+      if (messagesChatRef.current !== chatKey) {
+        messagesChatRef.current = chatKey;
+        messagesRef.current = [];
+        setMessages([]);
+        reasoningRef.current = new Map();
+        setReasoningByMessage(new Map());
+      }
       setNextOffsetId(null);
       setMessagesLoading(true);
       setMessagesError(null);
@@ -281,8 +336,8 @@ export function ChatsPage() {
           {},
         );
         if (messagesRequestRef.current !== requestId) return;
-        setMessages(history.messages);
-        saveMessages(accountId, chatId, history.messages);
+        const merged = applyMessages(history.messages);
+        saveMessages(accountId, chatId, merged.messages);
         setNextOffsetId(history.nextOffsetId);
       } catch (error) {
         if (messagesRequestRef.current !== requestId) return;
@@ -290,7 +345,7 @@ export function ChatsPage() {
           ? loadCachedMessages(accountId, chatId)
           : null;
         if (cached && cached.length > 0) {
-          setMessages(cached);
+          applyMessages(cached);
           setNextOffsetId(null);
           setMessagesError(null);
           setOffline(true);
@@ -303,7 +358,7 @@ export function ChatsPage() {
         if (messagesRequestRef.current === requestId) setMessagesLoading(false);
       }
     },
-    [],
+    [applyMessages],
   );
 
   /** Silent refresh used when the Socket.IO connection is unavailable. */
@@ -322,13 +377,14 @@ export function ChatsPage() {
         ) {
           return;
         }
-        setMessages(history.messages);
+        const merged = applyMessages(history.messages);
+        saveMessages(accountId, chatId, merged.messages);
         setNextOffsetId(history.nextOffsetId);
       } catch {
         // Keep the last known messages when polling fails.
       }
     },
-    [],
+    [applyMessages],
   );
 
   const loadMore = useCallback(async () => {
@@ -351,20 +407,8 @@ export function ChatsPage() {
       ) {
         return;
       }
-      setMessages((previous) => {
-        const existing = new Set(previous.map((message) => message.id));
-        const older = history.messages.filter(
-          (message) => !existing.has(message.id),
-        );
-        return [...older, ...previous];
-      });
-      saveMessages(accountId, chatId, [
-        ...history.messages.filter(
-          (message) =>
-            !messagesRef.current.some((item) => item.id === message.id),
-        ),
-        ...messagesRef.current,
-      ]);
+      const merged = applyMessages(history.messages);
+      saveMessages(accountId, chatId, merged.messages);
       setNextOffsetId(history.nextOffsetId);
     } catch (error) {
       if (
@@ -376,7 +420,7 @@ export function ChatsPage() {
     } finally {
       setLoadingMore(false);
     }
-  }, [selectedAccountId, selectedChatId, nextOffsetId]);
+  }, [selectedAccountId, selectedChatId, nextOffsetId, applyMessages]);
 
   const sendMessage = useCallback(
     async (text: string, replyToId?: number) => {
@@ -402,11 +446,8 @@ export function ChatsPage() {
         ) {
           return;
         }
-        setMessages((previous) =>
-          previous.some((item) => item.id === message.id)
-            ? previous
-            : [message, ...previous],
-        );
+        messagesChatRef.current = `${accountId}:${chatId}`;
+        applyMessages(message, { preferIncoming: true });
         setChats((previous) =>
           previous.map((chat) =>
             chat.id === chatId
@@ -420,7 +461,7 @@ export function ChatsPage() {
         throw new Error(textError);
       }
     },
-    [selectedAccountId, selectedChatId],
+    [selectedAccountId, selectedChatId, applyMessages],
   );
 
   const sendMedia = useCallback(
@@ -444,11 +485,8 @@ export function ChatsPage() {
         ) {
           return;
         }
-        setMessages((previous) =>
-          previous.some((item) => item.id === message.id)
-            ? previous
-            : [message, ...previous],
-        );
+        messagesChatRef.current = `${accountId}:${chatId}`;
+        applyMessages(message, { preferIncoming: true });
         setChats((previous) =>
           previous.map((chat) =>
             chat.id === chatId
@@ -462,7 +500,7 @@ export function ChatsPage() {
         throw new Error(textError);
       }
     },
-    [selectedAccountId, selectedChatId],
+    [selectedAccountId, selectedChatId, applyMessages],
   );
 
   const forwardMessages = useCallback(
@@ -858,6 +896,52 @@ export function ChatsPage() {
     void loadMessages(selectedAccountId, selectedChatId, newerThanId);
   }, [selectedAccountId, selectedChatId, loadMessages]);
 
+  // One request per opened chat decorates every bot bubble with its run.
+  useEffect(() => {
+    if (selectedAccountId === null || selectedChatId === null) {
+      reasoningRef.current = new Map();
+      setReasoningByMessage(new Map());
+      return;
+    }
+    let active = true;
+    reasoningRef.current = new Map();
+    setReasoningByMessage(new Map());
+    listChatRuns(selectedAccountId, selectedChatId)
+      .then(({ runs }) => {
+        if (!active) return;
+        const next = new Map<number, MessageReasoningView>();
+        for (const run of runs) {
+          const reasoning = run.reasoning?.trim();
+          if (!reasoning || run.messageIds.length === 0) continue;
+          const messageId = Number(run.messageIds[run.messageIds.length - 1]);
+          if (!Number.isFinite(messageId) || next.has(messageId)) continue;
+          // A run can send several bubbles; the block goes under the last one.
+          next.set(messageId, {
+            runId: run.id,
+            reasoning,
+            bubbles: run.messageIds.length,
+            createdAt: run.createdAt,
+          });
+        }
+        // Keep a reasoning that arrived live while the request was in flight,
+        // but never let one run decorate two bubbles: the loaded mapping wins.
+        const runIds = new Set([...next.values()].map((value) => value.runId));
+        for (const [messageId, value] of reasoningRef.current) {
+          if (next.has(messageId) || runIds.has(value.runId)) continue;
+          next.set(messageId, value);
+          runIds.add(value.runId);
+        }
+        reasoningRef.current = next;
+        setReasoningByMessage(next);
+      })
+      .catch(() => {
+        // Reasoning is decorative: a failed request renders no blocks.
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedAccountId, selectedChatId]);
+
   // Realtime events are published to the shared bus by the app-wide socket.
   useEffect(() => {
     return subscribeRealtime(({ event, payload }) => {
@@ -866,13 +950,22 @@ export function ChatsPage() {
         if (data.accountId !== selectedAccountId) return;
         const message = data.message;
         // The autopilot emits ai.reply after sending the bubble. Telegram also
-        // reports it as message.new; dedupe by id so the bubble renders once.
-        if (data.chatId === selectedChatId) {
-          setMessages((previous) =>
-            previous.some((item) => item.id === message.id)
-              ? previous
-              : [message, ...previous],
-          );
+        // reports it as message.new; a slow TDLib send may carry a temporary id
+        // in one of the two events, so the merge matches by id *and* by a
+        // signature and moves the reasoning to the surviving bubble.
+        if (data.chatId === selectedChatId && selectedAccountId !== null) {
+          messagesChatRef.current = `${selectedAccountId}:${data.chatId}`;
+          const merged = applyMessages(message, { preferIncoming: true });
+          const canonicalId = merged.canonicalId ?? Number(message.id);
+          const reasoning = data.reasoning?.trim();
+          if (reasoning && Number.isFinite(canonicalId)) {
+            rememberReasoning(canonicalId, {
+              runId: data.runId,
+              reasoning,
+              bubbles: 1,
+              createdAt: new Date().toISOString(),
+            });
+          }
         }
         setChats((previous) =>
           previous.map((chat) =>
@@ -917,11 +1010,10 @@ export function ChatsPage() {
         }
 
         if (data.accountId !== selectedAccountId) return;
-        setMessages((previous) => {
-          if (data.chatId !== selectedChatId) return previous;
-          if (previous.some((item) => item.id === message.id)) return previous;
-          return [message, ...previous];
-        });
+        if (data.chatId === selectedChatId && selectedAccountId !== null) {
+          messagesChatRef.current = `${selectedAccountId}:${data.chatId}`;
+          applyMessages(message, { preferIncoming: true });
+        }
         setChats((previous) =>
           previous.map((chat) => {
             if (chat.id !== data.chatId) return chat;
@@ -944,11 +1036,10 @@ export function ChatsPage() {
         const data = payload as RealtimeMessageEvent;
         if (data.accountId !== selectedAccountId) return;
         const message = data.message;
-        setMessages((previous) =>
-          data.chatId === selectedChatId
-            ? previous.map((item) => (item.id === message.id ? message : item))
-            : previous,
-        );
+        if (data.chatId === selectedChatId && selectedAccountId !== null) {
+          messagesChatRef.current = `${selectedAccountId}:${data.chatId}`;
+          applyMessages(message, { preferIncoming: true });
+        }
         setChats((previous) =>
           previous.map((chat) =>
             chat.id === data.chatId && chat.lastMessage?.id === message.id
@@ -963,9 +1054,16 @@ export function ChatsPage() {
         const data = payload as RealtimeDeletedEvent;
         if (data.accountId !== selectedAccountId) return;
         if (data.chatId !== null && data.chatId === selectedChatId) {
-          setMessages((previous) =>
-            previous.filter((message) => !data.messageIds.includes(message.id)),
+          const deleted = new Set(data.messageIds.map(Number));
+          const nextMessages = messagesRef.current.filter(
+            (message) => !deleted.has(Number(message.id)),
           );
+          messagesRef.current = nextMessages;
+          setMessages(nextMessages);
+          const nextReasoning = new Map(reasoningRef.current);
+          for (const id of deleted) nextReasoning.delete(id);
+          reasoningRef.current = nextReasoning;
+          setReasoningByMessage(nextReasoning);
         }
         return;
       }
@@ -1002,7 +1100,7 @@ export function ChatsPage() {
         });
       }
     });
-  }, [selectedAccountId, selectedChatId]);
+  }, [selectedAccountId, selectedChatId, applyMessages, rememberReasoning]);
 
   // Drop expired "typing" indicators even if no cancel event arrives.
   useEffect(() => {
@@ -1137,6 +1235,7 @@ export function ChatsPage() {
             error={messagesError}
             nextOffsetId={nextOffsetId}
             loadingMore={loadingMore}
+            reasoningByMessage={reasoningByMessage}
             typing={chatTyping}
             onLoadMore={() => void loadMore()}
             onSend={(text, replyToId) => sendMessage(text, replyToId)}

@@ -94,6 +94,7 @@ export function Toggle({
         type="checkbox"
         checked={checked}
         disabled={disabled}
+        autoComplete="off"
         onChange={(event) => onChange(event.target.checked)}
         className="mt-0.5 h-3.5 w-3.5 accent-sky-500"
       />

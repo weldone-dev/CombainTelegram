@@ -30,11 +30,23 @@ import type {
   ChatView,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
-import { AiAccessSection } from "./ai-access-section";
 import { ChatAdminPanel } from "./chat-admin-panel";
+import { ChatAiTab } from "./chat-ai-tab";
 import { ChatAutomationsSection } from "./chat-automations-section";
+import { ChatLogsTab } from "./chat-logs-tab";
+import { ChatMemoryTab } from "./chat-memory-tab";
+import { ChatSkillsTab } from "./chat-skills-tab";
 
-type InfoTab = "overview" | ChatInfoMediaKind | "similar" | "admin";
+type InfoTab =
+  | "overview"
+  | "ai"
+  | "memory"
+  | "skills"
+  | "automations"
+  | ChatInfoMediaKind
+  | "logs"
+  | "similar"
+  | "admin";
 
 interface SectionState {
   items: ChatInfoMediaItemView[];
@@ -102,6 +114,7 @@ export function ChatInfoPanel({
   onClose,
   showReasoning,
   onToggleReasoning,
+  threadId = 0,
 }: {
   accountId: string;
   chat: ChatView;
@@ -112,6 +125,8 @@ export function ChatInfoPanel({
   /** Local-only reasoning preference, stored per account in localStorage. */
   showReasoning?: boolean;
   onToggleReasoning?: (next: boolean) => void;
+  /** Forum topic or comment thread; `0` = the chat as a whole. */
+  threadId?: number;
 }) {
   const chatId = chat.id;
   const [info, setInfo] = useState<ChatInfoView | null>(null);
@@ -259,9 +274,14 @@ export function ChatInfoPanel({
   const username = info?.username ?? chat.username;
   const tabs: Array<{ id: InfoTab; label: string }> = [
     { id: "overview", label: "Обзор" },
+    { id: "ai", label: "Доступ ИИ" },
+    { id: "memory", label: "Память" },
+    { id: "skills", label: "Скиллы" },
+    { id: "automations", label: "Автоматизации" },
     { id: "media", label: "Медиа" },
     { id: "links", label: "Ссылки" },
     { id: "polls", label: "Опросы" },
+    { id: "logs", label: "Логи" },
   ];
   if (similar && similar.length > 0) {
     tabs.push({ id: "similar", label: "Похожие" });
@@ -390,7 +410,6 @@ export function ChatInfoPanel({
                     });
                 }}
               />
-              <AiAccessSection accountId={accountId} chatId={chatId} />
               <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3 text-xs">
                 <input
                   type="checkbox"
@@ -400,6 +419,7 @@ export function ChatInfoPanel({
                     onToggleReasoning?.(event.target.checked)
                   }
                   className="mt-0.5 h-3.5 w-3.5 accent-sky-500"
+                  autoComplete="off"
                 />
                 <span>
                   <span className="block font-medium text-zinc-200">
@@ -411,8 +431,35 @@ export function ChatInfoPanel({
                   </span>
                 </span>
               </label>
-              <ChatAutomationsSection accountId={accountId} chatId={chatId} />
             </div>
+          )}
+
+          {tab === "ai" && (
+            <ChatAiTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
+            />
+          )}
+
+          {tab === "memory" && (
+            <ChatMemoryTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
+            />
+          )}
+
+          {tab === "skills" && (
+            <ChatSkillsTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
+            />
+          )}
+
+          {tab === "automations" && (
+            <ChatAutomationsSection accountId={accountId} chatId={chatId} />
           )}
 
           {tab === "media" && (
@@ -441,6 +488,14 @@ export function ChatInfoPanel({
               onLoadMore={() =>
                 void loadSection("polls", sections.polls.nextOffsetId)
               }
+            />
+          )}
+
+          {tab === "logs" && (
+            <ChatLogsTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
             />
           )}
 

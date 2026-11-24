@@ -137,6 +137,7 @@ export function AiAccessActionItems({
             placeholder="Причина (необязательно)"
             aria-label="Причина блокировки ИИ"
             className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-red-500 focus:outline-none"
+            autoComplete="off"
           />
           <div className="flex gap-1.5">
             <button

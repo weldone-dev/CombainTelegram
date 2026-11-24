@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AccountsModule } from '../accounts/accounts.module.js';
 import { AiAccessModule } from '../ai-access/ai-access.module.js';
+import { AiChatModule } from '../ai-chat/ai-chat.module.js';
 import { MessagingModule } from '../messaging/messaging.module.js';
 import { RealtimeModule } from '../realtime/realtime.module.js';
 import { TelegramModule } from '../telegram/telegram.module.js';
@@ -32,6 +33,12 @@ import { McpController } from '../mcp/mcp.controller.js';
  * All services live in one module because they share the tool registry and the
  * agent; keeping them together avoids circular imports between "read" and
  * "act" sides of the AI layer.
+ *
+ * `AiChatModule` is imported for `AiChatSkillsService`: the autopilot resolves
+ * the per-chat/topic skill override through it. The account-aware policy
+ * (`AiAccountModule`) is not imported here — that module imports this one, so a
+ * regular import would be a cycle; it is `@Global()` instead (like
+ * `AiAccessModule`) and its exports reach `AgentToolsService` app-wide.
  */
 @Module({
   imports: [
@@ -41,6 +48,7 @@ import { McpController } from '../mcp/mcp.controller.js';
     RealtimeModule,
     SpeechModule,
     AiAccessModule,
+    AiChatModule,
   ],
   controllers: [
     AiController,

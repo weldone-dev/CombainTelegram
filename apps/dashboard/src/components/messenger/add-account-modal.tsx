@@ -587,6 +587,7 @@ export function AddAccountModal({
                         onChange={(event) =>
                           handleNewDeviceChange(event.target.checked)
                         }
+                        autoComplete="off"
                       />
                       Новое устройство (добавить сессию)
                     </label>
@@ -671,6 +672,11 @@ export function AddAccountModal({
                     onChange={(event) => setPhone(event.target.value)}
                     placeholder="+1 555 000 1234"
                     inputMode="tel"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    name="ct-login-phone"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <button
@@ -711,7 +717,11 @@ export function AddAccountModal({
                     onChange={(event) => setCode(event.target.value)}
                     placeholder="12345"
                     inputMode="numeric"
-                    autoComplete="one-time-code"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    name="ct-login-code"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <div className="flex gap-2">
@@ -747,7 +757,11 @@ export function AddAccountModal({
                     value={phonePassword}
                     onChange={(event) => setPhonePassword(event.target.value)}
                     placeholder="Пароль"
-                    autoComplete="current-password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    name="ct-login-phone-password"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <div className="flex gap-2">
@@ -867,7 +881,11 @@ export function AddAccountModal({
                         value={qrPassword}
                         onChange={(event) => setQrPassword(event.target.value)}
                         placeholder="Пароль двухэтапной проверки"
-                        autoComplete="current-password"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        name="ct-login-qr-password"
                         className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                       />
                       <button
@@ -942,12 +960,18 @@ export function AddAccountModal({
                       setError(null);
                     }}
                     className="block w-full text-sm text-zinc-400 file:mr-3 file:rounded-md file:border file:border-zinc-700 file:bg-zinc-800 file:px-3 file:py-1.5 file:text-sm file:text-zinc-200"
+                    autoComplete="off"
                   />
                   <input
                     type="password"
                     value={tdataPasscode}
                     onChange={(event) => setTdataPasscode(event.target.value)}
                     placeholder="Пароль папки (необязательно)"
+                    autoComplete="off"
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    name="ct-tdata-passcode"
                     className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                   />
                   <button
@@ -985,6 +1009,7 @@ export function AddAccountModal({
                           type="checkbox"
                           checked={selectedIndexes.includes(entry.index)}
                           onChange={() => toggleSelectedIndex(entry.index)}
+                          autoComplete="off"
                         />
                         <span>
                           Аккаунт #{entry.index} · id {entry.userId}
@@ -999,6 +1024,7 @@ export function AddAccountModal({
                         type="checkbox"
                         checked={reuseMode}
                         onChange={(event) => setReuseMode(event.target.checked)}
+                        autoComplete="off"
                       />
                       <span>
                         Использовать сессию Telegram Desktop (дополнительно). По
@@ -1031,6 +1057,11 @@ export function AddAccountModal({
                           setTdataPassword(event.target.value)
                         }
                         placeholder="Пароль Telegram (2FA)"
+                        autoComplete="off"
+                        spellCheck={false}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        name="ct-tdata-password"
                         className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
                       />
                       <span className="mt-1 block text-[11px] text-zinc-500">

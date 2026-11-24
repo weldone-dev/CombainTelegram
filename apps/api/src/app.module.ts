@@ -5,6 +5,7 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AccountsModule } from './accounts/accounts.module.js';
 import { AiModule } from './ai/ai.module.js';
+import { AiAccountModule } from './ai-account/ai-account.module.js';
 import { AiProvidersModule } from './ai-providers/ai-providers.module.js';
 import { AiAccessModule } from './ai-access/ai-access.module.js';
 import { AuthModule } from './auth/auth.module.js';
@@ -36,6 +37,7 @@ import { UserContextModule } from './user-context/user-context.module.js';
     PushModule,
     AiProvidersModule,
     AiModule,
+    AiAccountModule,
     AiAccessModule,
   ],
   controllers: [AppController],

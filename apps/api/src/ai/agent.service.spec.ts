@@ -53,7 +53,7 @@ function harness(
       source: 'database' as const,
     })),
   };
-  const llm = { chat: vi.fn() };
+  const llm = { chat: vi.fn(), chatStream: vi.fn() };
   const souls = {
     model: vi.fn(async () => null),
     get: vi.fn(async () => null),
@@ -212,6 +212,69 @@ describe('AgentService.run', () => {
       expect.objectContaining({ tool: 'accounts_list', step: 0 }),
     ]);
     expect(data.finishedAt).toBeInstanceOf(Date);
+  });
+
+  it('streams reasoning deltas and still persists the full reasoning', async () => {
+    const h = harness();
+    const deltas: string[] = [];
+    h.llm.chatStream
+      .mockImplementationOnce(
+        async (
+          _request: unknown,
+          handlers: { onReasoningDelta?: (text: string) => void },
+        ) => {
+          handlers.onReasoningDelta?.('Первый шаг. ');
+          return reply({
+            toolCalls: [TOOL_CALL],
+            reasoning: 'Первый шаг.',
+            usage: { promptTokens: 2, completionTokens: 1 },
+          });
+        },
+      )
+      .mockImplementationOnce(
+        async (
+          _request: unknown,
+          handlers: { onReasoningDelta?: (text: string) => void },
+        ) => {
+          handlers.onReasoningDelta?.('Второй шаг.');
+          return reply({
+            content: 'Готово',
+            reasoning: 'Второй шаг.',
+            usage: { promptTokens: 3, completionTokens: 4 },
+          });
+        },
+      );
+
+    const result = await h.service.run({
+      ...input,
+      onReasoningDelta: (text) => deltas.push(text),
+    });
+
+    expect(h.llm.chat).not.toHaveBeenCalled();
+    expect(h.llm.chatStream).toHaveBeenCalledTimes(2);
+    // One streamed round per tool round, and no callback for tool names/args.
+    expect(deltas).toEqual(['Первый шаг. ', 'Второй шаг.']);
+    expect(result.text).toBe('Готово');
+    expect(result.reasoning).toBe('Первый шаг.\n\nВторой шаг.');
+    expect(result.usage).toEqual({ promptTokens: 5, completionTokens: 5 });
+    expect(result.trace[0]).toMatchObject({ tool: 'accounts_list' });
+    expect(updatedData(h.prisma)).toMatchObject({
+      status: 'ok',
+      reasoning: 'Первый шаг.\n\nВторой шаг.',
+    });
+  });
+
+  it('reports the run id before the first round', async () => {
+    const h = harness();
+    h.llm.chat.mockResolvedValue(reply({ content: 'Hi' }));
+    const started: string[] = [];
+
+    await h.service.run({
+      ...input,
+      onRunStart: (runId) => started.push(runId),
+    });
+
+    expect(started).toEqual(['run-1']);
   });
 
   it('records the model reasoning', async () => {
@@ -411,5 +474,43 @@ describe('AgentService.run', () => {
         function: { name: 'x', arguments: 'not json' },
       }),
     ).toEqual({ __raw: 'not json' });
+  });
+
+  it('replaces the soul skill set when the caller asks for it', async () => {
+    const withSoul = () => {
+      const h = harness();
+      h.llm.chat.mockResolvedValue(reply({ content: 'ok' }));
+      h.souls.get.mockResolvedValue({
+        id: 'soul-1',
+        accountId: 'account-1',
+        skills: [{ slug: 'soul-skill' }],
+      } as never);
+      h.souls.model.mockResolvedValue({
+        id: 'soul-1',
+        model: null,
+        temperature: 0.7,
+      } as never);
+      return h;
+    };
+
+    const replaced = withSoul();
+    await replaced.service.run({
+      ...input,
+      accountId: 'account-1',
+      skillSlugs: ['chat-skill'],
+      replaceSoulSkills: true,
+    });
+    expect(replaced.skills.instructions).toHaveBeenCalledWith(['chat-skill']);
+
+    const extended = withSoul();
+    await extended.service.run({
+      ...input,
+      accountId: 'account-1',
+      skillSlugs: ['chat-skill'],
+    });
+    expect(extended.skills.instructions).toHaveBeenCalledWith([
+      'chat-skill',
+      'soul-skill',
+    ]);
   });
 });

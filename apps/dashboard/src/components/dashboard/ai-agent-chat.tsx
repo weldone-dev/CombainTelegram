@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type AgentSettings,
   type AgentTraceEntry,
   aiErrorMessage,
   chatWithAi,
+  getAiTools,
+  type ToolInfo,
 } from "../../lib/ai-api";
-import { accountName } from "../../lib/format";
-import { useAppData } from "./app-data";
 
 interface ChatMessage {
   id: string;
@@ -34,24 +34,64 @@ function traceTitle(entry: AgentTraceEntry): string {
   return [entry.tool, ...details, args].filter(Boolean).join(" · ");
 }
 
+/**
+ * Areas the global agent can work with. Labels are derived from the tools the
+ * API actually exposes (`GET /ai/tools`), so the header never advertises a
+ * capability the agent lacks.
+ */
+const CAPABILITY_GROUPS: Array<{ label: string; match: RegExp | null }> = [
+  { label: "аккаунты", match: /^(accounts?|chats?|messages?|chat|ai_access)_/ },
+  { label: "души", match: /^(souls?|memory)_/ },
+  { label: "навыки", match: /^skills?_/ },
+  { label: "MCP", match: null },
+  { label: "логи", match: /^logs_/ },
+  { label: "автоматизации", match: /^automations?_/ },
+];
+
+function capabilityLabels(
+  tools: ToolInfo[] | null,
+  mcpEnabled: boolean,
+): string[] {
+  if (!tools) return [];
+  return CAPABILITY_GROUPS.filter((group) =>
+    group.match
+      ? tools.some((tool) => group.match?.test(tool.name))
+      : mcpEnabled,
+  ).map((group) => group.label);
+}
+
 export function AgentChatPanel({
   settings,
 }: {
   settings: AgentSettings | null;
 }) {
-  const { accounts } = useAppData();
-  const [accountId, setAccountId] = useState("");
-  const [chatId, setChatId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tools, setTools] = useState<ToolInfo[] | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  const parsedChatId = Number(chatId.trim());
-  const chatIdValid =
-    chatId.trim() === "" ||
-    (Number.isSafeInteger(parsedChatId) && parsedChatId !== 0);
+  const capabilities = useMemo(
+    () => capabilityLabels(tools, Boolean(settings?.mcp.endpoint)),
+    [tools, settings?.mcp.endpoint],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    getAiTools()
+      .then((response) => {
+        if (!cancelled) setTools(response.tools);
+      })
+      .catch(() => {
+        // The capability line is informational: a failure here must not block
+        // the chat itself.
+        if (!cancelled) setTools([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll when transcript or busy state changes
   useEffect(() => {
@@ -61,10 +101,6 @@ export function AgentChatPanel({
   const send = async () => {
     const prompt = input.trim();
     if (!prompt || busy) return;
-    if (!chatIdValid) {
-      setError("Chat id — только целое число (например 123456789) или пусто");
-      return;
-    }
     setError(null);
     setBusy(true);
     const userMessage: ChatMessage = {
@@ -83,12 +119,7 @@ export function AgentChatPanel({
     setMessages((previous) => [...previous, userMessage]);
     setInput("");
     try {
-      const reply = await chatWithAi({
-        prompt,
-        accountId: accountId || null,
-        chatId: chatId.trim() === "" ? null : parsedChatId,
-        messages: history,
-      });
+      const reply = await chatWithAi({ prompt, messages: history });
       setMessages((previous) => [
         ...previous,
         {
@@ -106,39 +137,24 @@ export function AgentChatPanel({
     }
   };
 
-  const canSend = Boolean(input.trim()) && !busy && chatIdValid;
+  const canSend = Boolean(input.trim()) && !busy;
 
   return (
     <div className="flex min-h-[420px] min-w-0 flex-1 flex-col rounded-xl border border-zinc-800 bg-zinc-900/60">
-      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-2">
-        <select
-          value={accountId}
-          onChange={(event) => setAccountId(event.target.value)}
-          aria-label="Аккаунт для запроса"
-          className="min-w-0 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30"
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-zinc-800 px-3 py-2">
+        <span className="text-[11px] font-medium text-zinc-300">
+          Единый агент
+        </span>
+        <span
+          className="min-w-0 text-[11px] text-zinc-500"
+          title="Список собран из инструментов, которые реально отдаёт GET /ai/tools"
         >
-          <option value="">Все аккаунты</option>
-          {accounts.map((account) => (
-            <option key={account.id} value={account.id}>
-              {accountName(account)}
-            </option>
-          ))}
-        </select>
-        <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-zinc-500">
-          <span className="shrink-0">Chat id</span>
-          <input
-            value={chatId}
-            onChange={(event) => setChatId(event.target.value)}
-            inputMode="numeric"
-            placeholder="необязательно"
-            aria-invalid={!chatIdValid}
-            className={`w-32 min-w-0 rounded-md border bg-zinc-800 px-2 py-1 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:ring-2 focus:ring-sky-500/30 ${
-              chatIdValid
-                ? "border-zinc-700 focus:border-sky-500"
-                : "border-red-700 focus:border-red-500"
-            }`}
-          />
-        </label>
+          {tools === null
+            ? "проверяю доступ…"
+            : capabilities.length > 0
+              ? `полный доступ: ${capabilities.join(", ")}`
+              : "инструменты недоступны — проверьте настройки AI"}
+        </span>
         <span className="text-[11px] text-zinc-500">
           {settings
             ? settings.dryRun
@@ -160,20 +176,22 @@ export function AgentChatPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
-        {!chatIdValid && (
-          <p className="rounded-md border border-red-900/60 bg-red-950/30 px-2 py-1.5 text-[11px] text-red-300">
-            Chat id должен быть целым числом или пустым.
-          </p>
-        )}
         {messages.length === 0 && (
           <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4 text-sm text-zinc-400">
-            <p className="mb-2 font-medium text-zinc-200">
-              Спросите агента или попросите настроить
+            <p className="mb-1 font-medium text-zinc-200">
+              Один агент на всё приложение
+            </p>
+            <p className="mb-2 text-xs">
+              У него полный доступ к приложению — без привязки к аккаунту или
+              чату: аккаунты, души и память, навыки, автоматизации, MCP-серверы
+              и логи. Он сам находит нужный аккаунт и чат по названию, юзернейму
+              или id.
             </p>
             <ul className="list-disc space-y-1 pl-4 text-xs">
-              <li>«Создай душу для этого аккаунта: спокойный, ироничный»</li>
+              <li>«Покажи все аккаунты и последние ошибки из логов»</li>
+              <li>«Создай душу для аккаунта @…»: спокойный, ироничный</li>
               <li>«Покажи последние 5 сообщений в чате …»</li>
-              <li>«Сделай скилл для ответов клиентам и привяжи к душе»</li>
+              <li>«Сделай навык для ответов клиентам и привяжи к душе»</li>
               <li>«Настрой автоматизацию: каждое утро сводка по чатам»</li>
             </ul>
           </div>
@@ -266,8 +284,9 @@ export function AgentChatPanel({
           }}
           rows={2}
           aria-label="Сообщение агенту"
-          placeholder="Напишите задачу агенту… Enter — отправить, Shift+Enter — новая строка"
+          placeholder="Напишите задачу агенту — он видит все аккаунты, души, навыки, автоматизации и логи. Enter — отправить, Shift+Enter — новая строка"
           className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30"
+          autoComplete="off"
         />
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           <span className="text-[11px] text-zinc-500">

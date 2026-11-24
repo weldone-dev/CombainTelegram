@@ -10,6 +10,7 @@ import type { LogInput } from '../logs/log-sink.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import {
   SpeechService,
+  parseSttSelection,
   parseWhisperJson,
   planChunks,
   readWavSamples,
@@ -177,6 +178,7 @@ beforeEach(() => {
   }
   vi.stubEnv('STT_ENGINE', 'whisper');
   vi.stubEnv('STT_REMOTE', 'off');
+  vi.stubEnv('STT_LOCAL_FALLBACK', '');
   vi.stubEnv('WHISPER_BIN', 'whisper-cli');
   vi.stubEnv('WHISPER_MODEL', join(workdir, 'ggml-small.bin'));
   vi.stubEnv('PARAKEET_MODEL_DIR', join(workdir, 'missing-parakeet'));
@@ -449,7 +451,7 @@ describe('SpeechService.transcribe (parakeet engine)', () => {
     expect(fake.samples).toEqual([8000, 16_000, 8000, 16_000]);
   });
 
-  it('falls back to whisper when parakeet cannot start (auto)', async () => {
+  it('stays on the local engine when parakeet cannot start (auto → local)', async () => {
     vi.stubEnv('STT_ENGINE', 'auto');
     vi.stubEnv('PARAKEET_MODEL_DIR', join(workdir, 'parakeet'));
     mockReads(
@@ -463,12 +465,9 @@ describe('SpeechService.transcribe (parakeet engine)', () => {
 
     const result = await service.transcribe(INPUT);
 
-    expect(result?.text).toBe('из виспера');
-    expect(execCalls.map((call) => call.file)).toEqual([
-      'ffmpeg',
-      'whisper-cli',
-    ]);
-    expect(service.available()).toBe(true); // whisper still works
+    // `auto` with STT_REMOTE=off maps to `local`, which never uses whisper.
+    expect(result).toBeNull();
+    expect(execCalls.map((call) => call.file)).toEqual(['ffmpeg']);
   });
 });
 
@@ -672,23 +671,25 @@ describe('SpeechService remote engine', () => {
     expect((post as { headers?: unknown }).headers).toEqual({});
   });
 
-  it('keeps the remote engine off when the settings disable it', async () => {
+  it('returns null when the settings disable speech-to-text', async () => {
+    vi.stubEnv('STT_ENGINE', '');
     const service = new SpeechService(
       prismaWith({
         sttEngine: 'disabled',
         sttBaseUrl: 'https://stt.example/v1',
-        sttModel: 'whisper-1',
+        sttModel: 'parakeet-tdt-0.6b-v3',
         sttApiKey: null,
       }),
     );
 
     const result = await service.transcribe(INPUT);
 
-    expect(result?.text).toBe('из виспера');
+    expect(result).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('skips the remote engine for a minute after a failed health probe', async () => {
+  it('does not fall back locally after a failed health probe', async () => {
     const service = new SpeechService(prismaWith(null));
     respond({ health: false });
 
@@ -697,17 +698,16 @@ describe('SpeechService remote engine', () => {
 
     expect(urls().filter((url) => url.endsWith('/health'))).toHaveLength(1);
     expect(urls().some((url) => url.includes('transcriptions'))).toBe(false);
-    expect(execCalls.filter((call) => call.file === 'whisper-cli')).toHaveLength(
-      2,
-    );
+    // Remote-only by default: a dead LXC must be visible, not masked.
+    expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('falls back to whisper when the transcription request fails', async () => {
+  it('does not fail over to a local engine by default', async () => {
     const service = new SpeechService(
       prismaWith({
         sttEngine: 'openai-compatible',
         sttBaseUrl: 'https://stt.example/v1',
-        sttModel: 'whisper-1',
+        sttModel: 'parakeet-tdt-0.6b-v3',
         sttApiKey: null,
       }),
     );
@@ -715,17 +715,36 @@ describe('SpeechService remote engine', () => {
 
     const result = await service.transcribe(INPUT);
 
-    expect(result?.text).toBe('из виспера');
-    expect(execCalls.map((call) => call.file)).toContain('whisper-cli');
+    expect(result).toBeNull();
+    expect(execCalls.map((call) => call.file)).not.toContain('whisper-cli');
   });
 
-  it('falls back to a local engine when the remote returns no text', async () => {
+  it('returns null when the remote endpoint returns no text', async () => {
     const service = new SpeechService(prismaWith(null));
     respond({ text: '   ' });
 
     const result = await service.transcribe(INPUT);
 
+    expect(result).toBeNull();
+  });
+
+  it('restores the local chain only with STT_LOCAL_FALLBACK=on', async () => {
+    vi.stubEnv('STT_LOCAL_FALLBACK', 'on');
+    const service = new SpeechService(
+      prismaWith({
+        sttEngine: 'remote',
+        sttBaseUrl: 'https://stt.example/v1',
+        sttModel: 'parakeet-tdt-0.6b-v3',
+        sttApiKey: null,
+      }),
+    );
+    respond({ post: new Error('remote is down') });
+
+    const result = await service.transcribe(INPUT);
+
+    // Parakeet is not installed in this sandbox, so whisper is the last resort.
     expect(result?.text).toBe('из виспера');
+    expect(execCalls.map((call) => call.file)).toContain('whisper-cli');
   });
 });
 
@@ -814,7 +833,7 @@ describe('SpeechService engine selection from AiSetting', () => {
     expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('row "parakeet" skips the remote probe and decodes locally', async () => {
+  it('row "parakeet" maps to local and skips the remote probe', async () => {
     vi.stubEnv('PARAKEET_MODEL_DIR', join(workdir, 'parakeet'));
     mockReads('{}', WAV);
     const fake = parakeetFake();
@@ -831,17 +850,34 @@ describe('SpeechService engine selection from AiSetting', () => {
     expect(execCalls.every((call) => call.file === 'ffmpeg')).toBe(true);
   });
 
-  it('row "whisper" uses only the CLI', async () => {
-    mockReads('{"text":"из виспера"}');
+  it('row "local" uses Parakeet only', async () => {
+    vi.stubEnv('PARAKEET_MODEL_DIR', join(workdir, 'parakeet'));
+    mockReads('{}', WAV);
+    const fake = parakeetFake();
     const service = new SpeechService(
-      prismaWith({ sttEngine: 'whisper', sttApiKey: null }),
+      prismaWith({ sttEngine: 'local', sttApiKey: null }),
     );
+    service.setParakeetLoader(fake.loader);
 
     const result = await service.transcribe(INPUT);
 
-    expect(result?.text).toBe('из виспера');
+    expect(result?.text).toBe('местный движок');
     expect(httpFetch).not.toHaveBeenCalled();
-    expect(execCalls.map((call) => call.file)).toContain('whisper-cli');
+    // Never reaches for whisper, even though it is installed here.
+    expect(execCalls.map((call) => call.file)).not.toContain('whisper-cli');
+  });
+
+  it('never selects whisper from the stored row', async () => {
+    const service = new SpeechService(
+      prismaWith({ sttEngine: 'whisper', sttApiKey: null }),
+    );
+    respond();
+
+    const result = await service.transcribe(INPUT);
+
+    // A legacy whisper row is treated like `auto` → remote here.
+    expect(result?.text).toBe('из сети');
+    expect(execCalls.map((call) => call.file)).not.toContain('whisper-cli');
   });
 
   it('row "disabled" turns transcription off', async () => {
@@ -856,7 +892,7 @@ describe('SpeechService engine selection from AiSetting', () => {
     expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('row "auto" keeps the remote → parakeet → whisper chain', async () => {
+  it('row "auto" maps to the remote endpoint when configured', async () => {
     const service = new SpeechService(
       prismaWith({ sttEngine: 'auto', sttApiKey: null }),
     );
@@ -865,9 +901,11 @@ describe('SpeechService engine selection from AiSetting', () => {
     const result = await service.transcribe(INPUT);
 
     expect(result?.text).toBe('из сети');
+    // No local failover behind the legacy chain.
+    expect(execFile).not.toHaveBeenCalled();
   });
 
-  it('treats an unknown stored engine (openai-compatible) as auto', async () => {
+  it('treats an unknown stored engine (openai-compatible) as remote', async () => {
     const service = new SpeechService(
       prismaWith({ sttEngine: 'openai-compatible', sttApiKey: null }),
     );
@@ -889,22 +927,68 @@ describe('SpeechService engine selection from AiSetting', () => {
 
     const result = await service.transcribe(INPUT);
 
+    // Whisper remains reachable through the old env path only.
     expect(result?.text).toBe('из виспера');
     expect(fake.loader).not.toHaveBeenCalled();
     expect(httpFetch).not.toHaveBeenCalled();
   });
 
-  it('STT_REMOTE=off still removes the remote engine from row "auto"', async () => {
+  it('maps legacy STT_ENGINE names from the environment', async () => {
+    // `parakeet` → local.
+    vi.stubEnv('STT_ENGINE', 'parakeet');
+    vi.stubEnv('PARAKEET_MODEL_DIR', join(workdir, 'parakeet'));
+    mockReads('{}', WAV);
+    const fake = parakeetFake('через env');
+    const service = new SpeechService(prismaWith(null));
+    service.setParakeetLoader(fake.loader);
+
+    await expect(service.transcribe(INPUT)).resolves.toMatchObject({
+      text: 'через env',
+    });
+    expect(httpFetch).not.toHaveBeenCalled();
+
+    // `auto` → remote while the endpoint is configured.
+    vi.stubEnv('STT_ENGINE', 'auto');
+    vi.stubEnv('STT_REMOTE', 'on');
+    respond();
+    const remote = new SpeechService(prismaWith(null));
+    await expect(remote.transcribe(INPUT)).resolves.toMatchObject({
+      text: 'из сети',
+    });
+  });
+
+  it('STT_REMOTE=off maps a legacy "auto" row to local Parakeet', async () => {
     vi.stubEnv('STT_REMOTE', 'off');
-    mockReads('{"text":"только локально"}');
+    vi.stubEnv('PARAKEET_MODEL_DIR', join(workdir, 'parakeet'));
+    mockReads('{}', WAV);
+    const fake = parakeetFake('только локально');
     const service = new SpeechService(
       prismaWith({ sttEngine: 'auto', sttApiKey: null }),
     );
+    service.setParakeetLoader(fake.loader);
 
     const result = await service.transcribe(INPUT);
 
     expect(result?.text).toBe('только локально');
     expect(httpFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseSttSelection', () => {
+  it('maps legacy stored values onto remote, local and disabled', () => {
+    expect(parseSttSelection('auto', true)).toBe('remote');
+    expect(parseSttSelection('auto', false)).toBe('local');
+    expect(parseSttSelection('parakeet', true)).toBe('local');
+    expect(parseSttSelection('local')).toBe('local');
+    expect(parseSttSelection('remote')).toBe('remote');
+    expect(parseSttSelection('disabled')).toBe('disabled');
+    // Whisper is not a selectable engine: a persisted row falls back.
+    expect(parseSttSelection('whisper', true)).toBe('remote');
+    expect(parseSttSelection('whisper', false)).toBe('local');
+    // Empty/unknown values use the same default mapping.
+    expect(parseSttSelection(null, true)).toBe('remote');
+    expect(parseSttSelection('', false)).toBe('local');
+    expect(parseSttSelection(' Disabled ')).toBe('disabled');
   });
 });
 

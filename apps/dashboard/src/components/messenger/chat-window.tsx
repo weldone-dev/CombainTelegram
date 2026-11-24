@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { listChatRuns } from "../../lib/ai-api";
 import { errorMessage, mediaUrl } from "../../lib/api";
 import { chatAvatarUrl } from "../../lib/avatar";
 import { copyToClipboard } from "../../lib/clipboard";
@@ -30,9 +29,11 @@ import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
   AccountView,
   AiReplyEvent,
+  AiThinkingEvent,
   ChatView,
   MessagePollView,
   MessageReactionView,
+  MessageReasoningView,
   MessageTranscriptionView,
   MessageView,
   RealtimeMessageEvent,
@@ -47,6 +48,7 @@ import { CommentThreadDrawer } from "./comment-thread-drawer";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
 import { ReasoningBlock } from "./reasoning-block";
+import { ThinkingStrip } from "./thinking-strip";
 import { VoiceBubble } from "./voice-bubble";
 
 /** Emoji offered by the inline reaction picker. */
@@ -113,15 +115,6 @@ function applyReactionChange(
   return [...cleared, { emoji, count: 1, chosen: true }];
 }
 
-/** Reasoning of one agent run attached to the bubble it produced. */
-interface MessageReasoning {
-  runId: string;
-  reasoning: string;
-  /** How many Telegram bubbles the run produced (the block sits under the last). */
-  bubbles: number;
-  createdAt: string;
-}
-
 export function ChatWindow({
   account,
   chat,
@@ -131,6 +124,7 @@ export function ChatWindow({
   error,
   nextOffsetId,
   loadingMore,
+  reasoningByMessage,
   typing,
   onLoadMore,
   onSend,
@@ -154,6 +148,8 @@ export function ChatWindow({
   error: string | null;
   nextOffsetId: number | null;
   loadingMore: boolean;
+  /** Local-only run reasoning, already merged onto the canonical bubble ids. */
+  reasoningByMessage: Map<number, MessageReasoningView>;
   typing: TypingEntry[];
   onLoadMore: () => void;
   onSend: (text: string, replyToId?: number) => Promise<void>;
@@ -201,10 +197,19 @@ export function ChatWindow({
   const [infoOpen, setInfoOpen] = useState(false);
   const [threadFor, setThreadFor] = useState<MessageView | null>(null);
   const [aiMenu, setAiMenu] = useState<{ x: number; y: number } | null>(null);
-  const [runReasoning, setRunReasoning] = useState<
-    Map<number, MessageReasoning>
-  >(() => new Map());
   const [showReasoning, setShowReasoning] = useState(true);
+  const [thinking, setThinking] = useState<{
+    runId: string;
+    text: string;
+    phase: "streaming" | "waiting";
+  } | null>(null);
+  const thinkingDeadlineRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const thinkingRef = useRef(thinking);
+  thinkingRef.current = thinking;
+  const reasoningRef = useRef(reasoningByMessage);
+  reasoningRef.current = reasoningByMessage;
   const { error: aiError, statusFor } = useAiAccess();
   const [threadCounts, setThreadCounts] = useState<Map<number, number>>(
     () => new Map(),
@@ -254,6 +259,119 @@ export function ChatWindow({
   const accountId = account?.id ?? null;
   const chatId = chat?.id ?? null;
 
+  const clearThinking = useCallback(() => {
+    if (thinkingDeadlineRef.current) {
+      clearTimeout(thinkingDeadlineRef.current);
+      thinkingDeadlineRef.current = null;
+    }
+    thinkingRef.current = null;
+    setThinking(null);
+  }, []);
+
+  // `done` only means the reasoning is complete; the answer is still being
+  // generated (and may run more tool rounds). The safety deadline therefore
+  // covers the whole run up to the answer, not one reasoning event.
+  const armThinkingDeadline = useCallback(() => {
+    if (thinkingDeadlineRef.current) {
+      clearTimeout(thinkingDeadlineRef.current);
+    }
+    thinkingDeadlineRef.current = setTimeout(() => {
+      thinkingDeadlineRef.current = null;
+      setThinking(null);
+    }, 180_000);
+  }, []);
+
+  // Never show a stream from another chat or account.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: account/chat are the reset triggers
+  useEffect(() => {
+    clearThinking();
+  }, [accountId, chatId, clearThinking]);
+
+  useEffect(() => {
+    return () => {
+      if (thinkingDeadlineRef.current)
+        clearTimeout(thinkingDeadlineRef.current);
+    };
+  }, []);
+
+  // Local-only reasoning stream of the selected chat. Other accounts/chats and
+  // stale run ids are ignored; switching chat clears the buffer.
+  useEffect(() => {
+    if (!accountId || !chatId) return;
+    return subscribeRealtime(({ event, payload }) => {
+      // The answer is the only event that ends the strip: `done` means the
+      // reasoning finished, not that the model is ready.
+      if (event === "ai.reply") {
+        const data = payload as AiReplyEvent;
+        if (data.accountId !== accountId || data.chatId !== chatId) return;
+        if (thinkingRef.current?.runId === data.runId) clearThinking();
+        return;
+      }
+
+      if (event === "message.new") {
+        const data = payload as RealtimeMessageEvent;
+        if (data.accountId !== accountId || data.chatId !== chatId) return;
+        const active = thinkingRef.current;
+        if (!active || !data.message.outgoing) return;
+        const mappedRun = reasoningRef.current.get(
+          Number(data.message.id),
+        )?.runId;
+        // If the bubble is already known to belong to another run, keep the
+        // current strip; otherwise an outgoing bubble is the awaited answer.
+        if (mappedRun && mappedRun !== active.runId) return;
+        clearThinking();
+        return;
+      }
+
+      if (event !== "ai.thinking") return;
+      const data = payload as AiThinkingEvent;
+      if (data.accountId !== accountId || data.chatId !== chatId) return;
+
+      if (data.phase === "start") {
+        // A new tool round of the same run replaces the previous round's text
+        // (no separator) and returns the strip to «Агент думает…».
+        const next = {
+          runId: data.runId,
+          text: "",
+          phase: "streaming" as const,
+        };
+        thinkingRef.current = next;
+        setThinking(next);
+        armThinkingDeadline();
+        return;
+      }
+
+      if (data.phase === "done") {
+        const active = thinkingRef.current;
+        if (!active || active.runId !== data.runId) return;
+        const next = {
+          runId: data.runId,
+          text: data.reasoning?.trim() || active.text,
+          phase: "waiting" as const,
+        };
+        thinkingRef.current = next;
+        setThinking(next);
+        armThinkingDeadline();
+        return;
+      }
+
+      if (typeof data.delta !== "string") return;
+      // `delta` is a fragment accumulated since the previous emit; each event
+      // appends to the local buffer. The ref is the source of truth so React
+      // re-renders cannot append the same fragment twice.
+      const active = thinkingRef.current;
+      if (active && active.runId !== data.runId) return;
+      const next = {
+        runId: data.runId,
+        text: (active?.runId === data.runId ? active.text : "") + data.delta,
+        phase: "streaming" as const,
+      };
+      thinkingRef.current = next;
+      setThinking(next);
+      armThinkingDeadline();
+    });
+  }, [accountId, chatId, armThinkingDeadline, clearThinking]);
+
   // The reasoning preference is per account and lives on this device only.
   useEffect(() => {
     if (!accountId) {
@@ -285,67 +403,6 @@ export function ChatWindow({
     [accountId],
   );
 
-  // One request per opened chat decorates every bot bubble with its run.
-  useEffect(() => {
-    if (!accountId || !chatId) {
-      setRunReasoning(new Map());
-      return;
-    }
-    let active = true;
-    setRunReasoning(new Map());
-    listChatRuns(accountId, chatId)
-      .then(({ runs }) => {
-        if (!active) return;
-        const next = new Map<number, MessageReasoning>();
-        for (const run of runs) {
-          const reasoning = run.reasoning?.trim();
-          if (!reasoning || run.messageIds.length === 0) continue;
-          const messageId = run.messageIds[run.messageIds.length - 1];
-          if (next.has(messageId)) continue;
-          // A run can send several bubbles; the block goes under the last one.
-          next.set(messageId, {
-            runId: run.id,
-            reasoning,
-            bubbles: run.messageIds.length,
-            createdAt: run.createdAt,
-          });
-        }
-        // Keep a reasoning that arrived live while the request was in flight.
-        setRunReasoning((previous) => {
-          for (const [messageId, value] of previous) {
-            if (!next.has(messageId)) next.set(messageId, value);
-          }
-          return next;
-        });
-      })
-      .catch(() => {
-        // Reasoning is decorative: a failed request renders no blocks.
-      });
-    return () => {
-      active = false;
-    };
-  }, [accountId, chatId]);
-
-  // `ai.reply` arrives after the bubble was sent; attach its reasoning at once.
-  useEffect(() => {
-    if (!accountId || !chatId) return;
-    return subscribeRealtime(({ event, payload }) => {
-      if (event !== "ai.reply") return;
-      const data = payload as AiReplyEvent;
-      if (data.accountId !== accountId || data.chatId !== chatId) return;
-      const reasoning = data.reasoning?.trim();
-      if (!reasoning) return;
-      setRunReasoning((previous) =>
-        new Map(previous).set(data.message.id, {
-          runId: data.runId,
-          reasoning,
-          bubbles: 1,
-          createdAt: new Date().toISOString(),
-        }),
-      );
-    });
-  }, [accountId, chatId]);
-
   const draftKey =
     accountId !== null && chatId !== null
       ? draftStorageKey(accountId, chatId)
@@ -365,7 +422,8 @@ export function ChatWindow({
     infoChatRef.current = id;
     setInfoOpen(false);
     setAiMenu(null);
-  }, [chat]);
+    clearThinking();
+  }, [chat, clearThinking]);
 
   const closeInfo = useCallback(() => setInfoOpen(false), []);
 
@@ -629,6 +687,8 @@ export function ChatWindow({
     // Enter and a click can land in the same tick: guard with a ref so the
     // same draft is never submitted twice.
     if (sendingRef.current) return;
+    // A user message cancels the live stream; the typed text is untouched.
+    clearThinking();
     sendingRef.current = true;
     setSending(true);
     const key = draftStorageKey(account.id, chat.id);
@@ -1100,7 +1160,7 @@ export function ChatWindow({
           const poll = pollFor(message);
           const translation = translations.get(message.id);
           const transcript = transcripts.get(message.id);
-          const reasoning = runReasoning.get(message.id);
+          const reasoning = reasoningByMessage.get(message.id);
           const reactionBusy = reactionPending.has(message.id);
           const voteBusy = votingId === message.id;
           const menuActions: MessageMenuAction[] = [];
@@ -1278,6 +1338,7 @@ export function ChatWindow({
                               if (event.key === "Escape") setEditingId(null);
                             }}
                             className="w-full rounded-md border border-zinc-500 bg-zinc-900 px-2 py-1 text-sm text-zinc-100 outline-none focus:border-sky-400"
+                            autoComplete="off"
                           />
                           <div className="flex gap-2 text-xs">
                             <button
@@ -1551,6 +1612,14 @@ export function ChatWindow({
         </div>
       )}
 
+      {canWrite && thinking && (
+        <ThinkingStrip
+          key={thinking.runId}
+          text={thinking.text}
+          phase={thinking.phase}
+        />
+      )}
+
       {canWrite && (
         <form
           onSubmit={(event) => {
@@ -1604,6 +1673,7 @@ export function ChatWindow({
                 chooseAttachment(event.target.files?.[0] ?? null);
                 event.target.value = "";
               }}
+              autoComplete="off"
             />
             <button
               type="button"
@@ -1628,6 +1698,7 @@ export function ChatWindow({
               placeholder={
                 attachment ? "Подпись к файлу…" : `Сообщение в ${chat.title}`
               }
+              autoComplete="off"
               className="flex-1 rounded-full border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
             />
             <button
@@ -1694,6 +1765,7 @@ export function ChatWindow({
           onClose={closeInfo}
           showReasoning={showReasoning}
           onToggleReasoning={toggleReasoning}
+          threadId={threadFor?.id ?? 0}
         />
       )}
     </section>

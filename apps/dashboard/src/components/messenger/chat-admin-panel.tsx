@@ -251,6 +251,7 @@ function SettingsSection({
           onChange={(event) => setTitle(event.target.value)}
           maxLength={255}
           className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+          autoComplete="off"
         />
       </label>
       <label className="block">
@@ -263,6 +264,7 @@ function SettingsSection({
           rows={4}
           maxLength={255}
           className="w-full resize-y rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+          autoComplete="off"
         />
         <span className="mt-0.5 block text-right text-[10px] text-zinc-600">
           {about.trim().length}/255
@@ -406,6 +408,7 @@ function MembersSection({
           onChange={(event) => setSearchInput(event.target.value)}
           placeholder="Поиск по имени"
           className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+          autoComplete="off"
         />
         <button
           type="submit"
@@ -713,6 +716,7 @@ function PromoteModal({
                   }))
                 }
                 className="accent-sky-500"
+                autoComplete="off"
               />
               {item.label}
             </label>
@@ -732,6 +736,7 @@ function PromoteModal({
             maxLength={16}
             placeholder="Модератор"
             className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+            autoComplete="off"
           />
         </label>
         {error && <p className="text-xs text-red-300">{error}</p>}
@@ -782,6 +787,7 @@ function RankModal({
           maxLength={16}
           placeholder="Пусто — убрать ранг"
           className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+          autoComplete="off"
         />
         {error && <p className="text-xs text-red-300">{error}</p>}
         <button
@@ -952,6 +958,7 @@ function InvitesSection({
           placeholder="Название (необязательно)"
           maxLength={32}
           className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-sky-500"
+          autoComplete="off"
         />
         <div className="flex gap-1.5">
           <input
@@ -960,12 +967,14 @@ function InvitesSection({
             inputMode="numeric"
             placeholder="Лимит входов"
             className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-sky-500"
+            autoComplete="off"
           />
           <input
             type="datetime-local"
             value={expires}
             onChange={(event) => setExpires(event.target.value)}
             className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-sky-500"
+            autoComplete="off"
           />
         </div>
         <label className="flex items-center gap-2 text-[11px] text-zinc-400">
@@ -974,6 +983,7 @@ function InvitesSection({
             checked={withApproval}
             onChange={(event) => setWithApproval(event.target.checked)}
             className="accent-sky-500"
+            autoComplete="off"
           />
           Требовать одобрение админа
         </label>
@@ -1128,6 +1138,7 @@ function InviteEditModal({
             onChange={(event) => setUsageLimit(event.target.value)}
             inputMode="numeric"
             className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+            autoComplete="off"
           />
         </label>
         <label className="block">
@@ -1139,6 +1150,7 @@ function InviteEditModal({
             value={expires}
             onChange={(event) => setExpires(event.target.value)}
             className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-sky-500"
+            autoComplete="off"
           />
         </label>
         <label className="flex items-center gap-2 text-xs text-zinc-300">
@@ -1147,6 +1159,7 @@ function InviteEditModal({
             checked={withApproval}
             onChange={(event) => setWithApproval(event.target.checked)}
             className="accent-sky-500"
+            autoComplete="off"
           />
           Требовать одобрение админа
         </label>

@@ -88,6 +88,9 @@ model TelegramAccount {
   automations    Automation[]
   aiChatAccess   AiChatAccess[]
   aiChatBlocks   AiChatBlock[]
+  aiChatSkills   AiChatSkill[]
+  aiChatEvents   AiChatEvent[]
+  aiSetting      AiAccountSetting?
 
   @@unique([userId, tgUserId])
   @@index([userId])
@@ -513,6 +516,58 @@ model AiChatBlock {
   @@index([accountId, chatId])
 }
 
+/// Skills attached to one chat / thread, replacing the soul's default skill
+/// set for that conversation. `skillSlugs` is a JSON array of `Skill.slug`.
+model AiChatSkill {
+  id         String          @id @default(cuid())
+  accountId  String
+  account    TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId     BigInt
+  /// Forum topic / channel-comment thread id. `0` = whole chat (sentinel, see
+  /// `AiChatAccess.threadId`).
+  threadId   Int             @default(0)
+  /// JSON array of skill slugs used for this chat instead of the soul's.
+  skillSlugs String          @default("[]")
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@unique([accountId, chatId, threadId])
+  @@index([accountId, chatId])
+}
+
+/// Audit trail of AI decisions about a chat: warnings, blocks, clears and
+/// access changes. Kept append-only so the dashboard can explain a block.
+model AiChatEvent {
+  id        String          @id @default(cuid())
+  accountId String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    BigInt
+  /// Forum topic / channel-comment thread id. `0` = whole chat (sentinel, see
+  /// `AiChatAccess.threadId`).
+  threadId  Int             @default(0)
+  /// warning | block | unblock | clear | access
+  kind      String
+  reason    String?
+  warnings  Int             @default(0)
+  /// user | soul | system
+  actor     String          @default("user")
+  createdAt DateTime        @default(now())
+
+  @@index([accountId, chatId, createdAt])
+}
+
+/// Per-account overrides of the global AI capabilities (`AiSetting.capabilities`).
+/// `permissions` is a JSON object; missing keys inherit the global policy.
+model AiAccountSetting {
+  id          String          @id @default(cuid())
+  accountId   String          @unique
+  account     TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  /// JSON object of per-account permission overrides.
+  permissions String          @default("{}")
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
 /// LLM provider configurable from the dashboard. The account may have several
 /// and pick one per task; `isDefault` marks the fallback.
 model AiProvider {
@@ -520,6 +575,8 @@ model AiProvider {
   name            String
   /// openai-compatible | anthropic | … (whatever the adapter supports).
   kind            String   @default("openai-compatible")
+  /// Known preset the row was created from (e.g. "opencode-go"). Null = custom.
+  preset          String?
   baseUrl         String   @default("")
   /// API key, plain string in the DB; the app encrypts it at rest and never
   /// returns it in full.
@@ -529,6 +586,9 @@ model AiProvider {
   defaultModel    String?
   /// off | low | medium | high
   reasoningEffort String   @default("low")
+  /// JSON: { maxPerHour?: number, maxPerDay?: number }. Limits are per
+  /// provider, not per app.
+  limits          String   @default("{}")
   isDefault       Boolean  @default(false)
   enabled         Boolean  @default(true)
   createdAt       DateTime @default(now())

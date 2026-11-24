@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AiChatAccessModel, AiChatBlockModel } from '@repo/database';
+import type {
+  AiChatAccessModel,
+  AiChatBlockModel,
+  AiChatEventModel,
+} from '@repo/database';
 import { AiAccessService } from './ai-access.service.js';
+import { AiChatEventsService } from './ai-chat-events.service.js';
 
 const USER_ID = 'local';
 const OTHER_USER = 'someone-else';
@@ -57,6 +62,7 @@ interface BlockUpsertArgs {
 function harness() {
   const accesses = new Map<string, AiChatAccessModel>();
   const blocks = new Map<string, AiChatBlockModel>();
+  const events: AiChatEventModel[] = [];
   let sequence = 0;
   const nextId = (prefix: string): string => `${prefix}-${++sequence}`;
 
@@ -239,10 +245,58 @@ function harness() {
           ),
       ),
     },
+    aiChatEvent: {
+      create: vi.fn(
+        async ({
+          data,
+        }: {
+          data: {
+            accountId: string;
+            chatId: bigint;
+            threadId?: number;
+            kind: string;
+            reason?: string | null;
+            warnings?: number;
+            actor?: string;
+          };
+        }): Promise<AiChatEventModel> => {
+          const row: AiChatEventModel = {
+            id: nextId('event'),
+            accountId: data.accountId,
+            chatId: data.chatId,
+            threadId: data.threadId ?? 0,
+            kind: data.kind,
+            reason: data.reason ?? null,
+            warnings: data.warnings ?? 0,
+            actor: data.actor ?? 'user',
+            createdAt: NOW,
+          };
+          events.push(row);
+          return row;
+        },
+      ),
+      findMany: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { accountId: string; chatId: bigint; threadId: number };
+        }) =>
+          events
+            .filter(
+              (row) =>
+                row.accountId === where.accountId &&
+                row.chatId === where.chatId &&
+                row.threadId === where.threadId,
+            )
+            // All fixture rows share `NOW`; newest-first = last inserted.
+            .reverse(),
+      ),
+    },
   };
 
-  const service = new AiAccessService(prisma as never);
-  return { service, prisma, accesses, blocks };
+  const eventsService = new AiChatEventsService(prisma as never);
+  const service = new AiAccessService(prisma as never, eventsService);
+  return { service, eventsService, prisma, accesses, blocks, events };
 }
 
 function accessRow(
@@ -538,5 +592,169 @@ describe('AiAccessService.list', () => {
     expect(result.blocks).toHaveLength(1);
     expect(result.blocks[0]?.id).toBe('block-seed');
     expect(result.blocks[0]?.chatId).toBe(CHAT_ID);
+  });
+});
+
+describe('AiAccessService event recording', () => {
+  it('records an explicit block with its reason, counter and actor', async () => {
+    const { service, events } = harness();
+
+    await service.block({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      reason: 'spam',
+      blockedBy: 'soul',
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'block',
+      reason: 'spam',
+      warnings: 0,
+      actor: 'soul',
+      chatId: BigInt(CHAT_ID),
+      threadId: 0,
+    });
+  });
+
+  it('records a warning and a second block event on escalation', async () => {
+    process.env.AI_BLOCK_AFTER_WARNINGS = '2';
+    const { service, events } = harness();
+
+    await service.bumpWarning({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      reason: 'first',
+      blockedBy: 'soul',
+    });
+    expect(events.map((event) => event.kind)).toEqual(['warning']);
+    expect(events[0]).toMatchObject({ warnings: 1, actor: 'soul', reason: 'first' });
+
+    await service.bumpWarning({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      reason: 'second',
+      blockedBy: 'soul',
+    });
+    expect(events.map((event) => event.kind)).toEqual([
+      'warning',
+      'warning',
+      'block',
+    ]);
+    expect(events[2]).toMatchObject({
+      kind: 'block',
+      warnings: 2,
+      reason: 'second',
+      actor: 'soul',
+    });
+  });
+
+  it('records unblock with the lifted reason and a zero counter', async () => {
+    const { service, events } = harness();
+    await service.block({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      reason: 'spam',
+    });
+
+    await service.unblock(USER_ID, ACCOUNT_ID, CHAT_ID);
+
+    expect(events.map((event) => event.kind)).toEqual(['block', 'unblock']);
+    expect(events[1]).toMatchObject({ reason: 'spam', warnings: 0, actor: 'user' });
+  });
+
+  it('records access changes and removals', async () => {
+    const { service, events } = harness();
+
+    await service.setAccess({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      enabled: false,
+      note: 'work only',
+    });
+    await service.removeAccess(USER_ID, ACCOUNT_ID, CHAT_ID);
+
+    expect(events.map((event) => event.kind)).toEqual(['access', 'access']);
+    expect(events[0]).toMatchObject({ reason: 'work only', actor: 'user' });
+    expect(events[1]).toMatchObject({ reason: 'removed' });
+  });
+
+  it('clears the counter without unblocking an existing block', async () => {
+    process.env.AI_BLOCK_AFTER_WARNINGS = '1';
+    const { service, eventsService, events, blocks } = harness();
+    await service.bumpWarning({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      reason: 'insult',
+    });
+    expect(
+      (await service.accessFor(USER_ID, ACCOUNT_ID, CHAT_ID)).block,
+    ).not.toBeNull();
+
+    const cleared = await eventsService.clearWarnings(
+      USER_ID,
+      ACCOUNT_ID,
+      CHAT_ID,
+    );
+
+    expect(cleared).toEqual({ removed: true, warnings: 0, blocked: true });
+    expect(blocks.get(mapKey(ACCOUNT_ID, BigInt(CHAT_ID), 0))?.warnings).toBe(0);
+    // The row is still a real block, so access stays denied after the clear.
+    expect(
+      (await service.accessFor(USER_ID, ACCOUNT_ID, CHAT_ID)).block,
+    ).not.toBeNull();
+    expect(events.at(-1)).toMatchObject({
+      kind: 'clear',
+      warnings: 0,
+      actor: 'user',
+    });
+  });
+
+  it('clears a warning-only counter without creating a block', async () => {
+    process.env.AI_BLOCK_AFTER_WARNINGS = '3';
+    const { service, eventsService, blocks } = harness();
+    await service.bumpWarning({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+    });
+
+    const cleared = await eventsService.clearWarnings(
+      USER_ID,
+      ACCOUNT_ID,
+      CHAT_ID,
+    );
+
+    expect(cleared).toEqual({ removed: true, warnings: 0, blocked: false });
+    expect(blocks.get(mapKey(ACCOUNT_ID, BigInt(CHAT_ID), 0))?.warnings).toBe(0);
+    expect(
+      (await service.accessFor(USER_ID, ACCOUNT_ID, CHAT_ID)).block,
+    ).toBeNull();
+  });
+
+  it('lists the events of a chat newest first', async () => {
+    const { service, eventsService } = harness();
+    await service.block({
+      userId: USER_ID,
+      accountId: ACCOUNT_ID,
+      chatId: CHAT_ID,
+      reason: 'spam',
+    });
+    await service.unblock(USER_ID, ACCOUNT_ID, CHAT_ID);
+
+    const list = await eventsService.list(USER_ID, ACCOUNT_ID, CHAT_ID);
+
+    expect(list.map((event) => event.kind)).toEqual(['unblock', 'block']);
+    expect(list[0]).toMatchObject({
+      chatId: CHAT_ID,
+      accountId: ACCOUNT_ID,
+      kind: 'unblock',
+    });
   });
 });

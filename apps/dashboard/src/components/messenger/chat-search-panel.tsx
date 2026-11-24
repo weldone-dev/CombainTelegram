@@ -104,6 +104,7 @@ export function ChatSearchPanel({
           placeholder={`Поиск в «${chatTitle}»`}
           aria-label={`Поиск сообщений в чате ${chatTitle}`}
           className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+          autoComplete="off"
         />
         {busy && <span className="text-[11px] text-zinc-500">…</span>}
       </div>

@@ -1,12 +1,6 @@
-import { LinkedSettingsSection } from "../../../components/settings/linked-settings-section";
+import { redirect } from "next/navigation";
 
+/** The settings area is AI-only now; keep old bookmarks working. */
 export default function SettingsLogsRoute() {
-  return (
-    <LinkedSettingsSection
-      title="Логи"
-      description="Действия HTTP, ответы Telegram, ошибки и их экспорт."
-      pageHref="/logs"
-      pageLabel="Логи"
-    />
-  );
+  redirect("/settings/ai");
 }

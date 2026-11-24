@@ -9,6 +9,7 @@ import type { SoulModel, TelegramAccountModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AiAccessService } from '../ai-access/ai-access.service.js';
 import type { AiAccessDecision } from '../ai-access/ai-access.service.js';
+import { AiChatSkillsService } from '../ai-chat/ai-chat-skills.service.js';
 import { AiRunsService } from './ai-runs.service.js';
 import { DefaultUserService } from '../user-context/default-user.service.js';
 import { MessagingService } from '../messaging/messaging.service.js';
@@ -23,6 +24,14 @@ import { PresenceService } from './presence.service.js';
 import { SpeechService } from './speech.service.js';
 import { typingDurationMs } from './typing.js';
 import { parseReply } from './dm-reply.js';
+import {
+  isAudioMedia,
+  isRecentDate,
+  mentionsVoice,
+  pickRecentAudio,
+  replyTargetId,
+} from './voice-lookup.js';
+import type { AiThinkingPayload } from './ai.types.js';
 
 interface MessageNewPayload {
   accountId?: unknown;
@@ -37,6 +46,8 @@ interface IncomingText {
   id: number;
   text: string;
   media?: MessageMediaView | null;
+  /** Message this item replies to, when the peer quoted something. */
+  replyToId?: number | null;
 }
 
 interface Pending {
@@ -58,11 +69,32 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGES = 2;
 /** The last photo stays available for a follow-up question this long. */
 const LAST_IMAGE_TTL_MS = 3 * 60_000;
+/** The last voice transcript stays available for a follow-up this long. */
+const LAST_VOICE_TTL_MS = 3 * 60_000;
 /** Longest voice transcript forwarded to the model, characters. */
 const MAX_VOICE_CHARS = 1500;
+/** How many recent messages an on-demand voice lookup reads. */
+const VOICE_LOOKUP_WINDOW = 50;
+/** A voice note older than this is not what a follow-up is asking about. */
+const VOICE_LOOKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** A per-message transcript is reused for this long, milliseconds. */
+const VOICE_TRANSCRIPT_TTL_MS = 24 * 60 * 60 * 1000;
+/** Upper bound of the per-message transcript cache. */
+const VOICE_TRANSCRIPT_MAX = 500;
 /** Placeholder for a voice note that could not be transcribed. */
 const VOICE_FAILED_TEXT =
   '[голосовое сообщение, расшифровать не удалось]';
+/**
+ * Instruction added when the peer asked about a voice note that could not be
+ * turned into text. It forbids invented technical excuses explicitly, because
+ * models love to answer "I have no headphones / the sound is off".
+ */
+const VOICE_FAILED_NOTE =
+  'Голосовое не удалось расшифровать. Не придумывай причины вроде отсутствия наушников, микрофона или звука — просто скажи, что не расслышал, и попроси написать текстом.';
+/** Deltas reach the dashboard at most this often, milliseconds. */
+const THINKING_DELTA_INTERVAL_MS = 100;
+/** …and are never smaller than this many characters. */
+const THINKING_DELTA_MIN_CHARS = 16;
 
 /**
  * Words that mean the peer is asking about a picture. Used to warn the model
@@ -102,24 +134,19 @@ function isImageMedia(media: MessageMediaView | null | undefined): boolean {
   );
 }
 
-/**
- * Whether the media is audio the speech engine can listen to: a voice note or
- * an audio file sent as a document.
- */
-function isAudioMedia(media: MessageMediaView | null | undefined): boolean {
-  if (!media || !media.downloadable) return false;
-  if (media.kind === 'voice') return true;
-  return (
-    media.kind === 'document' &&
-    (media.mimeType ?? '').toLowerCase().startsWith('audio/')
-  );
-}
-
 /** Per-burst voice transcripts, keyed by message id. */
 interface VoiceResult {
   transcripts: Map<number, string>;
   /** At least one audio message could not be turned into text. */
   failed: boolean;
+}
+
+/** One audio message a follow-up question points at. */
+interface VoiceReference {
+  messageId: number;
+  /** Empty when the lookup found audio but it could not be transcribed. */
+  text: string;
+  source: 'fresh' | 'cached' | 'onDemand' | 'failed';
 }
 
 interface TypingState {
@@ -207,6 +234,23 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
    * ("что тут?"), which arrives as a separate message with no media of its own.
    */
   private readonly lastImages = new Map<string, { id: number; at: number }>();
+  /**
+   * Last voice/audio transcript per chat. A follow-up ("что я сказал в этом
+   * голосовом?") arrives as plain text with no media of its own.
+   */
+  private readonly lastVoice = new Map<
+    string,
+    { text: string; at: number; messageId: number }
+  >();
+  /**
+   * Transcripts of older audio messages, keyed `accountId:chatId:messageId`.
+   * A question may come hours after the note, so this outlives the 3-minute
+   * prompt cache above and avoids transcribing the same file twice.
+   */
+  private readonly voiceTranscripts = new Map<
+    string,
+    { text: string; at: number }
+  >();
   private readonly peerProfiles = new Map<
     string,
     { at: number; block: string }
@@ -231,6 +275,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     private readonly speech: SpeechService,
     private readonly aiAccess: AiAccessService,
     private readonly agentRuns: AiRunsService,
+    private readonly chatSkills: AiChatSkillsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -266,6 +311,9 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     for (const timer of this.readTimers) clearTimeout(timer);
     this.readTimers.clear();
     this.accessCache.clear();
+    this.voiceTranscripts.clear();
+    this.lastVoice.clear();
+    this.lastImages.clear();
   }
 
   /**
@@ -501,7 +549,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (existing) clearTimeout(existing.timer);
     const texts = [
       ...(existing?.texts ?? []),
-      { id: message.id, text, media: message.media },
+      {
+        id: message.id,
+        text,
+        media: message.media,
+        replyToId: message.replyToId,
+      },
     ].slice(-MAX_BURST);
     const settings = parseSoulSettings(soul.settings);
     const timer = setTimeout(() => {
@@ -654,6 +707,67 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Downloads one audio message and runs it through the local speech engine.
+   *
+   * Never throws: a missing engine, a download failure or an empty transcript
+   * comes back as `{ ok: false, reason }` so the caller can tell the model
+   * honestly that the audio was not understood.
+   */
+  private async transcribeMessageAudio(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    messageId: number,
+  ): Promise<
+    | { ok: true; text: string; bytes: number; chars: number; ms: number }
+    | { ok: false; bytes: number; chars: 0; ms: number; reason: string }
+  > {
+    const started = Date.now();
+    if (!this.speech.available()) {
+      return {
+        ok: false,
+        bytes: 0,
+        chars: 0,
+        ms: 0,
+        reason: 'no speech engine is installed',
+      };
+    }
+    let bytes = 0;
+    try {
+      const file = await this.messaging.downloadMedia(
+        userId,
+        accountId,
+        String(chatId),
+        String(messageId),
+      );
+      bytes = file.data.length;
+      const result = await this.speech.transcribe({
+        data: file.data,
+        mimeType: file.mimeType,
+        fileName: file.fileName,
+      });
+      const chars = result?.text.length ?? 0;
+      const ms = Date.now() - started;
+      if (!result || chars === 0) {
+        return { ok: false, bytes, chars: 0, ms, reason: 'empty transcript' };
+      }
+      const text =
+        result.text.length > MAX_VOICE_CHARS
+          ? `${result.text.slice(0, MAX_VOICE_CHARS)}…`
+          : result.text;
+      return { ok: true, text, bytes, chars, ms };
+    } catch (error) {
+      return {
+        ok: false,
+        bytes,
+        chars: 0,
+        ms: Date.now() - started,
+        reason: (error as Error).message,
+      };
+    }
+  }
+
+  /**
    * Transcribes every voice note in the burst through the local speech engine.
    *
    * Always resolves: a missing engine, a download failure or an empty
@@ -670,102 +784,286 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     let failed = false;
     const audio = items.filter((item) => isAudioMedia(item.media));
     if (audio.length === 0) return { transcripts, failed };
-    const ready = this.speech.available();
     for (const item of audio) {
-      const started = Date.now();
-      let bytes = 0;
-      if (!ready) {
+      const result = await this.transcribeMessageAudio(
+        userId,
+        accountId,
+        chatId,
+        item.id,
+      );
+      if (!result.ok) {
         failed = true;
         emitLog({
           level: 'warn',
           source: 'ai',
           action: 'dm.autopilot.voice',
-          message: `Voice note ${item.id} was not transcribed: no speech engine is installed`,
+          message: `Voice note ${item.id} was not transcribed: ${result.reason}`,
           status: 'failed',
           accountId,
           chatId,
+          durationMs: result.ms,
           details: {
             messageId: item.id,
-            bytes,
+            source: 'failed',
+            bytes: result.bytes,
             chars: 0,
-            ms: Date.now() - started,
-            reason: 'unavailable',
+            ms: result.ms,
+            reason: result.reason,
           },
         });
         continue;
       }
+      transcripts.set(item.id, result.text);
+      this.rememberVoiceTranscript(accountId, chatId, item.id, result.text);
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.voice',
+        message: `Transcribed voice note ${item.id} (${result.chars} chars) in ${result.ms} ms`,
+        status: 'ok',
+        accountId,
+        chatId,
+        durationMs: result.ms,
+        details: {
+          messageId: item.id,
+          source: 'fresh',
+          bytes: result.bytes,
+          chars: result.chars,
+          ms: result.ms,
+        },
+      });
+    }
+    return { transcripts, failed };
+  }
+
+  /** Cached transcript of one audio message, or `null` when absent/expired. */
+  private cachedVoiceTranscript(
+    accountId: string,
+    chatId: number,
+    messageId: number,
+  ): string | null {
+    const key = `${accountId}:${chatId}:${messageId}`;
+    const entry = this.voiceTranscripts.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.at >= VOICE_TRANSCRIPT_TTL_MS) {
+      this.voiceTranscripts.delete(key);
+      return null;
+    }
+    return entry.text;
+  }
+
+  /** Stores one transcript for {@link VOICE_TRANSCRIPT_TTL_MS}. */
+  private rememberVoiceTranscript(
+    accountId: string,
+    chatId: number,
+    messageId: number,
+    text: string,
+  ): void {
+    const key = `${accountId}:${chatId}:${messageId}`;
+    this.voiceTranscripts.set(key, { text, at: Date.now() });
+    if (this.voiceTranscripts.size > VOICE_TRANSCRIPT_MAX) {
+      const oldest = this.voiceTranscripts.keys().next().value;
+      if (oldest) this.voiceTranscripts.delete(oldest);
+    }
+  }
+
+  /**
+   * Message an audio question points at: the quoted message when the peer
+   * replied to it, otherwise the newest voice note of the last
+   * {@link VOICE_LOOKUP_WINDOW} messages. Only called when the text mentions
+   * audio and no fresh transcript exists, and the history is only read when
+   * that fails, so a plain chat never pays for this.
+   */
+  private async audioMessageFor(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    texts: IncomingText[],
+  ): Promise<{ id: number; date: string } | null> {
+    const replyTo = replyTargetId(texts);
+    if (replyTo !== null) {
       try {
-        const file = await this.messaging.downloadMedia(
+        const page = await this.messaging.listMessages(
           userId,
           accountId,
           String(chatId),
-          String(item.id),
+          { limit: 1, offsetId: replyTo + 1 },
         );
-        bytes = file.data.length;
-        const result = await this.speech.transcribe({
-          data: file.data,
-          mimeType: file.mimeType,
-          fileName: file.fileName,
-        });
-        const chars = result?.text.length ?? 0;
-        const ms = Date.now() - started;
-        if (!result || chars === 0) {
-          failed = true;
-          emitLog({
-            level: 'warn',
-            source: 'ai',
-            action: 'dm.autopilot.voice',
-            message: `Voice note ${item.id} produced no transcript`,
-            status: 'failed',
-            accountId,
-            chatId,
-            details: {
-              messageId: item.id,
-              bytes,
-              chars,
-              ms,
-              reason: 'empty',
-            },
-          });
-          continue;
+        const quoted = page.messages.find((item) => item.id === replyTo);
+        if (
+          quoted &&
+          isAudioMedia(quoted.media) &&
+          isRecentDate(quoted.date, Date.now(), VOICE_LOOKUP_MAX_AGE_MS)
+        ) {
+          return { id: quoted.id, date: quoted.date };
         }
-        const text =
-          result.text.length > MAX_VOICE_CHARS
-            ? `${result.text.slice(0, MAX_VOICE_CHARS)}…`
-            : result.text;
-        transcripts.set(item.id, text);
-        emitLog({
-          level: 'debug',
-          source: 'ai',
-          action: 'dm.autopilot.voice',
-          message: `Transcribed voice note ${item.id} (${chars} chars) in ${ms} ms`,
-          status: 'ok',
-          accountId,
-          chatId,
-          durationMs: ms,
-          details: { messageId: item.id, bytes, chars, ms },
-        });
       } catch (error) {
-        failed = true;
-        emitLog({
-          level: 'warn',
-          source: 'ai',
-          action: 'dm.autopilot.voice',
-          message: `Voice note ${item.id} could not be transcribed: ${(error as Error).message}`,
-          status: 'failed',
-          accountId,
-          chatId,
-          details: {
-            messageId: item.id,
-            bytes,
-            chars: 0,
-            ms: Date.now() - started,
-            reason: (error as Error).message,
-          },
-        });
+        this.logger.warn(
+          `Could not load the replied message ${replyTo} in ${chatId}: ${(error as Error).message}`,
+        );
       }
     }
-    return { transcripts, failed };
+
+    let page;
+    try {
+      page = await this.messaging.listMessages(
+        userId,
+        accountId,
+        String(chatId),
+        { limit: VOICE_LOOKUP_WINDOW },
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Could not scan the history of ${chatId} for audio: ${(error as Error).message}`,
+      );
+      emitLog({
+        level: 'warn',
+        source: 'ai',
+        action: 'dm.autopilot.voice',
+        message: `Audio lookup in ${chatId} failed: ${(error as Error).message}`,
+        status: 'failed',
+        accountId,
+        chatId,
+        details: {
+          messageId: replyTo ?? 0,
+          source: 'failed',
+          reason: (error as Error).message,
+        },
+      });
+      return null;
+    }
+    const found = pickRecentAudio(
+      page.messages,
+      Date.now(),
+      VOICE_LOOKUP_MAX_AGE_MS,
+    );
+    return found ? { id: found.id, date: found.date } : null;
+  }
+
+  /**
+   * Resolves a text-only question about a voice note.
+   *
+   * Fast path: a transcript from the last {@link LAST_VOICE_TTL_MS} is used as
+   * is. Otherwise the audio message the peer means is located in the history,
+   * transcribed once and cached for a day. Returns `null` when the text only
+   * looked like an audio question but no nearby audio exists, so "скинул файл"
+   * is never answered as if it were a voice note.
+   */
+  private async resolveVoiceFollowUp(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    texts: IncomingText[],
+  ): Promise<VoiceReference | null> {
+    // A burst that already carries audio was transcribed above; a failed note
+    // there is reported honestly instead of being downloaded a second time.
+    if (texts.some((item) => isAudioMedia(item.media))) return null;
+    if (!mentionsVoice(texts)) return null;
+    const chatKey = `${accountId}:${chatId}`;
+
+    const fresh = this.lastVoice.get(chatKey);
+    if (fresh && Date.now() - fresh.at < LAST_VOICE_TTL_MS) {
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.voice',
+        message: `Reused the last voice transcript in ${chatId}`,
+        status: 'ok',
+        accountId,
+        chatId,
+        details: {
+          messageId: fresh.messageId,
+          source: 'fresh',
+          reused: true,
+          chars: fresh.text.length,
+        },
+      });
+      return {
+        messageId: fresh.messageId,
+        text: fresh.text,
+        source: 'fresh',
+      };
+    }
+
+    const target = await this.audioMessageFor(userId, accountId, chatId, texts);
+    if (!target) return null;
+
+    const cached = this.cachedVoiceTranscript(accountId, chatId, target.id);
+    if (cached !== null) {
+      this.lastVoice.set(chatKey, {
+        text: cached,
+        at: Date.now(),
+        messageId: target.id,
+      });
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.voice',
+        message: `Reused the cached transcript of voice note ${target.id} in ${chatId}`,
+        status: 'ok',
+        accountId,
+        chatId,
+        details: {
+          messageId: target.id,
+          source: 'cached',
+          chars: cached.length,
+        },
+      });
+      return { messageId: target.id, text: cached, source: 'cached' };
+    }
+
+    const result = await this.transcribeMessageAudio(
+      userId,
+      accountId,
+      chatId,
+      target.id,
+    );
+    if (!result.ok) {
+      emitLog({
+        level: 'warn',
+        source: 'ai',
+        action: 'dm.autopilot.voice',
+        message: `Voice note ${target.id} found on demand was not transcribed: ${result.reason}`,
+        status: 'failed',
+        accountId,
+        chatId,
+        durationMs: result.ms,
+        details: {
+          messageId: target.id,
+          source: 'failed',
+          bytes: result.bytes,
+          chars: 0,
+          ms: result.ms,
+          reason: result.reason,
+        },
+      });
+      return { messageId: target.id, text: '', source: 'failed' };
+    }
+
+    this.rememberVoiceTranscript(accountId, chatId, target.id, result.text);
+    this.lastVoice.set(chatKey, {
+      text: result.text,
+      at: Date.now(),
+      messageId: target.id,
+    });
+    emitLog({
+      level: 'info',
+      source: 'ai',
+      action: 'dm.autopilot.voice',
+      message: `Transcribed voice note ${target.id} on demand (${result.chars} chars) in ${result.ms} ms`,
+      status: 'ok',
+      accountId,
+      chatId,
+      durationMs: result.ms,
+      details: {
+        messageId: target.id,
+        source: 'onDemand',
+        bytes: result.bytes,
+        chars: result.chars,
+        ms: result.ms,
+      },
+    });
+    return { messageId: target.id, text: result.text, source: 'onDemand' };
   }
 
   /**
@@ -898,6 +1196,62 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Emits `ai.thinking` for one reply: `start`, throttled reasoning deltas and
+   * a final `done` carrying the complete reasoning. Deltas are at most one per
+   * 100 ms and never shorter than 16 characters, so a fast model cannot flood
+   * the socket. These events only feed the dashboard; nothing is sent to
+   * Telegram.
+   */
+  private thinkingEmitter(
+    userId: string,
+    accountId: string,
+    chatId: number,
+  ): {
+    start(runId: string): void;
+    delta(text: string): void;
+    done(reasoning?: string): void;
+  } {
+    let runId: string | null = null;
+    let pending = '';
+    let lastAt = 0;
+    const emit = (payload: AiThinkingPayload): void => {
+      this.realtime.emitToUser(userId, 'ai.thinking', payload);
+    };
+    return {
+      start: (id: string) => {
+        runId = id;
+        pending = '';
+        lastAt = 0;
+        emit({ accountId, chatId, runId: id, phase: 'start' });
+      },
+      delta: (text: string) => {
+        if (!runId || !text) return;
+        pending += text;
+        if (pending.length < THINKING_DELTA_MIN_CHARS) return;
+        const now = Date.now();
+        if (now - lastAt < THINKING_DELTA_INTERVAL_MS) return;
+        const delta = pending;
+        pending = '';
+        lastAt = now;
+        emit({ accountId, chatId, runId, delta });
+      },
+      done: (reasoning?: string) => {
+        if (!runId) return;
+        const id = runId;
+        runId = null;
+        pending = '';
+        emit({
+          accountId,
+          chatId,
+          runId: id,
+          phase: 'done',
+          reasoning: reasoning ?? null,
+        });
+      },
+    };
+  }
+
   private async reply(
     userId: string,
     accountId: string,
@@ -975,6 +1329,30 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       this.imagesFor(userId, accountId, chatId, imageIds),
       this.transcribeVoices(userId, accountId, chatId, texts),
     ]);
+    if (voice.transcripts.size > 0) {
+      const lastEntry = [...voice.transcripts.entries()].at(-1);
+      if (lastEntry) {
+        this.lastVoice.set(chatKey, {
+          text: lastEntry[1],
+          at: Date.now(),
+          messageId: lastEntry[0],
+        });
+      }
+    }
+    // A text-only follow-up may ask about a voice note that was already
+    // transcribed — possibly hours ago, when the 3-minute cache above is long
+    // gone. The lookup then finds the note in the chat history and transcribes
+    // it once, so the model never has to claim it cannot listen to audio.
+    const voiceRef =
+      voice.transcripts.size > 0
+        ? null
+        : await this.resolveVoiceFollowUp(
+            userId,
+            accountId,
+            chatId,
+            texts,
+          );
+    const reusedVoice = voiceRef?.text ?? '';
     // Voice notes are replaced by their transcript; untranscribed audio keeps
     // an honest placeholder and the note below tells the model not to invent
     // an excuse.
@@ -988,7 +1366,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       images.length > 0
         ? 'Собеседник прислал изображение — посмотри, что на нём, и ответь по смыслу.'
         : '',
-      voice.transcripts.size > 0
+      voice.transcripts.size > 0 || reusedVoice
         ? 'Голосовое сообщение уже расшифровано — расшифровка ниже, ответь по её смыслу.'
         : '',
       soul.mode === 'draft'
@@ -1005,9 +1383,16 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       images.length === 0 && mentionsPicture(items)
         ? 'Изображения к этому сообщению нет — не выдумывай, что на нём, и не говори, что оно мутное; коротко скажи, что не видишь картинки, и попроси прислать.'
         : '';
-    const noVoiceNote = voice.failed
-      ? 'Голосовое сообщение расшифровать не удалось. Не придумывай его содержание и не говори, что у тебя нет наушников или что ты не можешь послушать аудио: коротко скажи, что не расслышал, и попроси написать текстом.'
+    const reusedVoiceNote = reusedVoice
+      ? `Собеседник спрашивает про голосовое сообщение, которое уже расшифровано: «${reusedVoice}». Ответь по смыслу этой расшифровки и не говори, что не можешь послушать аудио.`
       : '';
+    // With a reused transcript there is nothing to excuse, even if an earlier
+    // burst had a failed note. The line names the usual invented excuses so
+    // the model cannot fall back on "no headphones / the sound is off".
+    const noVoiceNote =
+      (voice.failed || voiceRef?.source === 'failed') && !reusedVoice
+        ? VOICE_FAILED_NOTE
+        : '';
     const replyFormat = [
       'Формат ответа:',
       '- 1–3 коротких сообщения; каждое — отдельной частью, части разделяй строкой ---',
@@ -1025,6 +1410,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
             '',
             ...(noImageNote ? [noImageNote, ''] : []),
             ...(noVoiceNote ? [noVoiceNote, ''] : []),
+            ...(reusedVoiceNote ? [reusedVoiceNote, ''] : []),
             instruction,
             '',
             replyFormat,
@@ -1035,6 +1421,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
             '',
             ...(noImageNote ? [noImageNote, ''] : []),
             ...(noVoiceNote ? [noVoiceNote, ''] : []),
+            ...(reusedVoiceNote ? [reusedVoiceNote, ''] : []),
             instruction,
             '',
             replyFormat,
@@ -1064,6 +1451,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
 
     // No "typing…" while the model thinks: the indicator starts only when
     // there is real text to type, which also keeps the thinking phase silent.
+    // The reasoning is streamed to the dashboard instead, never to Telegram.
+    const thinking = this.thinkingEmitter(userId, accountId, chatId);
+    // Per-chat/topic skill override when a row exists, otherwise the soul's
+    // set. `replaceSoulSkills` makes the resolved list authoritative, so an
+    // override that drops a soul skill is honoured.
+    const skills = await this.chatSkills.resolve(accountId, chatId, threadId);
     const result = await this.agent.run({
       userId,
       accountId,
@@ -1072,9 +1465,14 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       prompt,
       images,
       tools: [],
+      skillSlugs: skills.slugs,
+      replaceSoulSkills: true,
+      onRunStart: (runId) => thinking.start(runId),
+      onReasoningDelta: (text) => thinking.delta(text),
       systemExtra: [
         peerBlock,
         'Это живая переписка. Не упоминай ИИ, инструменты и настройки. Пиши коротко, как в мессенджере: 1–3 сообщения, без Markdown и без кавычек вокруг всего текста.',
+        'Не выдумывай технических ограничений: не ссылайся на отсутствие наушников, микрофона, звука, камеры или доступа к файлам. Если чего-то действительно не хватает, скажи об этом прямо и попроси прислать нужное.',
         peerBlock
           ? 'Данные собеседника выше взяты из его профиля Telegram. Если он спрашивает свой username, имя или профиль — назови их прямо и не говори, что видишь только имя.'
           : '',
@@ -1083,6 +1481,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         .join('\n'),
       history,
     });
+    thinking.done(result.reasoning);
 
     if (!this.isCurrent(chatKey, token)) {
       await this.stopTyping(chatKey, token, true);
@@ -1230,6 +1629,8 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         senderName,
         messageIds,
         parts: parts.length,
+        skillsSource: skills.source,
+        skills: skills.slugs,
       },
     });
     void this.memory.maybeCompact(accountId, chatId);

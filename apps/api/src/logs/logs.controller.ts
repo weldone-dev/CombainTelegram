@@ -81,8 +81,16 @@ export class LogsController {
   }
 
   @Get("stats")
-  stats(@Query("domain") domain?: string): Promise<LogsStatsView> {
-    return this.logs.stats({ domain: parseText(domain) });
+  stats(
+    @Query("domain") domain?: string,
+    @Query("accountId") accountId?: string,
+    @Query("chatId") chatId?: string,
+  ): Promise<LogsStatsView> {
+    return this.logs.stats({
+      domain: parseText(domain),
+      accountId: parseText(accountId),
+      chatId: parseNumber(chatId),
+    });
   }
 
   @Get("export")

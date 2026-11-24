@@ -144,7 +144,8 @@ export class LogsService implements OnModuleDestroy {
   }
 
   async stats(params: LogsQuery = {}): Promise<LogsStatsView> {
-    const where = this.buildWhere({ domain: params.domain });
+    // Same filters as `query`, so a chat's counters match its log page.
+    const where = this.buildWhere(params);
     const [total, byLevel, bySource, byProxy, oldest, newest] =
       await Promise.all([
         this.prisma.logEntry.count({ where }),

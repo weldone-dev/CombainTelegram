@@ -24,6 +24,7 @@ export type AiCapability =
 export type AiCapabilities = Record<AiCapability, boolean>;
 
 export type AiReasoningEffort = "off" | "low" | "medium" | "high";
+export type SttEngine = "remote" | "local" | "disabled";
 
 export interface AiSettings {
   provider: string;
@@ -47,25 +48,94 @@ export interface AiSettings {
   envConfigured: boolean;
   mcp: { endpoint: string; token: string };
   updatedAt: string | null;
-  /** Speech-to-text draft fields. Absent while the API does not expose them. */
-  sttEngine?: string;
+  sttEngine?: SttEngine;
   sttBaseUrl?: string;
   sttModel?: string | null;
   sttLanguage?: string;
+  hasSttKey?: boolean;
 }
 
 /** One configurable LLM provider. The API key is never returned. */
+export type AiProviderKeySource = "stored" | "opencode" | "env";
+
+export interface AiProviderLimits {
+  maxPerHour?: number;
+  maxPerDay?: number;
+}
+
 export interface AiProviderView {
   id: string;
   name: string;
   kind: string;
+  /** Known preset the row was created from, null = custom. */
+  preset: string | null;
+  keySource: AiProviderKeySource;
   baseUrl: string;
   models: string[];
   defaultModel: string | null;
   reasoningEffort: AiReasoningEffort;
+  limits: AiProviderLimits;
   isDefault: boolean;
   enabled: boolean;
   hasKey: boolean;
+}
+
+export interface AiProviderPreset {
+  id: string;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  keySource: AiProviderKeySource;
+  defaultModel?: string;
+  description?: string;
+  docsUrl?: string;
+}
+
+export interface AiProviderModelInfo {
+  id: string;
+  label?: string;
+  type?: string;
+}
+
+export interface AiProviderModelsView {
+  models: AiProviderModelInfo[];
+  source: "provider" | "stored";
+  cached?: boolean;
+  fetchedAt?: string;
+  error?: string;
+}
+
+export interface AiProviderUsageMeter {
+  status: string;
+  percent: number;
+  resetsAt: string | null;
+}
+
+export interface AiProviderUsage {
+  rolling?: AiProviderUsageMeter;
+  weekly?: AiProviderUsageMeter;
+  monthly?: AiProviderUsageMeter;
+}
+
+export interface AiProviderLimitsView {
+  source: "provider" | "manual";
+  limits: AiProviderLimits;
+  observed?: { lastHour: number; lastDay: number };
+  usage?: AiProviderUsage;
+  error?: string;
+  checkedAt: string;
+}
+
+export interface AiProviderLimitsUpdateResult {
+  limits: AiProviderLimits;
+}
+
+export interface SttTestResult {
+  ok: boolean;
+  status: number | null;
+  latencyMs: number;
+  engine: "remote" | "local";
+  detail?: string;
 }
 
 export interface AiProviderTestResult {
@@ -131,6 +201,19 @@ export interface SoulView {
   createdAt: string;
   updatedAt: string;
 }
+
+/** `GET /accounts/:id/ai-settings`: per-account capability overrides. */
+export interface AccountAiSettingsView {
+  accountId: string;
+  /** Only the keys this account overrides; `{}` = fully inherited. */
+  permissions: Partial<AiCapabilities>;
+  /** `defaults` merged with `permissions`. */
+  effective: AiCapabilities;
+  /** Global policy capabilities the account inherits by default. */
+  defaults: AiCapabilities;
+}
+
+export type AiCapabilityPatch = Partial<Record<AiCapability, boolean | null>>;
 
 export interface FactView {
   id: string;
@@ -377,6 +460,38 @@ export function listAiProviders(): Promise<AiProviderView[]> {
   return apiFetch("/ai/providers");
 }
 
+export function listAiProviderPresets(): Promise<AiProviderPreset[]> {
+  return apiFetch("/ai/providers/presets");
+}
+
+export function getAiProviderModels(id: string): Promise<AiProviderModelsView> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}/models`);
+}
+
+export function updateAiProviderModels(
+  id: string,
+  body: { models: string[]; defaultModel?: string | null },
+): Promise<AiProviderView> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}/models`, {
+    method: "PUT",
+    body,
+  });
+}
+
+export function getAiProviderLimits(id: string): Promise<AiProviderLimitsView> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}/limits`);
+}
+
+export function updateAiProviderLimits(
+  id: string,
+  body: AiProviderLimits,
+): Promise<AiProviderLimitsUpdateResult> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}/limits`, {
+    method: "PATCH",
+    body,
+  });
+}
+
 export function createAiProvider(
   body: Record<string, unknown>,
 ): Promise<AiProviderView> {
@@ -418,6 +533,10 @@ export function importAiSettings(): Promise<AiProviderImportResult> {
     method: "POST",
     body: {},
   });
+}
+
+export function testStt(): Promise<SttTestResult> {
+  return apiFetch("/ai/stt/test", { method: "POST", body: {} });
 }
 
 export function updateAiPolicy(
@@ -495,6 +614,27 @@ export function getMemory(
   return apiFetch(
     `/accounts/${encodeURIComponent(accountId)}/soul/memory${query}`,
   );
+}
+
+/** Per-account capability overrides, merged with the global defaults. */
+export function getAccountAiSettings(
+  accountId: string,
+): Promise<AccountAiSettingsView> {
+  return apiFetch(`/accounts/${encodeURIComponent(accountId)}/ai-settings`);
+}
+
+/**
+ * PATCHes only the given account overrides: `false` denies, `true` allows,
+ * `null` removes the override and re-inherits the global default.
+ */
+export function patchAccountAiSettings(
+  accountId: string,
+  permissions: AiCapabilityPatch,
+): Promise<AccountAiSettingsView> {
+  return apiFetch(`/accounts/${encodeURIComponent(accountId)}/ai-settings`, {
+    method: "PATCH",
+    body: { permissions },
+  });
 }
 
 export function summarizeMemory(

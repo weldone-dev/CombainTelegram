@@ -1,12 +1,6 @@
-import { LinkedSettingsSection } from "../../../components/settings/linked-settings-section";
+import { redirect } from "next/navigation";
 
+/** The settings area is AI-only now; keep old bookmarks working. */
 export default function SettingsAccountsRoute() {
-  return (
-    <LinkedSettingsSection
-      title="Аккаунты"
-      description="Подключённые аккаунты, сессии, устройства и профили."
-      pageHref="/accounts"
-      pageLabel="Аккаунты"
-    />
-  );
+  redirect("/settings/ai");
 }

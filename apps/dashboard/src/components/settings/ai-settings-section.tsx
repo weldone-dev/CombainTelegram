@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   type AiProviderView,
   type AiSettings,
@@ -9,7 +9,10 @@ import {
   getAiTools,
   listAiProviders,
   patchAiSettings,
+  type SttEngine,
+  type SttTestResult,
   type ToolInfo,
+  testStt,
 } from "../../lib/ai-api";
 import {
   Card,
@@ -25,7 +28,7 @@ import { AiMcpCard } from "./ai-mcp-card";
 import { AiPermissionsCard } from "./ai-permissions-card";
 import { AiProvidersCard } from "./ai-providers-card";
 
-type SttEngine = "auto" | "parakeet" | "whisper" | "remote";
+const DEFAULT_STT_MODEL = "parakeet-tdt-0.6b-v3";
 
 const KEY_SOURCE_LABELS: Record<AiSettings["apiKeySource"], string> = {
   opencode: "OpenCode / Orca",
@@ -35,10 +38,9 @@ const KEY_SOURCE_LABELS: Record<AiSettings["apiKeySource"], string> = {
 };
 
 const STT_ENGINES: Array<{ value: SttEngine; label: string }> = [
-  { value: "auto", label: "auto — сервер решает" },
-  { value: "parakeet", label: "parakeet — локально" },
-  { value: "whisper", label: "whisper — локально" },
-  { value: "remote", label: "remote — удалённый сервис" },
+  { value: "remote", label: "Удалённый" },
+  { value: "local", label: "Локальный" },
+  { value: "disabled", label: "Выключено" },
 ];
 
 const REASONING_LABELS: Record<AiSettings["reasoningEffort"], string> = {
@@ -99,8 +101,8 @@ export function AiSettingsSection() {
       <div>
         <h2 className="text-sm font-semibold text-zinc-100">AI</h2>
         <p className="mt-1 text-xs text-zinc-500">
-          Провайдеры, модель по умолчанию, лимиты и распознавание речи. Души,
-          скиллы и автоматизации остаются на странице «AI».
+          Провайдеры, модели, лимиты и распознавание речи. Души, скиллы и
+          автоматизации остаются на странице «AI».
         </p>
       </div>
 
@@ -117,7 +119,6 @@ export function AiSettingsSection() {
             onRefresh={refreshProviders}
           />
           {providers.length === 0 && <LegacyProviderCard settings={settings} />}
-          <LimitsCard />
           <SttCard settings={settings} onChange={setSettings} />
           <AiPermissionsCard settings={settings} onChange={setSettings} />
           <AiMcpCard settings={settings} tools={tools} onChange={setSettings} />
@@ -154,6 +155,9 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
             readOnly
             value={settings.provider}
             onFocus={(event) => event.currentTarget.select()}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-legacy-provider-kind"
             className={inputClass}
           />
         </Field>
@@ -162,6 +166,9 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
             readOnly
             value={settings.baseUrl}
             onFocus={(event) => event.currentTarget.select()}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-legacy-provider-base-url"
             className={inputClass}
           />
         </Field>
@@ -170,6 +177,9 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
             readOnly
             value={settings.model}
             onFocus={(event) => event.currentTarget.select()}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-legacy-provider-model"
             className={inputClass}
           />
         </Field>
@@ -178,6 +188,9 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
             readOnly
             value={settings.fastModel}
             onFocus={(event) => event.currentTarget.select()}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-legacy-provider-fast-model"
             className={inputClass}
           />
         </Field>
@@ -185,6 +198,8 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
           <input
             readOnly
             value={String(settings.temperature)}
+            autoComplete="off"
+            name="ct-legacy-provider-temperature"
             className={inputClass}
           />
         </Field>
@@ -192,6 +207,8 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
           <input
             readOnly
             value={String(settings.maxSteps)}
+            autoComplete="off"
+            name="ct-legacy-provider-max-steps"
             className={inputClass}
           />
         </Field>
@@ -199,6 +216,8 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
           <input
             readOnly
             value={REASONING_LABELS[settings.reasoningEffort]}
+            autoComplete="off"
+            name="ct-legacy-provider-reasoning"
             className={inputClass}
           />
         </Field>
@@ -220,42 +239,6 @@ function LegacyProviderCard({ settings }: { settings: AiSettings }) {
   );
 }
 
-function LimitsCard() {
-  const [hourly, setHourly] = useState("0");
-  const [daily, setDaily] = useState("0");
-
-  return (
-    <Card
-      title="Лимиты"
-      description="Сколько запросов к модели разрешено с одного аккаунта. Ноль — без лимита."
-    >
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Запросов в час">
-          <input
-            value={hourly}
-            onChange={(event) => setHourly(event.target.value)}
-            inputMode="numeric"
-            className={inputClass}
-          />
-        </Field>
-        <Field label="Запросов в сутки">
-          <input
-            value={daily}
-            onChange={(event) => setDaily(event.target.value)}
-            inputMode="numeric"
-            className={inputClass}
-          />
-        </Field>
-      </div>
-      <DraftNote>
-        Черновик: эндпоинт <code>/ai/settings</code> пока не принимает лимиты,
-        поэтому значения не сохраняются. Поля готовы к подключению, когда API их
-        добавит.
-      </DraftNote>
-    </Card>
-  );
-}
-
 function SttCard({
   settings,
   onChange,
@@ -263,46 +246,36 @@ function SttCard({
   settings: AiSettings;
   onChange: (settings: AiSettings) => void;
 }) {
-  const apiExposesStt = settings.sttEngine !== undefined;
-  const [engine, setEngine] = useState(settings.sttEngine ?? "auto");
+  const [engine, setEngine] = useState<SttEngine>(
+    settings.sttEngine ?? "remote",
+  );
   const [baseUrl, setBaseUrl] = useState(settings.sttBaseUrl ?? "");
-  const [model, setModel] = useState(settings.sttModel ?? "");
   const [language, setLanguage] = useState(settings.sttLanguage ?? "auto");
   const [busy, setBusy] = useState(false);
+  const [testBusy, setTestBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<SttTestResult | null>(null);
 
   useEffect(() => {
-    // Only overwrite the local form when the API actually returns STT fields;
-    // otherwise typed values must survive a settings refresh.
-    if (settings.sttEngine !== undefined) setEngine(settings.sttEngine);
-    if (settings.sttBaseUrl !== undefined) setBaseUrl(settings.sttBaseUrl);
-    if (settings.sttModel !== undefined) setModel(settings.sttModel ?? "");
-    if (settings.sttLanguage !== undefined) {
-      setLanguage(settings.sttLanguage);
-    }
-  }, [settings]);
+    setEngine(settings.sttEngine ?? "remote");
+    setBaseUrl(settings.sttBaseUrl ?? "");
+    setLanguage(settings.sttLanguage ?? "auto");
+  }, [settings.sttEngine, settings.sttBaseUrl, settings.sttLanguage]);
 
   const save = async () => {
     setBusy(true);
     setError(null);
     setStatus(null);
-    const body = {
-      sttEngine: engine,
-      sttBaseUrl: baseUrl.trim(),
-      sttModel: model.trim() || null,
-      sttLanguage: language.trim() || "auto",
-    };
     try {
-      const next = await patchAiSettings(body);
-      // Keep the local draft; the effect above only overwrites it when the
-      // server actually returns STT columns.
+      const next = await patchAiSettings({
+        sttEngine: engine,
+        sttModel: settings.sttModel ?? DEFAULT_STT_MODEL,
+        sttLanguage: language.trim() || "auto",
+        ...(engine === "remote" ? { sttBaseUrl: baseUrl.trim() } : {}),
+      });
       onChange(next);
-      setStatus(
-        apiExposesStt
-          ? "Настройки распознавания речи сохранены"
-          : "Поля отправлены, но сервер пока не возвращает STT — сохранение не подтверждено",
-      );
+      setStatus("Настройки распознавания речи сохранены");
     } catch (saveError) {
       setError(aiErrorMessage(saveError));
     } finally {
@@ -310,18 +283,37 @@ function SttCard({
     }
   };
 
-  const engineOptions = STT_ENGINES.some((item) => item.value === engine)
-    ? STT_ENGINES
-    : [...STT_ENGINES, { value: engine, label: engine }];
+  const runTest = async () => {
+    setTestBusy(true);
+    setError(null);
+    setStatus(null);
+    try {
+      setTestResult(await testStt());
+    } catch (testError) {
+      setError(aiErrorMessage(testError));
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  const model = settings.sttModel || DEFAULT_STT_MODEL;
 
   return (
     <Card
       title="Распознавание речи"
-      description="Движок транскрибации голосовых сообщений и встреч."
+      description="Parakeet TDT 0.6B v3: удалённый сервис или локальная модель."
       actions={
-        <PrimaryButton onClick={save} disabled={busy}>
-          {busy ? "Сохранение…" : "Сохранить"}
-        </PrimaryButton>
+        <div className="flex flex-wrap gap-2">
+          <GhostButton
+            onClick={() => void runTest()}
+            disabled={busy || testBusy}
+          >
+            {testBusy ? "Проверка…" : "Проверить"}
+          </GhostButton>
+          <PrimaryButton onClick={save} disabled={busy}>
+            {busy ? "Сохранение…" : "Сохранить"}
+          </PrimaryButton>
+        </div>
       }
     >
       <ErrorBanner message={error} />
@@ -330,62 +322,76 @@ function SttCard({
         <Field label="Движок">
           <select
             value={engine}
-            onChange={(event) => setEngine(event.target.value)}
+            onChange={(event) => {
+              setEngine(event.target.value as SttEngine);
+              setTestResult(null);
+            }}
+            autoComplete="off"
+            name="ct-stt-engine"
             className={inputClass}
           >
-            {engineOptions.map((option) => (
+            {STT_ENGINES.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
             ))}
           </select>
         </Field>
-        <Field
-          label="Язык"
-          hint="Код языка, например ru или en; auto — определять на месте."
-        >
+        <Field label="Язык" hint="auto или код языка, например ru">
           <input
             value={language}
             onChange={(event) => setLanguage(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-stt-language"
             className={inputClass}
             placeholder="auto"
           />
         </Field>
-        <Field
-          label="Base URL удалённого сервиса"
-          hint="Используется только движком remote."
-        >
+        <Field label="Модель" hint="Фиксированная модель Parakeet">
           <input
-            value={baseUrl}
-            onChange={(event) => setBaseUrl(event.target.value)}
-            className={inputClass}
-            placeholder="https://stt.example.com/v1"
-          />
-        </Field>
-        <Field label="Модель">
-          <input
+            readOnly
             value={model}
-            onChange={(event) => setModel(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            name="ct-stt-model"
             className={inputClass}
-            placeholder="whisper-large-v3"
           />
         </Field>
+        {engine === "remote" && (
+          <Field
+            label="Base URL удалённого сервиса"
+            hint="Пусто — встроенный адрес из окружения."
+          >
+            <input
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              name="ct-stt-base-url"
+              className={inputClass}
+              placeholder="http://192.168.31.108:5092"
+            />
+          </Field>
+        )}
       </div>
-      {!apiExposesStt && (
-        <DraftNote>
-          Черновик: сервер пока не возвращает поля STT. Значения отправляются на
-          API и остаются на этой странице, но могут не сохраниться до обновления
-          серверной части.
-        </DraftNote>
+
+      {testResult && (
+        <p
+          className={`mt-3 break-words rounded-md border px-2.5 py-1.5 text-[11px] ${
+            testResult.ok
+              ? "border-emerald-900/50 bg-emerald-950/20 text-emerald-300"
+              : "border-amber-900/50 bg-amber-950/20 text-amber-300"
+          }`}
+        >
+          {testResult.ok ? "ok" : "Недоступно"}
+          {" · "}
+          {testResult.engine === "local" ? "локальный" : "удалённый"}
+          {testResult.status ? ` · HTTP ${testResult.status}` : ""}
+          {` · ${testResult.latencyMs} мс`}
+          {testResult.detail ? ` · ${testResult.detail}` : ""}
+        </p>
       )}
     </Card>
-  );
-}
-
-function DraftNote({ children }: { children: ReactNode }) {
-  return (
-    <p className="mt-3 rounded-md border border-amber-900/50 bg-amber-950/20 px-2.5 py-1.5 text-[11px] text-amber-300">
-      {children}
-    </p>
   );
 }

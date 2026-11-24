@@ -1,5 +1,5 @@
-import { GeneralSettingsSection } from "../../components/settings/general-settings-section";
+import { redirect } from "next/navigation";
 
 export default function SettingsRoute() {
-  return <GeneralSettingsSection />;
+  redirect("/settings/ai");
 }

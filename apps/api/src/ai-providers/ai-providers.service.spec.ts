@@ -1,9 +1,15 @@
 import { ConfigService } from '@nestjs/config';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AiProviderModel, AiSettingModel } from '@repo/database';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import { TelegramConfigService } from '../telegram/telegram.config.js';
 import { AiProvidersService } from './ai-providers.service.js';
+import { OPENCODE_GO_BASE_URL } from './ai-providers.presets.js';
+import { resetOpencodeTokenCache } from './opencode-token.js';
 import { DEFAULT_CAPABILITIES } from '../ai/ai.types.js';
 
 const NOW = new Date('2026-11-24T10:00:00.000Z');
@@ -16,11 +22,13 @@ function providerRow(
     id: 'p1',
     name: 'Provider',
     kind: 'openai-compatible',
+    preset: null,
     baseUrl: 'https://ai.test/v1',
     apiKey: null,
     models: '[]',
     defaultModel: null,
     reasoningEffort: 'low',
+    limits: '{}',
     isDefault: false,
     enabled: true,
     createdAt: NOW,
@@ -153,6 +161,9 @@ function harness(
       update: vi.fn(),
       create: vi.fn(),
     },
+    agentRun: {
+      count: vi.fn(async () => 0),
+    },
     $transaction: vi.fn(
       async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
     ),
@@ -192,9 +203,43 @@ function decryptStoredKey(
     .toString('utf8');
 }
 
+const tempDirs: string[] = [];
+
+/**
+ * Minimal stand-in for Orca's OpenCode database: one active `opencode`
+ * credential whose OAuth access token is the Go key.
+ */
+function opencodeDatabase(token: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'ai-providers-'));
+  tempDirs.push(dir);
+  const file = join(dir, 'opencode.db');
+  const db = new DatabaseSync(file);
+  try {
+    db.exec(
+      'create table credential (id text, integration_id text, active integer, time_updated integer, value text)',
+    );
+    db.prepare(
+      'insert into credential (id, integration_id, active, time_updated, value) values (?, ?, ?, ?, ?)',
+    ).run(
+      'cred_1',
+      'opencode',
+      1,
+      Date.now(),
+      JSON.stringify({ type: 'oauth', access: token }),
+    );
+  } finally {
+    db.close();
+  }
+  return file;
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+  resetOpencodeTokenCache();
+  while (tempDirs.length > 0) {
+    rmSync(tempDirs.pop() as string, { recursive: true, force: true });
+  }
 });
 
 describe('AiProvidersService', () => {
@@ -568,5 +613,559 @@ describe('AiProvidersService.test', () => {
     expect(ok.ok).toBe(true);
     expect(ok.status).toBe(200);
     expect(ok.error).toBeUndefined();
+  });
+
+  it('uses the OpenCode token for a preset provider with no stored key', async () => {
+    vi.stubEnv('AI_API_KEY_SOURCE', 'opencode');
+    vi.stubEnv('OPENCODE_DB', opencodeDatabase('go-token-from-opencode'));
+    vi.stubEnv('AI_EXTRA_HEADERS', '{"x-opencode-session":"ses_test"}');
+    const h = harness();
+    const created = await h.service.create({ preset: 'opencode-go' });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => '{"choices":[]}',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await h.service.test(created.id);
+
+    expect(result).toMatchObject({ ok: true, status: 200 });
+    expect(result.error).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('go-token-from-opencode');
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { headers: Record<string, string>; body: string },
+    ];
+    expect(url).toBe(`${OPENCODE_GO_BASE_URL}/chat/completions`);
+    expect(init.headers.authorization).toBe('Bearer go-token-from-opencode');
+    expect(init.headers['x-opencode-session']).toBe('ses_test');
+    expect(JSON.parse(init.body)).toMatchObject({
+      model: 'deepseek-v4.1-flash',
+      max_tokens: 1,
+    });
+  });
+
+  it('falls through to the next key candidate after a 401', async () => {
+    const h = harness();
+    const created = await h.service.create({
+      name: 'Provider',
+      baseUrl: 'https://provider.test/v1',
+      apiKey: 'sk-stale',
+      models: ['m1'],
+    });
+    vi.stubEnv('AI_API_KEY', 'sk-env');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        text: async () => '{"error":{"message":"Invalid API key"}}',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => '{"choices":[]}',
+      });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await h.service.test(created.id);
+
+    expect(result).toMatchObject({ ok: true, status: 200 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const auth = fetchMock.mock.calls.map(
+      (call) => (call[1] as { headers: Record<string, string> }).headers,
+    );
+    expect(auth[0]?.authorization).toBe('Bearer sk-stale');
+    expect(auth[1]?.authorization).toBe('Bearer sk-env');
+    expect(JSON.stringify(result)).not.toContain('sk-stale');
+  });
+
+  it('returns the last provider error when every candidate is rejected', async () => {
+    const h = harness();
+    const created = await h.service.create({
+      name: 'Provider',
+      baseUrl: 'https://provider.test/v1',
+      apiKey: 'sk-stale',
+      models: ['m1'],
+    });
+    vi.stubEnv('AI_API_KEY', 'sk-env');
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      text: async () => '{"error":{"message":"Invalid credential"}}',
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await h.service.test(created.id);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      ok: false,
+      status: 401,
+      error: 'Invalid credential',
+    });
+    expect(JSON.stringify(result)).not.toContain('sk-stale');
+    expect(JSON.stringify(result)).not.toContain('sk-env');
+  });
+});
+
+describe('AiProvidersService.presets', () => {
+  it('offers OpenCode Go and custom without asking for a key', () => {
+    const h = harness();
+
+    const presets = h.service.presets();
+
+    expect(presets.map((preset) => preset.id)).toEqual(['opencode-go', 'custom']);
+    expect(presets[0]).toMatchObject({
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+      kind: 'openai-compatible',
+      baseUrl: OPENCODE_GO_BASE_URL,
+      keySource: 'opencode',
+      defaultModel: 'deepseek-v4.1-flash',
+    });
+    expect(presets[1]).toMatchObject({
+      id: 'custom',
+      keySource: 'stored',
+      baseUrl: '',
+    });
+  });
+
+  it('creates an OpenCode Go provider from the preset and stores no key', async () => {
+    const h = harness();
+
+    const view = await h.service.create({
+      preset: 'opencode-go',
+      // The dashboard may post the field anyway: a preset with
+      // `keySource: opencode` must never persist it.
+      apiKey: 'sk-should-be-ignored',
+    });
+
+    expect(view).toMatchObject({
+      name: 'OpenCode Go',
+      preset: 'opencode-go',
+      keySource: 'opencode',
+      baseUrl: OPENCODE_GO_BASE_URL,
+      models: ['deepseek-v4.1-flash'],
+      defaultModel: 'deepseek-v4.1-flash',
+      isDefault: true,
+      hasKey: false,
+    });
+    expect(h.providers()[0]?.apiKey).toBeNull();
+    expect(h.providers()[0]?.preset).toBe('opencode-go');
+    expect(JSON.stringify(view)).not.toContain('sk-should-be-ignored');
+  });
+
+  it('lets every preset default be overridden', async () => {
+    const h = harness();
+
+    const view = await h.service.create({
+      preset: 'opencode-go',
+      name: 'Go (proxy)',
+      baseUrl: 'https://proxy.test/v1/',
+      defaultModel: 'glm-5.3',
+      models: ['glm-5.3'],
+    });
+
+    expect(view).toMatchObject({
+      name: 'Go (proxy)',
+      baseUrl: 'https://proxy.test/v1',
+      defaultModel: 'glm-5.3',
+      models: ['glm-5.3'],
+      preset: 'opencode-go',
+      keySource: 'opencode',
+    });
+  });
+
+  it('keeps custom providers unchanged and rejects unknown presets', async () => {
+    const h = harness();
+
+    const view = await h.service.create({
+      name: 'Local',
+      baseUrl: 'http://localhost:11434/v1',
+      apiKey: 'sk-custom',
+    });
+    expect(view).toMatchObject({
+      preset: null,
+      keySource: 'stored',
+      hasKey: true,
+      defaultModel: null,
+      models: [],
+    });
+    expect(h.providers()[0]?.preset).toBeNull();
+
+    const explicitCustom = await h.service.create({
+      preset: 'custom',
+      name: 'Own',
+      baseUrl: 'https://own.test/v1',
+    });
+    expect(explicitCustom).toMatchObject({ preset: null, keySource: 'stored' });
+
+    await expect(
+      h.service.create({ preset: 'nope', name: 'x', baseUrl: 'https://x.test' }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(h.providers()).toHaveLength(2);
+  });
+
+  it('exposes the stored limits and key source in the list view', async () => {
+    const h = harness({
+      providers: [
+        {
+          id: 'p1',
+          preset: 'opencode-go',
+          limits: '{"maxPerHour":4,"maxPerDay":0}',
+        },
+      ],
+    });
+
+    const [view] = await h.service.list();
+
+    expect(view).toMatchObject({
+      preset: 'opencode-go',
+      keySource: 'opencode',
+      limits: { maxPerHour: 4, maxPerDay: 0 },
+    });
+  });
+});
+
+function modelsResponse(payload: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify(payload),
+  };
+}
+
+describe('AiProvidersService.models', () => {
+  it('fetches <baseUrl>/models and keeps ids, labels and types', async () => {
+    const h = harness();
+    const created = await h.service.create({ preset: 'opencode-go' });
+    vi.stubEnv('AI_API_KEY', 'sk-env');
+    const fetchMock = vi.fn(async () =>
+      modelsResponse({
+        object: 'list',
+        data: [
+          {
+            id: 'deepseek-v4.1-flash',
+            name: 'DeepSeek V4.1 Flash 1017',
+            type: 'chat',
+          },
+          { id: 'glm-5.3', name: 'GLM-5.3' },
+          'plain-id',
+        ],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await h.service.models(created.id);
+
+    expect(result).toMatchObject({ source: 'provider' });
+    expect(result.error).toBeUndefined();
+    expect(result.models).toEqual([
+      {
+        id: 'deepseek-v4.1-flash',
+        label: 'DeepSeek V4.1 Flash 1017',
+        type: 'chat',
+      },
+      { id: 'glm-5.3', label: 'GLM-5.3' },
+      { id: 'plain-id' },
+    ]);
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { headers: Record<string, string> },
+    ];
+    expect(url).toBe(`${OPENCODE_GO_BASE_URL}/models`);
+    expect(init.headers.authorization).toBe('Bearer sk-env');
+  });
+
+  it('caches a successful list for five minutes', async () => {
+    const h = harness();
+    const created = await h.service.create({
+      name: 'P',
+      baseUrl: 'https://p.test/v1',
+    });
+    const fetchMock = vi.fn(async () =>
+      modelsResponse({ data: [{ id: 'm1', name: 'Model 1' }] }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const first = await h.service.models(created.id);
+    const second = await h.service.models(created.id);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(first.cached).toBeUndefined();
+    expect(second).toMatchObject({ source: 'provider', cached: true });
+    expect(second.models).toEqual(first.models);
+
+    // Expire the entry: the next call goes back to the provider.
+    const cache = (
+      h.service as unknown as {
+        modelCache: Map<string, { baseUrl: string; at: number }>;
+      }
+    ).modelCache;
+    const entry = cache.get(created.id);
+    expect(entry).toBeDefined();
+    if (entry) entry.at = Date.now() - 6 * 60_000;
+
+    const third = await h.service.models(created.id);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(third.cached).toBeUndefined();
+  });
+
+  it('returns the stored list with the provider error instead of throwing', async () => {
+    const h = harness({
+      providers: [{ id: 'p1', models: '["stored-a","stored-b"]' }],
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 500,
+        text: async () => '{"error":{"message":"upstream is down"}}',
+      })),
+    );
+
+    const result = await h.service.models('p1');
+
+    expect(result).toMatchObject({
+      source: 'stored',
+      error: 'upstream is down',
+      models: [{ id: 'stored-a' }, { id: 'stored-b' }],
+    });
+  });
+
+  it('falls back to the stored list on a transport error', async () => {
+    const h = harness({
+      providers: [{ id: 'p1', models: '["stored-a"]' }],
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:1');
+      }),
+    );
+
+    const result = await h.service.models('p1');
+
+    expect(result.source).toBe('stored');
+    expect(result.error).toContain('ECONNREFUSED');
+    expect(result.models).toEqual([{ id: 'stored-a' }]);
+  });
+
+  it('retries with AI_API_KEY when the stored key is rejected', async () => {
+    const h = harness();
+    const created = await h.service.create({
+      name: 'P',
+      baseUrl: 'https://p.test/v1',
+      apiKey: 'sk-stale',
+    });
+    vi.stubEnv('AI_API_KEY', 'sk-env');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        text: async () => '{"error":{"message":"Invalid credential"}}',
+      })
+      .mockResolvedValueOnce(modelsResponse({ data: [{ id: 'm1' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await h.service.models(created.id);
+
+    expect(result.source).toBe('provider');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const headers = fetchMock.mock.calls.map(
+      (call) => (call[1] as { headers: Record<string, string> }).headers,
+    );
+    expect(headers[0]?.authorization).toBe('Bearer sk-stale');
+    expect(headers[1]?.authorization).toBe('Bearer sk-env');
+  });
+});
+
+describe('AiProvidersService.limits', () => {
+  it('reports stored limits plus local counters for a custom provider', async () => {
+    const h = harness({
+      providers: [{ id: 'p1', limits: '{"maxPerHour":5,"maxPerDay":0}' }],
+    });
+    h.prisma.agentRun.count
+      .mockResolvedValueOnce(3)
+      .mockResolvedValueOnce(11);
+
+    const result = await h.service.limits('p1');
+
+    expect(result).toMatchObject({
+      source: 'manual',
+      limits: { maxPerHour: 5, maxPerDay: 0 },
+      observed: { lastHour: 3, lastDay: 11 },
+    });
+    expect(result.error).toBeUndefined();
+    expect(typeof result.checkedAt).toBe('string');
+    expect(h.prisma.agentRun.count).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the documented OpenCode Go usage meters', async () => {
+    const h = harness({
+      providers: [
+        { id: 'p1', preset: 'opencode-go', baseUrl: OPENCODE_GO_BASE_URL },
+      ],
+    });
+    const fetchMock = vi.fn(async () =>
+      modelsResponse({
+        usage: {
+          rolling: {
+            status: 'ok',
+            percent: 8,
+            resetsAt: '2026-11-24T17:52:21.000Z',
+          },
+          weekly: {
+            status: 'rate-limited',
+            percent: 100,
+            resetsAt: '2026-11-30T00:00:00.000Z',
+          },
+          monthly: {
+            status: 'ok',
+            percent: 48,
+            resetsAt: '2026-11-29T10:54:44.000Z',
+          },
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await h.service.limits('p1');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'https://opencode.ai/inference/go/v1/usage',
+    );
+    expect(result).toMatchObject({
+      source: 'provider',
+      limits: {},
+      usage: {
+        rolling: { status: 'ok', percent: 8, resetsAt: '2026-11-24T17:52:21.000Z' },
+        weekly: { status: 'rate-limited', percent: 100 },
+        monthly: { status: 'ok', percent: 48 },
+      },
+    });
+  });
+
+  it('falls back to manual limits with an error when usage cannot be read', async () => {
+    const h = harness({
+      providers: [
+        { id: 'p1', preset: 'opencode-go', baseUrl: OPENCODE_GO_BASE_URL },
+      ],
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:1');
+      }),
+    );
+
+    const result = await h.service.limits('p1');
+
+    expect(result.source).toBe('manual');
+    expect(result.error).toContain('ECONNREFUSED');
+    expect(result.usage).toBeUndefined();
+  });
+
+  it('treats a provider error answer as manual limits', async () => {
+    const h = harness({
+      providers: [
+        { id: 'p1', preset: 'opencode-go', baseUrl: OPENCODE_GO_BASE_URL },
+      ],
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: false,
+        status: 403,
+        text: async () =>
+          '{"type":"error","error":{"type":"EntitlementError","message":"OpenCode Go subscription required."}}',
+      })),
+    );
+
+    const result = await h.service.limits('p1');
+
+    expect(result).toMatchObject({
+      source: 'manual',
+      error: 'OpenCode Go subscription required.',
+    });
+  });
+});
+
+describe('AiProvidersService.updateLimits', () => {
+  it('persists numbers, keeps 0 as unlimited and clears with null', async () => {
+    const h = harness({ providers: [{ id: 'p1' }] });
+
+    expect(await h.service.updateLimits('p1', { maxPerHour: 10 })).toEqual({
+      limits: { maxPerHour: 10 },
+    });
+    expect(JSON.parse(h.providers()[0]?.limits as string)).toEqual({
+      maxPerHour: 10,
+    });
+
+    const afterDay = await h.service.updateLimits('p1', { maxPerDay: 0 });
+    expect(afterDay.limits).toEqual({ maxPerHour: 10, maxPerDay: 0 });
+
+    const cleared = await h.service.updateLimits('p1', { maxPerHour: null });
+    expect(cleared.limits).toEqual({ maxPerDay: 0 });
+    expect(JSON.parse(h.providers()[0]?.limits as string)).toEqual({
+      maxPerDay: 0,
+    });
+  });
+
+  it('rejects negative, fractional and non-numeric limits', async () => {
+    const h = harness({ providers: [{ id: 'p1' }] });
+
+    await expect(
+      h.service.updateLimits('p1', { maxPerHour: -1 }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      h.service.updateLimits('p1', { maxPerDay: 1.5 }),
+    ).rejects.toMatchObject({ status: 400 });
+    await expect(
+      h.service.updateLimits('p1', { maxPerHour: 'not-a-number' }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(h.providers()[0]?.limits).toBe('{}');
+  });
+
+  it('returns 404 for an unknown provider', async () => {
+    const h = harness();
+
+    await expect(
+      h.service.updateLimits('missing', { maxPerHour: 1 }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('AiProvidersService.saveModels', () => {
+  it('persists the chosen list and never keeps a stale default', async () => {
+    const h = harness({
+      providers: [{ id: 'p1', models: '["gone"]', defaultModel: 'gone' }],
+    });
+
+    const view = await h.service.saveModels('p1', { models: ['a', 'b'] });
+    expect(view.models).toEqual(['a', 'b']);
+    expect(view.defaultModel).toBe('a');
+    expect(JSON.parse(h.providers()[0]?.models as string)).toEqual(['a', 'b']);
+
+    const explicit = await h.service.saveModels('p1', {
+      models: ['a', 'c'],
+      defaultModel: 'c',
+    });
+    expect(explicit.defaultModel).toBe('c');
+    expect(JSON.parse(h.providers()[0]?.models as string)).toEqual(['a', 'c']);
+  });
+
+  it('accepts a comma-separated string like the other write paths', async () => {
+    const h = harness({ providers: [{ id: 'p1' }] });
+
+    const view = await h.service.saveModels('p1', {
+      models: 'glm-5.3, kimi-k3',
+    });
+
+    expect(view.models).toEqual(['glm-5.3', 'kimi-k3']);
+    expect(view.defaultModel).toBe('glm-5.3');
   });
 });

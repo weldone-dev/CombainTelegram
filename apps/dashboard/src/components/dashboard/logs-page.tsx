@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API_URL, apiFetch, errorMessage } from "../../lib/api";
 import { subscribeRealtime } from "../../lib/realtime-bus";
@@ -43,6 +44,17 @@ const SOURCE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "app", label: "app" },
 ];
 
+/** Valid `level` values accepted from the URL; anything else is ignored. */
+const LEVEL_VALUES: Array<"" | LogLevel> = [
+  "",
+  "error",
+  "warn",
+  "info",
+  "debug",
+];
+const DEFAULT_DOMAIN: Domain = "telegram";
+const URL_SYNC_DELAY = 300;
+
 const SORT_OPTIONS = [
   { value: "newest", label: "Сначала новые" },
   { value: "oldest", label: "Сначала старые" },
@@ -80,9 +92,56 @@ function untilIso(value: string): string | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
+interface InitialFilters {
+  accountId: string;
+  /** `""` when absent or malformed. */
+  chatId: string;
+  level: "" | LogLevel;
+  /** Inline note about a malformed deep link; the page still works. */
+  error: string | null;
+}
+
+/** First-render filters of a `/logs?accountId=&chatId=&level=` deep link. */
+function parseInitialFilters(
+  params: Readonly<URLSearchParams>,
+): InitialFilters {
+  const accountId = params.get("accountId")?.trim() ?? "";
+
+  const rawChatId = params.get("chatId")?.trim() ?? "";
+  const chatId = /^\d{1,16}$/.test(rawChatId) ? rawChatId : "";
+  const rawLevel = params.get("level")?.trim() ?? "";
+  const level = LEVEL_VALUES.includes(rawLevel as "" | LogLevel)
+    ? (rawLevel as "" | LogLevel)
+    : "";
+
+  let error: string | null = null;
+  if (rawChatId && !chatId) {
+    error = "Некорректный chatId в ссылке — фильтр по чату не применён.";
+  } else if (rawLevel && !level) {
+    error = "Неизвестный уровень в ссылке — фильтр по уровню не применён.";
+  }
+  return { accountId, chatId, level, error };
+}
+
+/** Stable `a=1&b=2` string of the deep-link filters for the URL bar. */
+function scopeQuery(accountId: string, chatId: string, level: string): string {
+  const params = new URLSearchParams();
+  if (accountId) params.set("accountId", accountId);
+  if (chatId) params.set("chatId", chatId);
+  if (level) params.set("level", level);
+  return params.toString();
+}
+
 export function LogsPage() {
-  const [domain, setDomain] = useState<Domain>("telegram");
-  const [level, setLevel] = useState<"" | LogLevel>("");
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  // The deep link is applied once; later filter changes own the state.
+  const [initial] = useState(() => parseInitialFilters(searchParams));
+  const [accountId, setAccountId] = useState(initial.accountId);
+  const [chatId, setChatId] = useState(initial.chatId);
+  const [domain, setDomain] = useState<Domain>(DEFAULT_DOMAIN);
+  const [level, setLevel] = useState<"" | LogLevel>(initial.level);
   const [source, setSource] = useState("");
   const [proxy, setProxy] = useState("");
   const [query, setQuery] = useState("");
@@ -94,6 +153,7 @@ export function LogsPage() {
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [urlError, setUrlError] = useState<string | null>(initial.error);
   const [stats, setStats] = useState<LogsStatsView | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [live, setLive] = useState(true);
@@ -105,6 +165,8 @@ export function LogsPage() {
     (offset?: number) => {
       const params = new URLSearchParams();
       if (domain !== "all") params.set("domain", domain);
+      if (accountId) params.set("accountId", accountId);
+      if (chatId) params.set("chatId", chatId);
       if (level) params.set("level", level);
       if (source) params.set("source", source);
       if (proxy) params.set("proxy", proxy);
@@ -118,17 +180,32 @@ export function LogsPage() {
       if (offset) params.set("offset", String(offset));
       return params.toString();
     },
-    [domain, level, source, proxy, query, since, until, sort],
+    [
+      domain,
+      level,
+      source,
+      proxy,
+      query,
+      since,
+      until,
+      sort,
+      accountId,
+      chatId,
+    ],
   );
 
   const loadStats = useCallback(async () => {
     try {
-      const suffix = domain !== "all" ? `?domain=${domain}` : "";
+      const params = new URLSearchParams();
+      if (domain !== "all") params.set("domain", domain);
+      if (accountId) params.set("accountId", accountId);
+      if (chatId) params.set("chatId", chatId);
+      const suffix = params.toString() ? `?${params.toString()}` : "";
       setStats(await apiFetch<LogsStatsView>(`/logs/stats${suffix}`, {}));
     } catch {
       // The list already reports connectivity problems.
     }
-  }, [domain]);
+  }, [domain, accountId, chatId]);
 
   const load = useCallback(
     async (options: { silent?: boolean; append?: boolean } = {}) => {
@@ -171,6 +248,18 @@ export function LogsPage() {
     return () => clearTimeout(timer);
   }, [load]);
 
+  // Keep the deep-link filters in the URL without adding history entries.
+  const scope = scopeQuery(accountId, chatId, level);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = scope ? `${pathname}?${scope}` : pathname;
+      const current = `${window.location.pathname}${window.location.search}`;
+      if (current === next) return;
+      router.replace(next, { scroll: false });
+    }, URL_SYNC_DELAY);
+    return () => clearTimeout(timer);
+  }, [scope, pathname, router]);
+
   const statsSoon = useCallback(() => {
     if (statsTimer.current) clearTimeout(statsTimer.current);
     statsTimer.current = setTimeout(() => {
@@ -193,6 +282,8 @@ export function LogsPage() {
       if (domain === "system" && !SYSTEM_SOURCES.includes(entry.source)) {
         return;
       }
+      if (accountId && entry.accountId !== accountId) return;
+      if (chatId && String(entry.chatId ?? "") !== chatId) return;
       if (level && entry.level !== level) return;
       if (source && entry.source !== source) return;
       if (proxy && entry.proxyLabel !== proxy) return;
@@ -224,6 +315,8 @@ export function LogsPage() {
   }, [
     live,
     domain,
+    accountId,
+    chatId,
     level,
     source,
     proxy,
@@ -261,6 +354,16 @@ export function LogsPage() {
     }
   };
 
+  const hasScopeFilters = Boolean(accountId || chatId || level);
+  const levelLabel =
+    LEVEL_OPTIONS.find((option) => option.value === level)?.label ?? level;
+  const clearScopeFilters = () => {
+    setAccountId("");
+    setChatId("");
+    setLevel("");
+    setUrlError(null);
+  };
+
   const errorCount = stats?.byLevel.error ?? 0;
   const warnCount = stats?.byLevel.warn ?? 0;
   const proxyOptions = Object.entries(stats?.byProxy ?? {}).sort((a, b) =>
@@ -294,6 +397,7 @@ export function LogsPage() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Поиск по действию, сообщению, коду, ошибке Telegram или прокси"
+            autoComplete="off"
             className="min-w-64 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-500 focus:border-sky-500"
           />
           <select
@@ -354,6 +458,38 @@ export function LogsPage() {
           </select>
         </div>
 
+        {(hasScopeFilters || urlError) && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-zinc-500">Фильтры:</span>
+            {accountId && (
+              <FilterChip
+                label={`аккаунт: ${accountId}`}
+                onRemove={() => setAccountId("")}
+              />
+            )}
+            {chatId && (
+              <FilterChip
+                label={`чат: ${chatId}`}
+                onRemove={() => setChatId("")}
+              />
+            )}
+            {level && (
+              <FilterChip
+                label={`уровень: ${levelLabel}`}
+                onRemove={() => setLevel("")}
+              />
+            )}
+            <button
+              type="button"
+              onClick={clearScopeFilters}
+              title="Убрать фильтры по аккаунту, чату и уровню и очистить адрес"
+              className="rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 transition-colors hover:border-zinc-500"
+            >
+              Сбросить фильтры
+            </button>
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
           <label className="flex items-center gap-1.5">
             С
@@ -361,6 +497,7 @@ export function LogsPage() {
               type="date"
               value={since}
               onChange={(event) => setSince(event.target.value)}
+              autoComplete="off"
               className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-sky-500"
             />
           </label>
@@ -370,6 +507,7 @@ export function LogsPage() {
               type="date"
               value={until}
               onChange={(event) => setUntil(event.target.value)}
+              autoComplete="off"
               className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 outline-none focus:border-sky-500"
             />
           </label>
@@ -428,6 +566,7 @@ export function LogsPage() {
             <input
               type="checkbox"
               checked={live}
+              autoComplete="off"
               onChange={(event) => {
                 setLive(event.target.checked);
                 if (event.target.checked) void load();
@@ -442,9 +581,21 @@ export function LogsPage() {
           </label>
         </div>
 
-        {error && (
-          <div className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">
-            {error}
+        {(error || urlError) && (
+          <div
+            role="alert"
+            className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300"
+          >
+            <p>{error ?? urlError}</p>
+            {urlError && (
+              <button
+                type="button"
+                onClick={() => setUrlError(null)}
+                className="mt-1 text-xs text-red-200 underline-offset-2 hover:underline"
+              >
+                Скрыть
+              </button>
+            )}
           </div>
         )}
 
@@ -460,7 +611,9 @@ export function LogsPage() {
 
           {!loading && entries.length === 0 && (
             <p className="px-4 py-8 text-sm text-zinc-500">
-              Записей нет. Сделайте запрос к API — он появится здесь.
+              {accountId || chatId
+                ? "По выбранному аккаунту и чату записей нет. Проверьте id или уберите фильтр."
+                : "Записей нет. Сделайте запрос к API — он появится здесь."}
             </p>
           )}
 
@@ -597,5 +750,30 @@ export function LogsPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function FilterChip({
+  label,
+  onRemove,
+}: {
+  label: string;
+  onRemove: () => void;
+}) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-sky-800/60 bg-sky-500/10 px-2 py-0.5 text-sky-200">
+      <span className="max-w-72 truncate" title={label}>
+        {label}
+      </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        title={`Убрать фильтр «${label}»`}
+        aria-label={`Убрать фильтр ${label}`}
+        className="rounded-full px-1 text-sky-300 transition-colors hover:bg-sky-500/20 hover:text-sky-100"
+      >
+        ×
+      </button>
+    </span>
   );
 }

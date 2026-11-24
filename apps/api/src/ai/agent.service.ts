@@ -4,6 +4,7 @@ import type { AgentRunModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AiConfigService } from './ai-config.service.js';
 import { LlmService } from './llm.service.js';
+import type { LlmRequest } from './llm.service.js';
 import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
@@ -13,6 +14,7 @@ import type {
   AgentRunResult,
   AgentTraceEntry,
   LlmMessage,
+  LlmReply,
   LlmToolCall,
 } from './ai.types.js';
 
@@ -104,7 +106,11 @@ export class AgentService implements OnModuleInit {
       : null;
 
     const skillSlugs = new Set<string>(input.skillSlugs ?? []);
-    for (const skill of soulView?.skills ?? []) skillSlugs.add(skill.slug);
+    // A per-chat override may deliberately drop skills the soul has, so the
+    // caller can replace the set instead of extending it.
+    if (!input.replaceSoulSkills) {
+      for (const skill of soulView?.skills ?? []) skillSlugs.add(skill.slug);
+    }
     const skillList = await this.skills.instructions([...skillSlugs]);
     const skillTools = await this.skills.toolsFor([...skillSlugs]);
 
@@ -196,6 +202,16 @@ export class AgentService implements OnModuleInit {
       },
     })) as AgentRunModel;
 
+    // Live consumers need the persisted id before the first token arrives.
+    // A throwing listener must not leave the row stuck in "running".
+    try {
+      input.onRunStart?.(run.id);
+    } catch (error) {
+      this.logger.warn(
+        `Agent run ${run.id} start listener failed: ${(error as Error).message}`,
+      );
+    }
+
     const trace: AgentTraceEntry[] = [];
     let text = '';
     let reasoning = '';
@@ -205,16 +221,19 @@ export class AgentService implements OnModuleInit {
 
     try {
       for (let step = 0; step < maxSteps; step += 1) {
-        const reply = await this.llm.chat({
-          baseUrl: provider.baseUrl,
-          apiKey: provider.apiKey,
-          model,
-          messages,
-          tools: toolSchemas,
-          temperature,
-          maxTokens: 1800,
-          reasoningEffort: provider.reasoningEffort,
-        });
+        const reply = await this.ask(
+          {
+            baseUrl: provider.baseUrl,
+            apiKey: provider.apiKey,
+            model,
+            messages,
+            tools: toolSchemas,
+            temperature,
+            maxTokens: 1800,
+            reasoningEffort: provider.reasoningEffort,
+          },
+          input.onReasoningDelta,
+        );
         if (reply.reasoning) {
           reasoning = reasoning ? `${reasoning}\n\n${reply.reasoning}` : reply.reasoning;
         }
@@ -259,22 +278,25 @@ export class AgentService implements OnModuleInit {
 
       if (!text) {
         // The model used its whole budget on tools. Ask for a plain summary.
-        const final = await this.llm.chat({
-          baseUrl: provider.baseUrl,
-          apiKey: provider.apiKey,
-          model,
-          messages: [
-            ...messages,
-            {
-              role: 'user',
-              content:
-                'Кратко подведи итог для владельца: что сделано и что осталось. Без вызова инструментов.',
-            },
-          ],
-          temperature,
-          maxTokens: 800,
-          reasoningEffort: provider.reasoningEffort,
-        });
+        const final = await this.ask(
+          {
+            baseUrl: provider.baseUrl,
+            apiKey: provider.apiKey,
+            model,
+            messages: [
+              ...messages,
+              {
+                role: 'user',
+                content:
+                  'Кратко подведи итог для владельца: что сделано и что осталось. Без вызова инструментов.',
+              },
+            ],
+            temperature,
+            maxTokens: 800,
+            reasoningEffort: provider.reasoningEffort,
+          },
+          input.onReasoningDelta,
+        );
         if (final.reasoning) {
           reasoning = reasoning ? `${reasoning}\n\n${final.reasoning}` : final.reasoning;
         }
@@ -323,6 +345,18 @@ export class AgentService implements OnModuleInit {
       this.logger.warn(`Agent run ${run.id} failed: ${message}`);
       throw error;
     }
+  }
+
+  /**
+   * Streams reasoning only when a listener is attached; every other caller
+   * (tests, bots, automations) keeps the blocking `chat()` path unchanged.
+   */
+  private ask(
+    request: LlmRequest,
+    onReasoningDelta?: (text: string) => void,
+  ): Promise<LlmReply> {
+    if (!onReasoningDelta) return this.llm.chat(request);
+    return this.llm.chatStream(request, { onReasoningDelta });
   }
 
   /** Convenience for callers that just need the text. */

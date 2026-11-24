@@ -2,6 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import type { OnModuleInit } from '@nestjs/common';
 import type { AiSettingModel, TelegramAccountModel } from '@repo/database';
 import { randomBytes } from 'node:crypto';
+import { statSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +15,12 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import type { EncryptedPayload } from '../telegram/session-crypto.service.js';
 import { emitLog } from '../logs/log-sink.js';
-import { isPrivateHost } from './speech.service.js';
+import {
+  PARAKEET_FILES,
+  isPrivateHost,
+  parakeetModelDirectory,
+  parseSttSelection,
+} from './speech.service.js';
 import {
   DEFAULT_CAPABILITIES,
   type AiCapabilities,
@@ -39,15 +45,11 @@ const STT_SECRET_PREFIX = 'enc:v1:';
  * the constant is not exported there, so it is mirrored here for the probe.
  */
 const DEFAULT_STT_BASE_URL = 'http://192.168.31.108:5092';
+/** Parakeet TDT 0.6B v3 is the only speech model this app exposes. */
+const DEFAULT_STT_MODEL = 'parakeet-tdt-0.6b-v3';
 /** A test must never hang the settings page. */
 const STT_PROBE_TIMEOUT_MS = 5_000;
-const STT_ENGINES: SttEngine[] = [
-  'auto',
-  'remote',
-  'parakeet',
-  'whisper',
-  'disabled',
-];
+const STT_ENGINES: SttEngine[] = ['remote', 'local', 'disabled'];
 
 export interface PolicyUpdate {
   capabilities?: unknown;
@@ -70,25 +72,66 @@ function parseReasoningEffort(
     : fallback;
 }
 
-/** Tolerant read for stored rows: unknown/empty values mean `auto`. */
-function parseSttEngine(value: unknown): SttEngine {
+/**
+ * Strict variant for writes: a typo must not silently reset the engine.
+ * Legacy `auto`/`parakeet` names are mapped, `whisper` is rejected because it
+ * is an internal fallback and not a choice.
+ */
+function requireSttEngine(
+  value: unknown,
+  remoteConfigured: boolean,
+): SttEngine {
   const engine = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return (STT_ENGINES as string[]).includes(engine)
-    ? (engine as SttEngine)
-    : 'auto';
-}
-
-/** Strict variant for writes: a typo must not silently reset the engine. */
-function requireSttEngine(value: unknown): SttEngine {
-  const engine = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  if (!(STT_ENGINES as string[]).includes(engine)) {
+  if (engine === 'whisper') {
     throw apiError(
       'INVALID_STT_ENGINE',
-      `sttEngine must be one of: ${STT_ENGINES.join(', ')}`,
+      'sttEngine must be one of: remote, local, disabled (whisper is an internal fallback and cannot be selected)',
       400,
     );
   }
-  return engine as SttEngine;
+  if ((STT_ENGINES as string[]).includes(engine)) {
+    return engine as SttEngine;
+  }
+  if (engine === 'auto' || engine === 'parakeet') {
+    return parseSttSelection(engine, remoteConfigured);
+  }
+  throw apiError(
+    'INVALID_STT_ENGINE',
+    `sttEngine must be one of: ${STT_ENGINES.join(', ')}`,
+    400,
+  );
+}
+
+/**
+ * The engine is fixed to Parakeet, so the model must be empty (the default) or
+ * a Parakeet variant. Anything else would name a model that cannot be used.
+ */
+function requireSttModel(value: unknown): string {
+  const model = typeof value === 'string' ? value.trim() : '';
+  if (!model) return DEFAULT_STT_MODEL;
+  if (!/^parakeet/i.test(model)) {
+    throw apiError(
+      'INVALID_STT_MODEL',
+      `sttModel must be empty or start with "parakeet" (default ${DEFAULT_STT_MODEL})`,
+      400,
+    );
+  }
+  return model;
+}
+
+/** Stored legacy/foreign model ids are not offered: fall back to Parakeet. */
+function viewSttModel(value: unknown): string {
+  const model = typeof value === 'string' ? value.trim() : '';
+  return /^parakeet/i.test(model) ? model : DEFAULT_STT_MODEL;
+}
+
+/** `~`/relative paths are resolved the same way as in `speech.service.ts`. */
+function parakeetFileExists(directory: string, name: string): boolean {
+  try {
+    return statSync(join(directory, name)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** Empty clears the override; anything else must be an absolute http(s) URL. */
@@ -324,6 +367,15 @@ export class AiConfigService implements OnModuleInit {
   }
 
   /**
+   * Whether a remote endpoint exists. The built-in LXC URL always counts as
+   * configured and `STT_REMOTE=off` is the only way to remove it; that is also
+   * what maps a legacy `auto` row to `local`.
+   */
+  private remoteConfigured(): boolean {
+    return this.env('STT_REMOTE')?.toLowerCase() !== 'off';
+  }
+
+  /**
    * STT keys live in a plain `String` column, sealed as
    * `enc:v1:<base64 envelope>` like `AiProvider.apiKey`. Rows written before
    * encryption (or by hand) keep working.
@@ -517,13 +569,16 @@ export class AiConfigService implements OnModuleInit {
     // Speech-to-text settings. Untouched fields stay untouched, so the
     // legacy LLM-only payloads keep working.
     if (input.sttEngine !== undefined) {
-      data.sttEngine = requireSttEngine(input.sttEngine);
+      data.sttEngine = requireSttEngine(
+        input.sttEngine,
+        this.remoteConfigured(),
+      );
     }
     if (input.sttBaseUrl !== undefined) {
       data.sttBaseUrl = requireSttBaseUrl(input.sttBaseUrl);
     }
     if (input.sttModel !== undefined) {
-      data.sttModel = optionalText(input.sttModel);
+      data.sttModel = requireSttModel(input.sttModel);
     }
     if (input.sttLanguage !== undefined) {
       data.sttLanguage = text(input.sttLanguage, 'auto');
@@ -651,9 +706,9 @@ export class AiConfigService implements OnModuleInit {
       ownerTgUserIds: policy.ownerTgUserIds,
       source: resolved.source,
       envConfigured,
-      sttEngine: parseSttEngine(row.sttEngine),
+      sttEngine: parseSttSelection(row.sttEngine, this.remoteConfigured()),
       sttBaseUrl: text(row.sttBaseUrl),
-      sttModel: optionalText(row.sttModel),
+      sttModel: viewSttModel(row.sttModel),
       sttLanguage: text(row.sttLanguage, 'auto'),
       hasSttKey: Boolean(this.readSttKey(row)),
       mcp: {
@@ -665,39 +720,70 @@ export class AiConfigService implements OnModuleInit {
   }
 
   /**
-   * Probes the remote STT service for the settings page. Uses the same
-   * precedence as `SpeechService`: `STT_ENGINE=parakeet|whisper` forces a local
-   * engine and `STT_REMOTE=off` disables the network engine; `STT_BASE_URL`
-   * overrides the stored base URL. The API key is never part of the result.
+   * Probes the effective speech-to-text choice for the settings page.
+   *
+   * `remote` hits `<origin>/health` with the same precedence as
+   * `SpeechService` (`STT_BASE_URL` then the stored URL then the built-in
+   * LXC); `local` only checks that the Parakeet model files exist (no decode);
+   * `disabled` reports off. `STT_ENGINE` overrides the row and legacy names are
+   * mapped; `whisper`, which is env-only, is reported as the local fallback.
+   * The API key is never part of the result.
    */
   async sttTest(): Promise<SttTestResult> {
     const row = await this.row();
-    const envEngine = this.env('STT_ENGINE')?.toLowerCase();
-    const forcedLocal =
-      envEngine === 'parakeet' || envEngine === 'whisper' ? envEngine : null;
-    const effective: SttEngine = forcedLocal ?? parseSttEngine(row.sttEngine);
-    if (effective === 'disabled') {
+    const remoteConfigured = this.remoteConfigured();
+    const engine = this.probeEngine(row, remoteConfigured);
+
+    if (engine === 'disabled') {
       return {
         ok: false,
         status: null,
         latencyMs: 0,
         engine: 'local',
-        detail: 'Speech-to-text is disabled',
+        detail: 'disabled',
       };
     }
-    const remoteOff = this.env('STT_REMOTE')?.toLowerCase() === 'off';
-    if (effective === 'parakeet' || effective === 'whisper' || remoteOff) {
+    if (engine === 'whisper') {
       return {
         ok: true,
         status: null,
         latencyMs: 0,
         engine: 'local',
-        detail:
-          effective === 'parakeet' || effective === 'whisper'
-            ? `Local ${effective} engine does not use the network`
-            : 'Remote speech-to-text is disabled (STT_REMOTE=off)',
+        detail: 'whisper (internal fallback)',
       };
     }
+    if (engine === 'local') {
+      const directory = parakeetModelDirectory();
+      const missing = PARAKEET_FILES.filter(
+        (name) => !parakeetFileExists(directory, name),
+      );
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          status: null,
+          latencyMs: 0,
+          engine: 'local',
+          detail: `missing parakeet model files in ${directory}: ${missing.join(', ')}`,
+        };
+      }
+      return {
+        ok: true,
+        status: null,
+        latencyMs: 0,
+        engine: 'local',
+        detail: DEFAULT_STT_MODEL,
+      };
+    }
+    if (!remoteConfigured) {
+      return {
+        ok: false,
+        status: null,
+        latencyMs: 0,
+        engine: 'remote',
+        detail: 'remote speech-to-text is disabled (STT_REMOTE=off)',
+      };
+    }
+
     const baseUrl =
       this.env('STT_BASE_URL') ?? text(row.sttBaseUrl, DEFAULT_STT_BASE_URL);
     const url = sttHealthEndpoint(baseUrl);
@@ -738,5 +824,22 @@ export class AiConfigService implements OnModuleInit {
         detail,
       };
     }
+  }
+
+  /**
+   * Engine the probe reports. `STT_ENGINE` wins over the row; `whisper` is
+   * kept as its own value because it only exists on the env path.
+   */
+  private probeEngine(
+    row: AiSettingModel,
+    remoteConfigured: boolean,
+  ): SttEngine | 'whisper' {
+    const env = this.env('STT_ENGINE')?.toLowerCase();
+    if (env === 'whisper') return 'whisper';
+    if (env === 'remote' || env === 'local' || env === 'disabled') return env;
+    if (env === 'parakeet') return 'local';
+    if (env === 'auto') return remoteConfigured ? 'remote' : 'local';
+    // An unknown or unset env: the stored row decides.
+    return parseSttSelection(row.sttEngine, remoteConfigured);
   }
 }

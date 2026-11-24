@@ -179,6 +179,8 @@ export function AiPermissionsCard({
                     type="checkbox"
                     checked={checked}
                     disabled={lastChecked}
+                    autoComplete="off"
+                    name={`ct-ai-account-${account.id}`}
                     onChange={(event) => {
                       setAllowAccountIds(
                         event.target.checked
@@ -202,6 +204,9 @@ export function AiPermissionsCard({
             <input
               value={allowChats}
               onChange={(event) => setAllowChats(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              name="ct-ai-allow-chats"
               className={inputClass}
               placeholder="пусто = разрешённые по умолчанию"
             />
@@ -210,6 +215,9 @@ export function AiPermissionsCard({
             <input
               value={blockChats}
               onChange={(event) => setBlockChats(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              name="ct-ai-block-chats"
               className={inputClass}
               placeholder="например 123456789"
             />
@@ -221,6 +229,9 @@ export function AiPermissionsCard({
             <input
               value={ownerIds}
               onChange={(event) => setOwnerIds(event.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              name="ct-ai-owner-ids"
               className={inputClass}
             />
           </Field>

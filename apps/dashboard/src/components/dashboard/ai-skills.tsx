@@ -228,6 +228,7 @@ export function SkillsPanel() {
                   slugValid ? "" : "border-red-700 focus:border-red-500"
                 }`}
                 placeholder="my-skill"
+                autoComplete="off"
               />
             </Field>
             <Field label="Название">
@@ -237,6 +238,7 @@ export function SkillsPanel() {
                   setDraft({ ...draft, name: event.target.value })
                 }
                 className={inputClass}
+                autoComplete="off"
               />
             </Field>
             <Field label="Описание" className="sm:col-span-2">
@@ -246,6 +248,7 @@ export function SkillsPanel() {
                   setDraft({ ...draft, description: event.target.value })
                 }
                 className={inputClass}
+                autoComplete="off"
               />
             </Field>
             <Field
@@ -260,6 +263,7 @@ export function SkillsPanel() {
                 }
                 className={inputClass}
                 placeholder="messages_history, messages_send, memory_view"
+                autoComplete="off"
               />
             </Field>
             <Field label="Инструкции" className="sm:col-span-2">
@@ -269,6 +273,7 @@ export function SkillsPanel() {
                   setDraft({ ...draft, instructions: event.target.value })
                 }
                 className={`${textareaClass} min-h-64 font-mono text-xs`}
+                autoComplete="off"
               />
             </Field>
           </div>
@@ -280,6 +285,7 @@ export function SkillsPanel() {
                 setDraft({ ...draft, enabled: event.target.checked })
               }
               className="h-3.5 w-3.5 accent-sky-500"
+              autoComplete="off"
             />
             Скилл включён
           </label>
