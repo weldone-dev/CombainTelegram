@@ -106,6 +106,7 @@ function harness(
   const messaging = {
     sendTyping: vi.fn(async () => undefined),
     sendMessage: vi.fn(async () => message({ id: 2002, outgoing: true })),
+    markRead: vi.fn(async () => ({ read: true, maxId: null })),
   };
   const events = new Subject<RealtimeEvent>();
   const realtime = {
@@ -222,6 +223,7 @@ describe('DmAutopilotService.onMessage filters', () => {
 
     for (const harnessed of [h, group, old]) {
       expect(harnessed.agent.run).not.toHaveBeenCalled();
+      expect(harnessed.messaging.markRead).not.toHaveBeenCalled();
     }
     expect(h.prisma.telegramAccount.findUnique).not.toHaveBeenCalled();
     expect(group.prisma.telegramAccount.findUnique).not.toHaveBeenCalled();
@@ -267,6 +269,40 @@ describe('DmAutopilotService.onMessage filters', () => {
     });
     await notAllowed.internals.onMessage('user-1', payload());
     expect(notAllowed.agent.run).not.toHaveBeenCalled();
+    expect(notAllowed.messaging.markRead).not.toHaveBeenCalled();
+  });
+
+  it('marks the chat read immediately, before generating the reply', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+
+    await h.internals.onMessage('user-1', payload());
+
+    expect(h.messaging.markRead).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { maxId: 1001 },
+    );
+    // The debounce timer has not fired yet: the receipt is already visible.
+    expect(h.agent.run).not.toHaveBeenCalled();
+
+    await vi.runAllTimersAsync();
+    expect(h.agent.run).toHaveBeenCalled();
+  });
+
+  it('keeps working when the read receipt fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+    h.messaging.markRead.mockRejectedValueOnce(new Error('flood wait'));
+
+    await h.internals.onMessage('user-1', payload());
+    await vi.runAllTimersAsync();
+
+    expect(h.agent.run).toHaveBeenCalled();
+    expect(h.messaging.sendMessage).toHaveBeenCalled();
   });
 });
 

@@ -129,6 +129,11 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (!text && !message.mediaType) return;
     const senderName = message.senderName || `Чат ${chatId}`;
 
+    // A human shows the read receipt the moment the message is opened, so the
+    // agent marks everything up to this message as read before generating the
+    // reply — not after the typing simulation a minute later.
+    await this.markRead(userId, accountId, chatId, message.id);
+
     const chatKey = `${accountId}:${chatId}`;
     const existing = this.pending.get(chatKey);
     if (existing) clearTimeout(existing.timer);
@@ -150,6 +155,36 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       message,
       senderName,
     });
+  }
+
+  /**
+   * Marks the chat read up to `messageId` on the active engine. Read receipts
+   * are best-effort: a failure must never block the autopilot reply.
+   */
+  private async markRead(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    messageId: number,
+  ): Promise<void> {
+    try {
+      await this.messaging.markRead(userId, accountId, String(chatId), {
+        maxId: messageId,
+      });
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.read',
+        message: `Read up to message ${messageId} in ${chatId}`,
+        status: 'ok',
+        accountId,
+        chatId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Could not mark chat ${chatId} as read: ${(error as Error).message}`,
+      );
+    }
   }
 
   /** Keeps the Telegram "typing…" action alive for `durationMs`. */

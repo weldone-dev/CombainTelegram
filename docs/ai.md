@@ -170,7 +170,10 @@ no dashboard open) and:
 2. requires an existing soul with `mode != off` and a chat allowed by
    `allowsChat()` (`excludeChatIds` wins, then `allowAllChats`, then `chatIds`);
 3. debounces per account+chat (`min(1.5 s, max(200 ms, replyDelayMs))`), keeps a
-   per-chat lock, and dedupes message ids;
+   per-chat lock, and dedupes message ids; before generating anything it marks
+   the chat read up to that message on the active engine, so the sender sees the
+   read receipt immediately instead of after the typing simulation (best-effort:
+   a failed receipt never blocks the reply);
 4. enforces `maxPerHour` / `maxPerChatPerDay` by counting assistant `SoulTurn`
    rows;
 5. runs the agent with `source = "dm"`, the persona and memory, no tools
