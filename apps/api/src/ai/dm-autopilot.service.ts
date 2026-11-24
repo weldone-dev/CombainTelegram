@@ -310,7 +310,19 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       (media.kind === 'document' &&
         (media.mimeType ?? '').toLowerCase().startsWith('image/'));
     if (!isImage) return [];
-    if (media.size !== null && media.size > MAX_IMAGE_BYTES) return [];
+    if (media.size !== null && media.size > MAX_IMAGE_BYTES) {
+      emitLog({
+        level: 'warn',
+        source: 'ai',
+        action: 'dm.autopilot.image',
+        message: `Skipped an image of ${media.size} bytes (limit ${MAX_IMAGE_BYTES})`,
+        status: 'failed',
+        accountId,
+        chatId,
+        details: { messageId: message.id, bytes: media.size },
+      });
+      return [];
+    }
     try {
       const file = await this.messaging.downloadMedia(
         userId,
@@ -320,6 +332,16 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       );
       if (!file.mimeType.toLowerCase().startsWith('image/')) return [];
       if (file.data.length > MAX_IMAGE_BYTES) return [];
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.image',
+        message: `Forwarded a ${file.mimeType} image (${file.data.length} bytes) to the model`,
+        status: 'ok',
+        accountId,
+        chatId,
+        details: { messageId: message.id, mime: file.mimeType, bytes: file.data.length },
+      });
       return [{ mime: file.mimeType, data: file.data }];
     } catch (error) {
       this.logger.warn(
