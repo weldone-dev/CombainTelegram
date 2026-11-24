@@ -230,6 +230,7 @@ export interface TdMessenger {
   ): Promise<DeletedMessageView>;
   markRead(peerId: number, maxId?: number): Promise<ReadView>;
   markAllRead(): Promise<ReadAllView>;
+  setOnline(online: boolean): Promise<{ online: boolean }>;
   sendTyping(
     peerId: number,
     status: TdTypingStatus,
@@ -1880,6 +1881,31 @@ export class TdSessionMessenger implements TdMessenger {
       revoke,
     });
     return { deleted: true, messageId };
+  }
+
+  /**
+   * TDLib keeps the account online while it runs. The `online` option lets
+   * the app look away after idle time; the next interaction sets it back.
+   */
+  async setOnline(online: boolean): Promise<{ online: boolean }> {
+    await this.client.api.setOption({
+      name: 'online',
+      value: { _: 'optionValueBoolean', value: online },
+    });
+    // Read the option back: TDLib ignores unknown option names, and a silent
+    // mismatch would make the account look online forever.
+    try {
+      const value = (await this.client.api.getOption({ name: 'online' })) as {
+        _?: string;
+        value?: boolean;
+      };
+      if (value?._ === 'optionValueBoolean') {
+        return { online: value.value === true };
+      }
+    } catch {
+      // Older TDLib builds without the option: keep the requested value.
+    }
+    return { online };
   }
 
   async markRead(peerId: number, maxId?: number): Promise<ReadView> {

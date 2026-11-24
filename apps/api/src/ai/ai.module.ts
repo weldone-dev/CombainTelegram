@@ -12,6 +12,7 @@ import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
 import { DmAutopilotService } from './dm-autopilot.service.js';
+import { PresenceService } from './presence.service.js';
 import { AiController, SoulController } from './ai.controller.js';
 import { AutomationsService } from '../automations/automations.service.js';
 import { AutomationRunnerService } from '../automations/automation-runner.service.js';
@@ -52,6 +53,7 @@ import { McpController } from '../mcp/mcp.controller.js';
     MemoryService,
     AgentToolsService,
     AgentService,
+    PresenceService,
     DmAutopilotService,
     AutomationsService,
     AutomationRunnerService,

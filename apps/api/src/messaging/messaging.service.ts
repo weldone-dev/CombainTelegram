@@ -2004,6 +2004,42 @@ export class MessagingService {
     }
   }
 
+  /**
+   * Forces the account online or offline on the active engine. TDLib manages
+   * presence itself; the `online` option is the supported escape hatch.
+   */
+  async setOnline(
+    userId: string,
+    accountId: string,
+    online: boolean,
+    sessionIdParam?: unknown,
+  ): Promise<{ online: boolean }> {
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+    const td = await this.tdFor(userId, accountId, sessionId, 'setOnline');
+    if (td) {
+      try {
+        return await td.setOnline(online);
+      } catch (error) {
+        this.logTdFailure(
+          'setOnline',
+          { userId, accountId, sessionId },
+          error,
+        );
+      }
+    }
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+    try {
+      await client.setOnline(online);
+      return { online };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
   async markRead(
     userId: string,
     accountId: string,

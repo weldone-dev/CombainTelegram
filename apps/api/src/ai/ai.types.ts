@@ -244,6 +244,10 @@ export interface SoulSettings {
   typingSpeed: number;
   /** Pass the peer's username and profile bio to the agent. */
   peerProfile: boolean;
+  /** Minutes without activity before the account goes offline; 0 disables. */
+  presenceIdleMinutes: number;
+  /** Seconds to wait before reading a message that arrived while offline. */
+  presenceReadDelaySeconds: number;
 }
 
 export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
@@ -256,6 +260,8 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   typing: true,
   typingSpeed: 300,
   peerProfile: true,
+  presenceIdleMinutes: 5,
+  presenceReadDelaySeconds: 10,
 };
 
 export interface SkillView {

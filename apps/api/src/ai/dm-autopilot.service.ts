@@ -13,6 +13,7 @@ import { emitLog } from '../logs/log-sink.js';
 import { AgentService } from './agent.service.js';
 import { MemoryService } from './memory.service.js';
 import { SoulsService, parseSoulSettings } from './souls.service.js';
+import { PresenceService } from './presence.service.js';
 import { typingDurationMs } from './typing.js';
 
 interface MessageNewPayload {
@@ -81,6 +82,8 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
   /** Live "typing…" heartbeats per chat. */
   private readonly typing = new Map<string, TypingState>();
   private readonly seen = new Set<string>();
+  /** Delayed read receipts for messages that arrived while offline. */
+  private readonly readTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly peerProfiles = new Map<
     string,
     { at: number; block: string }
@@ -96,6 +99,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     private readonly agent: AgentService,
     private readonly memory: MemoryService,
     private readonly souls: SoulsService,
+    private readonly presence: PresenceService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -127,6 +131,8 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     this.pending.clear();
     for (const entry of this.typing.values()) clearInterval(entry.timer);
     this.typing.clear();
+    for (const timer of this.readTimers) clearTimeout(timer);
+    this.readTimers.clear();
   }
 
   private async onMessage(userId: string, payload: unknown): Promise<void> {
@@ -164,10 +170,20 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (!text) return;
     const senderName = message.senderName || `Чат ${chatId}`;
 
-    // A human shows the read receipt the moment the message is opened, so the
-    // agent marks everything up to this message as read before generating the
-    // reply — not after the typing simulation a minute later.
-    await this.markRead(userId, accountId, chatId, message.id);
+    // A human shows the read receipt the moment the message is opened. If the
+    // account was offline (idle) it first comes back online, then reads after
+    // the configured delay — like picking up the phone.
+    const readDelayMs = await this.presence.incoming(accountId, chatId);
+    if (readDelayMs > 0) {
+      const timer = setTimeout(() => {
+        this.readTimers.delete(timer);
+        void this.markRead(userId, accountId, chatId, message.id);
+      }, readDelayMs);
+      timer.unref?.();
+      this.readTimers.add(timer);
+    } else {
+      await this.markRead(userId, accountId, chatId, message.id);
+    }
 
     const chatKey = `${accountId}:${chatId}`;
     // A new message always wins: it invalidates the reply that is generating
@@ -583,6 +599,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       { text: replyText, replyToId: message.id },
     );
     this.clearTyping(chatKey);
+    this.presence.touch(accountId);
     await this.memory.append(accountId, chatId, 'assistant', replyText, {
       messageId: sent.id,
       runId: result.runId,

@@ -68,6 +68,8 @@ export interface SoulSettings {
   typing: boolean;
   typingSpeed: number;
   peerProfile: boolean;
+  presenceIdleMinutes: number;
+  presenceReadDelaySeconds: number;
 }
 
 export interface SoulView {

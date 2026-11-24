@@ -1,0 +1,204 @@
+import { Injectable, Logger } from '@nestjs/common';
+import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import type { Subscription } from 'rxjs';
+import { DefaultUserService } from '../user-context/default-user.service.js';
+import { MessagingService } from '../messaging/messaging.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
+import { emitLog } from '../logs/log-sink.js';
+import { SoulsService, parseSoulSettings } from './souls.service.js';
+
+interface PresenceState {
+  /** Whether the account is currently shown as online. */
+  online: boolean;
+  idleTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface PresencePayload {
+  accountId?: unknown;
+  chatId?: unknown;
+  message?: { outgoing?: boolean };
+}
+
+/**
+ * Keeps the account looking like a person: online while there is activity,
+ * offline after `presenceIdleMinutes` without any, and back online when a
+ * message arrives. The first message after the pause is read after
+ * `presenceReadDelaySeconds` instead of instantly.
+ */
+@Injectable()
+export class PresenceService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PresenceService.name);
+  private subscription?: Subscription;
+  private readonly states = new Map<string, PresenceState>();
+
+  constructor(
+    private readonly users: DefaultUserService,
+    private readonly realtime: RealtimeService,
+    private readonly souls: SoulsService,
+    private readonly messaging: MessagingService,
+  ) {}
+
+  async onModuleInit(): Promise<void> {
+    this.subscription = this.realtime.events$.subscribe((event) => {
+      const payload = (event.payload ?? {}) as PresencePayload;
+      const accountId =
+        typeof payload.accountId === 'string' ? payload.accountId : '';
+      if (!accountId) return;
+      if (event.event === 'ai.reply') {
+        this.touch(accountId);
+        return;
+      }
+      if (event.event === 'message.new' && payload.message?.outgoing) {
+        this.touch(accountId);
+      }
+    });
+
+    // Arm the idle timer for every account that has a soul, so a restart does
+    // not leave the account online forever.
+    try {
+      const souls = await this.souls.list();
+      for (const soul of souls) await this.scheduleIdle(soul.accountId);
+    } catch (error) {
+      this.logger.warn(
+        `Could not arm presence timers: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  onModuleDestroy(): void {
+    this.subscription?.unsubscribe();
+    for (const state of this.states.values()) {
+      if (state.idleTimer) clearTimeout(state.idleTimer);
+    }
+    this.states.clear();
+  }
+
+  /** Marks the account active; it goes offline again after the idle window. */
+  touch(accountId: string): void {
+    const state = this.state(accountId);
+    if (!state.online) {
+      state.online = true;
+      void this.applyOnline(accountId, true);
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'presence.online',
+        message: 'Activity after the pause; the account is online again',
+        status: 'ok',
+        accountId,
+      });
+    }
+    void this.scheduleIdle(accountId);
+  }
+
+  /**
+   * Called for an incoming DM before the autopilot reads it. Returns how long
+   * to wait before marking it read: `0` while the account is already online,
+   * or the configured "came back online" delay when it was offline.
+   */
+  async incoming(accountId: string, chatId: number): Promise<number> {
+    const settings = await this.settingsFor(accountId);
+    const wasOffline = !this.state(accountId).online;
+    this.touch(accountId);
+    if (!wasOffline) return 0;
+    const delayMs = Math.min(
+      300,
+      Math.max(0, settings?.presenceReadDelaySeconds ?? 10),
+    ) * 1000;
+    emitLog({
+      level: 'debug',
+      source: 'ai',
+      action: 'presence.online',
+      message: `Back online; ${chatId} will be read in ${delayMs} ms`,
+      status: 'ok',
+      accountId,
+      chatId,
+      details: { readDelayMs: delayMs },
+    });
+    return delayMs;
+  }
+
+  private state(accountId: string): PresenceState {
+    let state = this.states.get(accountId);
+    if (!state) {
+      // TDLib keeps the account online while it runs.
+      state = { online: true };
+      this.states.set(accountId, state);
+    }
+    return state;
+  }
+
+  private async settingsFor(accountId: string) {
+    const soul = await this.souls.model(accountId);
+    return soul ? parseSoulSettings(soul.settings) : null;
+  }
+
+  private async scheduleIdle(accountId: string): Promise<void> {
+    const settings = await this.settingsFor(accountId);
+    if (!settings) return;
+    const state = this.state(accountId);
+    if (state.idleTimer) {
+      clearTimeout(state.idleTimer);
+      state.idleTimer = undefined;
+    }
+    const minutes = Math.min(
+      180,
+      Math.max(0, settings.presenceIdleMinutes),
+    );
+    if (minutes === 0) {
+      if (!state.online) {
+        state.online = true;
+        await this.applyOnline(accountId, true);
+      }
+      return;
+    }
+    const timer = setTimeout(() => {
+      void this.goOffline(accountId, minutes);
+    }, minutes * 60_000);
+    timer.unref?.();
+    state.idleTimer = timer;
+  }
+
+  private async goOffline(accountId: string, minutes: number): Promise<void> {
+    const state = this.state(accountId);
+    state.idleTimer = undefined;
+    if (!state.online) return;
+    state.online = false;
+    await this.applyOnline(accountId, false);
+    emitLog({
+      level: 'debug',
+      source: 'ai',
+      action: 'presence.offline',
+      message: `No activity for ${minutes} min; the account looks offline`,
+      status: 'ok',
+      accountId,
+      details: { idleMinutes: minutes },
+    });
+  }
+
+  private async applyOnline(accountId: string, online: boolean): Promise<void> {
+    try {
+      const user = await this.users.get();
+      const applied = await this.messaging.setOnline(
+        user.id,
+        accountId,
+        online,
+      );
+      if (applied.online !== online) {
+        emitLog({
+          level: 'warn',
+          source: 'ai',
+          action: 'presence.option_ignored',
+          message: `TDLib kept the account ${applied.online ? 'online' : 'offline'} instead of switching`,
+          status: 'failed',
+          accountId,
+          details: { requested: online, applied: applied.online },
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not switch presence of ${accountId}: ${(error as Error).message}`,
+      );
+    }
+  }
+}

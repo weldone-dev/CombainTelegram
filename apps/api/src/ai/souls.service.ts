@@ -73,6 +73,22 @@ function mergeSoulSettings(
   if (typeof source.peerProfile === 'boolean') {
     next.peerProfile = source.peerProfile;
   }
+  if (source.presenceIdleMinutes !== undefined) {
+    next.presenceIdleMinutes = clampInt(
+      source.presenceIdleMinutes,
+      current.presenceIdleMinutes,
+      0,
+      180,
+    );
+  }
+  if (source.presenceReadDelaySeconds !== undefined) {
+    next.presenceReadDelaySeconds = clampInt(
+      source.presenceReadDelaySeconds,
+      current.presenceReadDelaySeconds,
+      0,
+      300,
+    );
+  }
   if (source.typingSpeed !== undefined) {
     next.typingSpeed = clampTypingCpm(
       source.typingSpeed,
@@ -118,6 +134,18 @@ export function parseSoulSettings(raw: unknown): SoulSettings {
       DEFAULT_SOUL_SETTINGS.typingSpeed,
     ),
     peerProfile: source.peerProfile !== false,
+    presenceIdleMinutes: clampInt(
+      source.presenceIdleMinutes,
+      DEFAULT_SOUL_SETTINGS.presenceIdleMinutes,
+      0,
+      180,
+    ),
+    presenceReadDelaySeconds: clampInt(
+      source.presenceReadDelaySeconds,
+      DEFAULT_SOUL_SETTINGS.presenceReadDelaySeconds,
+      0,
+      300,
+    ),
   };
 }
 

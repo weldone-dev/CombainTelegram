@@ -171,6 +171,10 @@ function harness(
     maybeCompact: vi.fn(async () => true),
   };
 
+  const presence = {
+    incoming: vi.fn(async () => 0),
+    touch: vi.fn(),
+  };
   const souls = new SoulsService({} as never, {} as never);
   const soul = options.soul === undefined ? soulRow() : options.soul;
   const modelSpy = vi
@@ -187,6 +191,7 @@ function harness(
     agent as never,
     memory as never,
     souls,
+    presence as never,
   );
   const internals = service as unknown as Internals;
   const tokenFor = (): number => internals.nextToken(`account-1:${CHAT_ID}`);
@@ -204,6 +209,7 @@ function harness(
     agent,
     memory,
     souls,
+    presence,
     modelSpy,
   };
 }
@@ -318,6 +324,29 @@ describe('DmAutopilotService.onMessage filters', () => {
 
     await vi.runAllTimersAsync();
     expect(h.agent.run).toHaveBeenCalled();
+  });
+
+  it('reads after the presence delay when the account was offline', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+    h.presence.incoming.mockResolvedValueOnce(10_000);
+
+    await h.internals.onMessage('user-1', payload({ id: 1001 }));
+
+    expect(h.presence.incoming).toHaveBeenCalledWith('account-1', CHAT_ID);
+    expect(h.messaging.markRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(h.messaging.markRead).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.messaging.markRead).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { maxId: 1001 },
+    );
   });
 
   it('keeps working when the read receipt fails', async () => {

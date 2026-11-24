@@ -158,6 +158,8 @@ Modes:
 | `typing` | `true` | send `typing` while generating/sending |
 | `typingSpeed` | `300` | characters per minute for the typing indicator, clamped to 40…600 (600 = human upper bound) |
 | `peerProfile` | `true` | pass the peer's Telegram name, username and profile bio to the agent (cached 10 min, best-effort) |
+| `presenceIdleMinutes` | `5` | minutes without activity before the account looks offline; `0` never goes offline |
+| `presenceReadDelaySeconds` | `10` | delay before reading a message that arrived while the account was offline |
 
 `PUT` validates the mode and replaces `settings` with the parsed object; because
 parsing fills defaults first, omitted keys fall back to the defaults above — send
@@ -195,6 +197,23 @@ no dashboard open) and:
 It never starts a conversation: only replies to an incoming message. Autopilot
 writes are exempt from `dryRun` because `auto`/`draft` is an explicit opt-in
 (§9); the UI says so next to the flag.
+
+### Presence (online/offline)
+
+`PresenceService` makes the account behave like a person who is not glued to
+the phone:
+
+- any activity (incoming DM, sent reply, outgoing message) marks the account
+  online and re-arms an idle timer;
+- after `presenceIdleMinutes` without activity it calls `setOnline(false)`
+  (TDLib option `online`, mtcute `setOnline`), so the peer sees the last-seen
+  status instead of "online";
+- the first DM after that switches the account back online and marks the chat
+  read `presenceReadDelaySeconds` later, so the sender sees "online" first and
+  the read receipt after the delay.
+
+Logs: `presence.offline`, `presence.online`, `presence.option_ignored` (TDLib
+did not apply the option), plus the usual `dm.autopilot.read`.
 
 ## 5. Memory
 

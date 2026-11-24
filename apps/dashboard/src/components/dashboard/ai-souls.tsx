@@ -49,6 +49,8 @@ interface NumberDraft {
   maxPerHour: string;
   maxPerChatPerDay: string;
   typingSpeed: string;
+  presenceIdleMinutes: string;
+  presenceReadDelaySeconds: string;
   temperature: string;
 }
 
@@ -57,6 +59,8 @@ const EMPTY_NUMBERS: NumberDraft = {
   maxPerHour: "",
   maxPerChatPerDay: "",
   typingSpeed: "",
+  presenceIdleMinutes: "",
+  presenceReadDelaySeconds: "",
   temperature: "",
 };
 
@@ -66,6 +70,8 @@ function numbersOf(soul: SoulView): NumberDraft {
     maxPerHour: String(soul.settings.maxPerHour),
     maxPerChatPerDay: String(soul.settings.maxPerChatPerDay),
     typingSpeed: String(soul.settings.typingSpeed),
+    presenceIdleMinutes: String(soul.settings.presenceIdleMinutes),
+    presenceReadDelaySeconds: String(soul.settings.presenceReadDelaySeconds),
     temperature: String(soul.temperature),
   };
 }
@@ -325,6 +331,18 @@ export function SoulsPanel() {
             freshDraft.settings.typingSpeed,
             40,
             600,
+          ),
+          presenceIdleMinutes: clampNumber(
+            numbers.presenceIdleMinutes,
+            freshDraft.settings.presenceIdleMinutes,
+            0,
+            180,
+          ),
+          presenceReadDelaySeconds: clampNumber(
+            numbers.presenceReadDelaySeconds,
+            freshDraft.settings.presenceReadDelaySeconds,
+            0,
+            300,
           ),
         },
         skillSlugs: freshDraft.skills.map((skill) => skill.slug),
@@ -627,6 +645,35 @@ export function SoulsPanel() {
                     label="Передавать профиль собеседника"
                     hint="Username и описание из профиля Telegram"
                   />
+                  <Field
+                    label="Уходить в оффлайн через, мин"
+                    hint="0 — не уходить в оффлайн"
+                  >
+                    <input
+                      value={numbers.presenceIdleMinutes}
+                      onChange={(event) =>
+                        updateNumber("presenceIdleMinutes", event.target.value)
+                      }
+                      inputMode="numeric"
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    label="Читать после возврата, сек"
+                    hint="Задержка чтения сообщения, пришедшего в оффлайн"
+                  >
+                    <input
+                      value={numbers.presenceReadDelaySeconds}
+                      onChange={(event) =>
+                        updateNumber(
+                          "presenceReadDelaySeconds",
+                          event.target.value,
+                        )
+                      }
+                      inputMode="numeric"
+                      className={inputClass}
+                    />
+                  </Field>
                   <Field
                     label="Разрешённые chat id"
                     hint="ID пользователей через запятую"
