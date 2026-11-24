@@ -179,6 +179,8 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       return cached.block;
     }
     let block = '';
+    let hasUsername = false;
+    let bioChars = 0;
     try {
       const info = await this.messaging.getChatInfo(
         userId,
@@ -188,6 +190,8 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       const name = info.title || `id ${chatId}`;
       const username = info.username ? ` (@${info.username})` : '';
       const about = info.about?.trim() ?? '';
+      hasUsername = Boolean(info.username);
+      bioChars = about.length;
       block = [
         `Собеседник в Telegram: ${name}${username}.`,
         about ? `О собеседнике в профиле: ${about}` : '',
@@ -200,6 +204,16 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       );
       return '';
     }
+    emitLog({
+      level: 'debug',
+      source: 'ai',
+      action: 'dm.autopilot.peer',
+      message: `Peer profile for ${chatId}: username=${hasUsername ? 'yes' : 'no'}, bio=${bioChars} chars`,
+      status: 'ok',
+      accountId,
+      chatId,
+      details: { hasUsername, bioChars },
+    });
     this.peerProfiles.set(key, { at: Date.now(), block });
     if (this.peerProfiles.size > 500) {
       const oldest = this.peerProfiles.keys().next().value;
