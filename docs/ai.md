@@ -170,10 +170,13 @@ no dashboard open) and:
    Saved Messages and messages older than 2 minutes;
 2. requires an existing soul with `mode != off` and a chat allowed by
    `allowsChat()` (`excludeChatIds` wins, then `allowAllChats`, then `chatIds`);
-3. debounces per account+chat (`min(1.5 s, max(200 ms, replyDelayMs))`), keeps a
-   per-chat lock, and dedupes message ids; before generating anything it marks
-   the chat read up to that message on the active engine, so the sender sees the
-   read receipt immediately instead of after the typing simulation (best-effort:
+3. debounces per account+chat (`min(1.5 s, max(200 ms, replyDelayMs))`), dedupes
+   message ids and accumulates up to 5 consecutive messages, so a burst gets one
+   reply covering all of them; every new message bumps a per-chat token and
+   cancels the reply that is still generating or typing — its result is dropped,
+   `typing…` is hidden and the run restarts with the new context; before
+   generating anything it marks the chat read up to the incoming message on the
+   active engine, so the sender sees the read receipt immediately (best-effort:
    a failed receipt never blocks the reply);
 4. enforces `maxPerHour` / `maxPerChatPerDay` by counting assistant `SoulTurn`
    rows;
@@ -182,11 +185,12 @@ no dashboard open) and:
    message to memory; when `peerProfile` is on, the system prompt also carries
    the peer's username and profile bio (`getChatInfo`), so the soul knows who it
    is talking to;
-6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` optionally sends
-   typing (`typingDurationMs = length / typingSpeed`, 0.6…60 s, refreshed every
-   4 s, so longer replies keep the indicator longer), sends the reply as a
-   Telegram reply, appends
-   the assistant turn, emits `ai.reply` and triggers memory compaction.
+6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` keeps a `typing…`
+   heartbeat every 4 s while the model works, holds it until
+   `typingDurationMs = length / typingSpeed` (0.6…60 s) has elapsed, then sends
+   the reply as a Telegram reply, appends the assistant turn, emits `ai.reply`
+   and triggers memory compaction. A cancelled run clears the heartbeat and
+   sends `chatActionCancel`, so the indicator disappears until the next run.
 
 It never starts a conversation: only replies to an incoming message. Autopilot
 writes are exempt from `dryRun` because `auto`/`draft` is an explicit opt-in

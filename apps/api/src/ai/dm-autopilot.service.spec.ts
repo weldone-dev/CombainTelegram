@@ -10,6 +10,14 @@ import { SoulsService } from './souls.service.js';
 const NOW = new Date('2026-11-24T12:00:00.000Z');
 const CHAT_ID = 42;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function message(overrides: Partial<MessageView> = {}): MessageView {
   return {
     id: 1001,
@@ -77,7 +85,10 @@ interface Internals {
     chatId: number,
     message: MessageView,
     senderName: string,
+    token: number,
+    texts: Array<{ id: number; text: string }>,
   ): Promise<void>;
+  nextToken(chatKey: string): number;
 }
 
 function harness(
@@ -178,8 +189,10 @@ function harness(
     souls,
   );
   const internals = service as unknown as Internals;
+  const tokenFor = (): number => internals.nextToken(`account-1:${CHAT_ID}`);
 
   return {
+    tokenFor,
     service,
     internals,
     prisma,
@@ -325,7 +338,15 @@ describe('DmAutopilotService.reply', () => {
   it('stores a draft and does not send in draft mode', async () => {
     const h = harness({ soul: soulRow({ mode: 'draft' }) });
 
-    await h.internals.reply('user-1', 'account-1', CHAT_ID, message(), 'Peer');
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
+    );
 
     expect(h.messaging.sendMessage).not.toHaveBeenCalled();
     expect(h.messaging.sendTyping).not.toHaveBeenCalled();
@@ -373,6 +394,8 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     await vi.runAllTimersAsync();
     await pending;
@@ -383,14 +406,7 @@ describe('DmAutopilotService.reply', () => {
         history: [],
       }),
     );
-    expect(h.messaging.sendTyping).toHaveBeenNthCalledWith(
-      1,
-      'user-1',
-      'account-1',
-      String(CHAT_ID),
-    );
-    expect(h.messaging.sendTyping).toHaveBeenNthCalledWith(
-      2,
+    expect(h.messaging.sendTyping).toHaveBeenCalledWith(
       'user-1',
       'account-1',
       String(CHAT_ID),
@@ -437,6 +453,8 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     await vi.runAllTimersAsync();
     await pending;
@@ -483,6 +501,8 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     await vi.runAllTimersAsync();
     await pending;
@@ -516,6 +536,8 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     await vi.runAllTimersAsync();
     await pending;
@@ -531,7 +553,15 @@ describe('DmAutopilotService.reply', () => {
   it('refuses to reply for an unknown mode', async () => {
     const h = harness({ soul: soulRow({ mode: 'weird' }) });
 
-    await h.internals.reply('user-1', 'account-1', CHAT_ID, message(), 'Peer');
+    await h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
+    );
 
     expect(h.agent.run).not.toHaveBeenCalled();
     expect(h.messaging.sendMessage).not.toHaveBeenCalled();
@@ -555,12 +585,22 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     await vi.runAllTimersAsync();
     await pending;
 
     expect(h.messaging.sendMessage).not.toHaveBeenCalled();
-    expect(h.memory.append).not.toHaveBeenCalled();
+    // The incoming turn is stored, the abstain itself is not.
+    expect(h.memory.append).toHaveBeenCalledTimes(1);
+    expect(h.memory.append).toHaveBeenCalledWith(
+      'account-1',
+      CHAT_ID,
+      'user',
+      'Hi there',
+      { messageId: 1001 },
+    );
   });
 
   it('respects the per-hour and per-chat limits', async () => {
@@ -581,6 +621,8 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      perHour.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     expect(perHour.agent.run).not.toHaveBeenCalled();
     expect(perHour.messaging.sendMessage).not.toHaveBeenCalled();
@@ -602,6 +644,8 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      perChat.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     expect(perChat.agent.run).not.toHaveBeenCalled();
 
@@ -626,10 +670,143 @@ describe('DmAutopilotService.reply', () => {
       CHAT_ID,
       message(),
       'Peer',
+      unlimited.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
     );
     await vi.runAllTimersAsync();
     await pending;
     expect(unlimited.agent.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers the latest message when two arrive before the reply', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+
+    await h.internals.onMessage('user-1', payload({ id: 1001, text: 'first' }));
+    await h.internals.onMessage('user-1', payload({ id: 1002, text: 'second' }));
+    await vi.runAllTimersAsync();
+
+    expect(h.agent.run).toHaveBeenCalledTimes(1);
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('second'),
+      }),
+    );
+    expect(h.memory.append).toHaveBeenCalledWith(
+      'account-1',
+      CHAT_ID,
+      'user',
+      'first',
+      { messageId: 1001 },
+    );
+    expect(h.memory.append).toHaveBeenCalledWith(
+      'account-1',
+      CHAT_ID,
+      'user',
+      'second',
+      { messageId: 1002 },
+    );
+    expect(h.messaging.sendMessage).toHaveBeenCalledTimes(1);
+    expect(h.messaging.sendMessage).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { text: 'Hello back', replyToId: 1002 },
+    );
+  });
+
+  it('cancels the in-flight reply when a newer message arrives', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+    const slow = deferred<void>();
+    h.agent.run.mockImplementationOnce(async () => {
+      await slow.promise;
+      return {
+        runId: 'run-1',
+        text: 'old reply',
+        model: 'main-model',
+        steps: 1,
+        trace: [],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    });
+
+    await h.internals.onMessage('user-1', payload({ id: 1001, text: 'first' }));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(h.agent.run).toHaveBeenCalledTimes(1);
+
+    await h.internals.onMessage('user-1', payload({ id: 1002, text: 'second' }));
+    expect(h.messaging.sendTyping).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { status: 'cancel' },
+    );
+
+    slow.resolve();
+    await vi.runAllTimersAsync();
+
+    expect(h.messaging.sendMessage).toHaveBeenCalledTimes(1);
+    expect(h.messaging.sendMessage).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      { text: 'Hello back', replyToId: 1002 },
+    );
+    expect(h.memory.append).not.toHaveBeenCalledWith(
+      'account-1',
+      CHAT_ID,
+      'assistant',
+      'old reply',
+      expect.anything(),
+    );
+    expect(h.realtime.emitToUser).not.toHaveBeenCalledWith(
+      'user-1',
+      'ai.reply',
+      expect.objectContaining({ text: 'old reply' }),
+    );
+  });
+
+  it('keeps the typing indicator alive while the model is thinking', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+    const thinking = deferred<void>();
+    h.agent.run.mockImplementationOnce(async () => {
+      await thinking.promise;
+      return {
+        runId: 'run-1',
+        text: 'Hello back',
+        model: 'main-model',
+        steps: 1,
+        trace: [],
+        usage: { promptTokens: 1, completionTokens: 1 },
+      };
+    });
+
+    await h.internals.onMessage('user-1', payload({ id: 1001, text: 'hi' }));
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(9_000);
+
+    const typing = h.messaging.sendTyping.mock.calls.filter(
+      (call) => (call[3] as { status?: string } | undefined)?.status === 'typing',
+    );
+    expect(typing.length).toBeGreaterThanOrEqual(3);
+
+    thinking.resolve();
+    await vi.runAllTimersAsync();
+    expect(h.messaging.sendMessage).toHaveBeenCalledTimes(1);
   });
 });
 
