@@ -33,6 +33,7 @@ import {
 } from "../../lib/session-events";
 import { playChime, readSoundEnabled } from "../../lib/sound";
 import type {
+  AiReplyEvent,
   ChatFolderSelection,
   ChatPatch,
   ChatView,
@@ -47,6 +48,7 @@ import type {
   TypingEntry,
 } from "../../lib/types";
 import { AccountsSidebar } from "../messenger/accounts-sidebar";
+import { AiAccessProvider } from "../messenger/ai-access-store";
 import { ChatList } from "../messenger/chat-list";
 import { ChatWindow } from "../messenger/chat-window";
 import { useAppData } from "./app-data";
@@ -859,6 +861,29 @@ export function ChatsPage() {
   // Realtime events are published to the shared bus by the app-wide socket.
   useEffect(() => {
     return subscribeRealtime(({ event, payload }) => {
+      if (event === "ai.reply") {
+        const data = payload as AiReplyEvent;
+        if (data.accountId !== selectedAccountId) return;
+        const message = data.message;
+        // The autopilot emits ai.reply after sending the bubble. Telegram also
+        // reports it as message.new; dedupe by id so the bubble renders once.
+        if (data.chatId === selectedChatId) {
+          setMessages((previous) =>
+            previous.some((item) => item.id === message.id)
+              ? previous
+              : [message, ...previous],
+          );
+        }
+        setChats((previous) =>
+          previous.map((chat) =>
+            chat.id === data.chatId
+              ? { ...chat, lastMessage: message, unreadCount: 0 }
+              : chat,
+          ),
+        );
+        return;
+      }
+
       if (event === "message.new") {
         const data = payload as RealtimeMessageEvent;
         const message = data.message;
@@ -1069,62 +1094,66 @@ export function ChatsPage() {
           onRefresh={() => void reloadAccounts()}
         />
 
-        <ChatList
-          hasAccount={Boolean(selectedAccount)}
-          chats={chats}
-          loading={chatsLoading}
-          error={chatsError}
-          selectedId={selectedChatId}
-          onSelect={handleSelectChat}
-          accountLabel={
-            selectedAccount ? accountName(selectedAccount) : "Аккаунт не выбран"
-          }
-          accountId={selectedAccount?.id ?? null}
-          onRefresh={refreshChats}
-          folders={folders}
-          foldersLoading={foldersLoading}
-          selectedFolder={folder}
-          onSelectFolder={handleSelectFolder}
-          canLoadMore={
-            nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
-          }
-          loadingMore={chatsLoading}
-          onLoadMore={loadMoreChats}
-          onUpdateChat={applyChatPatch}
-          onMarkRead={markChatRead}
-          onClearHistory={clearChatHistory}
-          onDeleteChat={deleteChatRow}
-          onReadAll={markAllChatsRead}
-          onOpenChat={openChat}
-          onOpenMessage={openMessage}
-          onResolveUsername={resolveAndOpen}
-        />
+        <AiAccessProvider accountId={selectedAccount?.id ?? null}>
+          <ChatList
+            hasAccount={Boolean(selectedAccount)}
+            chats={chats}
+            loading={chatsLoading}
+            error={chatsError}
+            selectedId={selectedChatId}
+            onSelect={handleSelectChat}
+            accountLabel={
+              selectedAccount
+                ? accountName(selectedAccount)
+                : "Аккаунт не выбран"
+            }
+            accountId={selectedAccount?.id ?? null}
+            onRefresh={refreshChats}
+            folders={folders}
+            foldersLoading={foldersLoading}
+            selectedFolder={folder}
+            onSelectFolder={handleSelectFolder}
+            canLoadMore={
+              nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
+            }
+            loadingMore={chatsLoading}
+            onLoadMore={loadMoreChats}
+            onUpdateChat={applyChatPatch}
+            onMarkRead={markChatRead}
+            onClearHistory={clearChatHistory}
+            onDeleteChat={deleteChatRow}
+            onReadAll={markAllChatsRead}
+            onOpenChat={openChat}
+            onOpenMessage={openMessage}
+            onResolveUsername={resolveAndOpen}
+          />
 
-        <ChatWindow
-          account={selectedAccount}
-          chat={selectedChat}
-          chats={chats}
-          messages={messages}
-          loading={messagesLoading}
-          error={messagesError}
-          nextOffsetId={nextOffsetId}
-          loadingMore={loadingMore}
-          typing={chatTyping}
-          onLoadMore={() => void loadMore()}
-          onSend={(text, replyToId) => sendMessage(text, replyToId)}
-          onSendMedia={(file, caption, replyToId) =>
-            sendMedia(file, caption, replyToId)
-          }
-          onEdit={(messageId, text) => void editMessage(messageId, text)}
-          onMessageUpdated={replaceMessage}
-          onDelete={(messageId) => void deleteMessage(messageId)}
-          onDeleteMany={deleteMessages}
-          onForward={forwardMessages}
-          onTyping={() => void sendTyping()}
-          onRead={handleRead}
-          onOpenChat={handleSelectChat}
-          focusMessage={focusedMessage}
-        />
+          <ChatWindow
+            account={selectedAccount}
+            chat={selectedChat}
+            chats={chats}
+            messages={messages}
+            loading={messagesLoading}
+            error={messagesError}
+            nextOffsetId={nextOffsetId}
+            loadingMore={loadingMore}
+            typing={chatTyping}
+            onLoadMore={() => void loadMore()}
+            onSend={(text, replyToId) => sendMessage(text, replyToId)}
+            onSendMedia={(file, caption, replyToId) =>
+              sendMedia(file, caption, replyToId)
+            }
+            onEdit={(messageId, text) => void editMessage(messageId, text)}
+            onMessageUpdated={replaceMessage}
+            onDelete={(messageId) => void deleteMessage(messageId)}
+            onDeleteMany={deleteMessages}
+            onForward={forwardMessages}
+            onTyping={() => void sendTyping()}
+            onRead={handleRead}
+            onOpenChat={handleSelectChat}
+            focusMessage={focusedMessage}
+          />
+        </AiAccessProvider>
       </div>
     </div>
   );

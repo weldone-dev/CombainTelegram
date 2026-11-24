@@ -12,6 +12,11 @@ function automationView(
   return {
     id: 'auto-1',
     accountId: 'acc-1',
+    chatId: null,
+    threadId: 0,
+    soulId: null,
+    createdBy: 'user',
+    timezone: null,
     name: 'Digest',
     description: '',
     enabled: true,
@@ -21,6 +26,10 @@ function automationView(
     action: { type: 'agent', prompt: 'Report' },
     lastRunAt: null,
     nextRunAt: null,
+    nextDueAt: null,
+    selfPaused: false,
+    selfPausedAt: null,
+    selfPauseReason: null,
     runCount: 0,
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
@@ -36,6 +45,7 @@ function createHarness(
   if (view) views.set(view.id, view);
 
   const automations = {
+    due: vi.fn(async (): Promise<unknown[]> => []),
     get: vi.fn(async (id: string) => {
       const found = views.get(id);
       if (!found) {
@@ -111,10 +121,14 @@ describe('AutomationRunnerService send_message', () => {
       status: 'ok',
       output: 'dryRun: would send to 5: hi',
     });
-    expect(harness.automations.complete).toHaveBeenCalledWith('auto-1', {
-      kind: 'every',
-      minutes: 10,
-    });
+    expect(harness.automations.complete).toHaveBeenCalledWith(
+      'auto-1',
+      {
+        kind: 'every',
+        minutes: 10,
+      },
+      null,
+    );
   });
 
   it('sends through MessagingService when dryRun is off', async () => {
@@ -342,6 +356,68 @@ describe('AutomationRunnerService.runNow', () => {
 
     await harness.service.runNow('auto-1');
 
+    expect(harness.automations.startRun).toHaveBeenCalledWith('auto-1', {});
+  });
+});
+
+describe('AutomationRunnerService chat binding', () => {
+  it('falls back to the chat the automation is bound to', async () => {
+    const harness = createHarness(
+      automationView({
+        chatId: 42,
+        actionType: 'send_message',
+        action: { type: 'send_message', text: 'hi' },
+      }),
+      { dryRun: false },
+    );
+
+    const result = await harness.service.runNow('auto-1');
+
+    expect(result.output).toBe('sent to 42');
+    expect(harness.messaging.sendMessage).toHaveBeenCalledWith(
+      'local',
+      'acc-1',
+      '42',
+      { text: 'hi' },
+    );
+  });
+
+  it('uses the bound chat for the agent context', async () => {
+    const harness = createHarness(automationView({ chatId: 42 }));
+
+    await harness.service.runNow('auto-1');
+
+    expect(harness.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 42 }),
+    );
+  });
+});
+
+describe('AutomationRunnerService.runDue', () => {
+  it('skips automations paused by their soul', async () => {
+    const harness = createHarness();
+    harness.automations.due.mockResolvedValue([
+      automationView({
+        id: 'paused',
+        selfPaused: true,
+        selfPausedAt: NOW.toISOString(),
+        selfPauseReason: 'Resting',
+      }),
+    ]);
+
+    const count = await harness.service.runDue();
+
+    expect(count).toBe(0);
+    expect(harness.automations.startRun).not.toHaveBeenCalled();
+  });
+
+  it('runs due automations that are not self-paused', async () => {
+    const harness = createHarness();
+    harness.automations.due.mockResolvedValue([automationView()]);
+
+    const count = await harness.service.runDue();
+
+    expect(count).toBe(1);
     expect(harness.automations.startRun).toHaveBeenCalledWith('auto-1', {});
   });
 });

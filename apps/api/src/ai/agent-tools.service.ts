@@ -9,10 +9,15 @@ import { AiPolicyService, PolicyError } from './ai-policy.service.js';
 import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
-import { AutomationsService } from '../automations/automations.service.js';
+import {
+  AutomationsService,
+  type AutomationView,
+} from '../automations/automations.service.js';
 import { BotsService } from '../bots/bots.service.js';
+import { AiAccessService } from '../ai-access/ai-access.service.js';
 import type {
   AgentTool,
+  AiCapability,
   ToolContext,
   ToolResult,
   ToolSchema,
@@ -38,6 +43,27 @@ function object(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object'
     ? (value as Record<string, unknown>)
     : {};
+}
+
+/** Forum topic / comment thread: `0` means the whole chat. */
+function threadIdOf(value: unknown): number {
+  if (value === undefined || value === null || value === '') return 0;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/** Optional string argument: absent stays absent, empty or null clears. */
+function nullableText(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  throw new Error(`${field} must be a boolean`);
 }
 
 function trimMessage(message: {
@@ -80,6 +106,7 @@ export class AgentToolsService {
     private readonly automations: AutomationsService,
     private readonly bots: BotsService,
     private readonly prisma: PrismaService,
+    private readonly access: AiAccessService,
   ) {
     this.registerAll();
   }
@@ -213,6 +240,47 @@ export class AgentToolsService {
     const chatId = number(args.chatId) ?? ctx.chatId;
     if (!chatId) throw new Error('chatId is required');
     return chatId;
+  }
+
+  /**
+   * Second gate for calls that take access away (mute a chat). It reuses the
+   * capability flags of {@link AiPolicyService} instead of a new confirmation
+   * switch, so `policy_update` stays the only way to grant it. Tools whose
+   * whole purpose is destructive (`chat_block`, `automation_pause_chat`) carry
+   * that capability themselves and are already filtered and asserted there.
+   */
+  private async requireDestructive(
+    capability: AiCapability,
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+  ): Promise<void> {
+    await this.policy.assert(capability, {
+      ...ctx,
+      accountId: text(args.accountId, ctx.accountId ?? '') || ctx.accountId,
+      chatId: number(args.chatId) ?? ctx.chatId,
+    });
+  }
+
+  /** Compact answer for the per-chat automation tools (views only, no rows). */
+  private chatAutomations(
+    accountId: string,
+    chatId: number,
+    threadId: unknown,
+    rows: AutomationView[],
+  ) {
+    return {
+      accountId,
+      chatId,
+      threadId: threadIdOf(threadId),
+      count: rows.length,
+      automations: rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        enabled: row.enabled,
+        selfPaused: row.selfPaused,
+        selfPauseReason: row.selfPauseReason,
+      })),
+    };
   }
 
   private register(tool: AgentTool): void {
@@ -959,8 +1027,9 @@ export class AgentToolsService {
     this.register({
       name: 'automation_create',
       description:
-        'Create an automation. Trigger: {"kind":"every","minutes":N} | {"kind":"daily","at":"HH:MM"} | {"kind":"incoming_message","keywords":[],"chatIds":[]}. Action: {"type":"agent","prompt":"..."} | {"type":"send_message","chatId":N,"text":"..."} | {"type":"summarize","chatId":N}.',
+        'Create an automation. Trigger: {"kind":"every","minutes":N} | {"kind":"daily","at":"HH:MM"} | {"kind":"incoming_message","keywords":[],"chatIds":[]}. Action: {"type":"agent","prompt":"..."} | {"type":"send_message","chatId":N,"text":"..."} | {"type":"summarize","chatId":N}. Pass chatId (+ threadId) to bind it to one chat; createdBy defaults to "soul" for a chat-bound automation.',
       capability: 'automations',
+      write: true,
       parameters: {
         type: 'object',
         properties: {
@@ -970,14 +1039,56 @@ export class AgentToolsService {
           trigger: { type: 'object' },
           action: { type: 'object' },
           enabled: { type: 'boolean', default: false },
+          chatId: {
+            type: 'number',
+            description: 'Telegram chat id; requires accountId.',
+          },
+          threadId: {
+            type: 'number',
+            description:
+              'Forum topic / comment thread the automation is bound to; 0 = whole chat.',
+          },
+          timezone: {
+            type: 'string',
+            description:
+              'IANA zone for "daily" triggers, e.g. Europe/Moscow; server-local when omitted.',
+          },
+          createdBy: {
+            type: 'string',
+            enum: ['user', 'soul', 'assistant'],
+            description: 'Defaults to "soul" when the automation is chat-bound.',
+          },
         },
         required: ['name', 'trigger', 'action'],
       },
-      handler: async (args, ctx) =>
-        this.automations.create({
-          ...args,
-          accountId: text(args.accountId, ctx.accountId ?? '') || undefined,
-        }),
+      handler: async (args, ctx) => {
+        const accountId = text(args.accountId, ctx.accountId ?? '') || undefined;
+        // Chat context: the call itself names a chat, or the surface is one.
+        const explicitChat =
+          args.chatId !== undefined && args.chatId !== null && args.chatId !== '';
+        const chatId = explicitChat ? number(args.chatId) : (ctx.chatId ?? null);
+        if (explicitChat && chatId === null) {
+          throw new Error('chatId must be a numeric Telegram id');
+        }
+        // An unbound (global) automation stays a user automation; anything
+        // tied to a chat and created from here is the soul's own follow-up.
+        const createdBy =
+          text(args.createdBy) || (chatId !== null ? 'soul' : undefined);
+        return this.automations.create({
+          accountId,
+          name: args.name,
+          description: args.description,
+          trigger: args.trigger,
+          action: args.action,
+          enabled: args.enabled,
+          ...(chatId !== null ? { chatId } : {}),
+          ...(args.threadId !== undefined
+            ? { threadId: threadIdOf(args.threadId) }
+            : {}),
+          ...(text(args.timezone) ? { timezone: text(args.timezone) } : {}),
+          ...(createdBy ? { createdBy } : {}),
+        });
+      },
     });
 
     this.register({
@@ -1023,6 +1134,242 @@ export class AgentToolsService {
         required: ['id'],
       },
       handler: async (args) => this.automations.requestRun(text(args.id)),
+    });
+
+    const threadProperty = {
+      type: 'number',
+      description:
+        'Forum topic / comment thread id; omit or 0 for the whole chat.',
+    };
+
+    this.register({
+      name: 'automation_pause_chat',
+      description:
+        'Pause every automation bound to this chat/topic: the soul cancels its own follow-ups there after disrespectful treatment. The reason is stored and shown in the chat card. Resume with automation_resume_chat.',
+      capability: 'automations',
+      write: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+          reason: {
+            type: 'string',
+            description: 'Why the follow-ups stop, in one sentence for the owner.',
+          },
+        },
+        required: ['chatId', 'reason'],
+      },
+      handler: async (args, ctx) => {
+        const accountId = this.requireAccount(args, ctx);
+        const chatId = this.requireChat(args, ctx);
+        const reason = text(args.reason);
+        if (reason.length < 3) {
+          throw new Error(
+            'reason is required (at least 3 characters): say why the chat is paused',
+          );
+        }
+        const rows = await this.automations.pauseForChat({
+          accountId,
+          chatId,
+          threadId: threadIdOf(args.threadId),
+          reason,
+        });
+        return this.chatAutomations(accountId, chatId, args.threadId, rows);
+      },
+    });
+
+    this.register({
+      name: 'automation_resume_chat',
+      description:
+        'Resume the automations of this chat/topic that were paused (by the soul or by the owner).',
+      capability: 'automations',
+      write: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+        },
+        required: ['chatId'],
+      },
+      handler: async (args, ctx) => {
+        const accountId = this.requireAccount(args, ctx);
+        const chatId = this.requireChat(args, ctx);
+        const rows = await this.automations.resume({
+          accountId,
+          chatId,
+          threadId: threadIdOf(args.threadId),
+        });
+        return this.chatAutomations(accountId, chatId, args.threadId, rows);
+      },
+    });
+
+    this.register({
+      name: 'ai_access_get',
+      description:
+        'AI access of one chat/topic: whether the soul may act (allowed), whether it is blocked, the warning counter, the block reason and the soul assigned to this chat.',
+      capability: 'read',
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+        },
+        required: ['chatId'],
+      },
+      handler: async (args, ctx) =>
+        this.access.view(
+          ctx.userId,
+          this.requireAccount(args, ctx),
+          this.requireChat(args, ctx),
+          threadIdOf(args.threadId),
+        ),
+    });
+
+    this.register({
+      name: 'ai_access_set',
+      description:
+        'Decide whether the soul may work in one chat/topic and which soul serves it. enabled=false mutes the soul there (destructive: needs the "admin" capability); soulId=null clears the assignment; note is a short line for the chat card.',
+      capability: 'souls',
+      write: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+          enabled: {
+            type: 'boolean',
+            description: 'false mutes the soul in this chat/topic.',
+          },
+          soulId: {
+            type: ['string', 'null'],
+            description: 'Soul that serves this chat; null clears it.',
+          },
+          note: {
+            type: ['string', 'null'],
+            description: 'Short note shown in the chat card.',
+          },
+        },
+        required: ['chatId'],
+      },
+      handler: async (args, ctx) => {
+        const accountId = this.requireAccount(args, ctx);
+        const chatId = this.requireChat(args, ctx);
+        const enabled = optionalBoolean(args.enabled, 'enabled');
+        if (enabled === false) {
+          await this.requireDestructive('admin', args, ctx);
+        }
+        return this.access.setAccess({
+          userId: ctx.userId,
+          accountId,
+          chatId,
+          threadId: threadIdOf(args.threadId),
+          enabled,
+          soulId: nullableText(args.soulId),
+          note: nullableText(args.note),
+        });
+      },
+    });
+
+    this.register({
+      name: 'chat_warn',
+      description:
+        'Warn this chat and add one warning. The app blocks the chat automatically when the warnings reach the threshold, so use chat_warn once per incident: tell the person in your own words why you are warning them, and only warn again if they repeat it — never warn twice for the same message. The result reports the counter and whether this warning closed the chat (blocked).',
+      capability: 'admin',
+      write: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+          reason: {
+            type: 'string',
+            description: 'What the person did, in one sentence.',
+          },
+        },
+        required: ['chatId'],
+      },
+      handler: async (args, ctx) => {
+        const accountId = this.requireAccount(args, ctx);
+        const chatId = this.requireChat(args, ctx);
+        return this.access.bumpWarning({
+          userId: ctx.userId,
+          accountId,
+          chatId,
+          threadId: threadIdOf(args.threadId),
+          reason: text(args.reason) || null,
+          blockedBy: 'soul',
+        });
+      },
+    });
+
+    this.register({
+      name: 'chat_block',
+      description:
+        'Block the soul in this chat/topic immediately. A reason (at least 3 characters) is required and is shown to the owner; prefer chat_warn unless the behaviour is clearly abusive. Undo with chat_unblock.',
+      capability: 'admin',
+      write: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+          reason: {
+            type: 'string',
+            description: 'What the person did, in one sentence.',
+          },
+        },
+        required: ['chatId', 'reason'],
+      },
+      handler: async (args, ctx) => {
+        const accountId = this.requireAccount(args, ctx);
+        const chatId = this.requireChat(args, ctx);
+        const reason = text(args.reason);
+        if (reason.length < 3) {
+          throw new Error(
+            'reason is required (at least 3 characters): say what the person did',
+          );
+        }
+        return this.access.block({
+          userId: ctx.userId,
+          accountId,
+          chatId,
+          threadId: threadIdOf(args.threadId),
+          reason,
+          blockedBy: 'soul',
+        });
+      },
+    });
+
+    this.register({
+      name: 'chat_unblock',
+      description:
+        'Lift the block of this chat/topic and reset its warning counter.',
+      capability: 'admin',
+      write: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          accountId: accountProperty,
+          chatId: { type: 'number' },
+          threadId: threadProperty,
+        },
+        required: ['chatId'],
+      },
+      handler: async (args, ctx) =>
+        this.access.unblock(
+          ctx.userId,
+          this.requireAccount(args, ctx),
+          this.requireChat(args, ctx),
+          threadIdOf(args.threadId),
+        ),
     });
 
     this.register({

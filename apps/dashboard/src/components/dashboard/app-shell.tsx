@@ -18,6 +18,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/chats", label: "Чаты", icon: <ChatsIcon /> },
   { href: "/logs", label: "Логи", icon: <LogsIcon /> },
   { href: "/ai", label: "AI", icon: <AiIcon /> },
+  { href: "/settings", label: "Настройки", icon: <SettingsIcon /> },
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -26,7 +27,25 @@ const PAGE_TITLES: Record<string, string> = {
   "/chats": "Чаты",
   "/logs": "Логи",
   "/ai": "AI и души",
+  "/settings": "Настройки",
+  "/settings/ai": "Настройки · AI",
+  "/settings/proxy": "Настройки · Прокси",
+  "/settings/accounts": "Настройки · Аккаунты",
+  "/settings/logs": "Настройки · Логи",
 };
+
+/** Exact title first, then the longest matching route prefix. */
+function pageTitleFor(pathname: string): string {
+  const exact = PAGE_TITLES[pathname];
+  if (exact) return exact;
+  let match = "";
+  for (const prefix of Object.keys(PAGE_TITLES)) {
+    if (pathname.startsWith(`${prefix}/`) && prefix.length > match.length) {
+      match = prefix;
+    }
+  }
+  return match ? PAGE_TITLES[match] : "CombainTelegram";
+}
 
 const COLLAPSE_KEY = "ct:sidebar-collapsed";
 
@@ -50,7 +69,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     });
   };
 
-  const pageTitle = PAGE_TITLES[pathname] ?? "CombainTelegram";
+  const pageTitle = pageTitleFor(pathname);
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-zinc-950 text-zinc-100">
@@ -72,7 +91,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <nav className="flex-1 space-y-1 overflow-y-auto p-2">
           {NAV_ITEMS.map((item) => {
-            const active = pathname === item.href;
+            const active =
+              pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
               <Link
                 key={item.href}
@@ -256,6 +276,24 @@ function LogsIcon() {
     >
       <path d="M5 3.5h9l5 5V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" />
       <path d="M14 3.5V9h5M8 13h8M8 17h5" />
+    </svg>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-5 w-5"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.64 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.54h.01A1.7 1.7 0 0 0 10.04 3V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.43 9v.01A1.7 1.7 0 0 0 21 10.04h.01a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.56 1.03Z" />
     </svg>
   );
 }

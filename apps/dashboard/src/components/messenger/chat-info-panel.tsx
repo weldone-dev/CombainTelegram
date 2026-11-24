@@ -30,7 +30,9 @@ import type {
   ChatView,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
+import { AiAccessSection } from "./ai-access-section";
 import { ChatAdminPanel } from "./chat-admin-panel";
+import { ChatAutomationsSection } from "./chat-automations-section";
 
 type InfoTab = "overview" | ChatInfoMediaKind | "similar" | "admin";
 
@@ -98,6 +100,8 @@ export function ChatInfoPanel({
   chats,
   onOpenChat,
   onClose,
+  showReasoning,
+  onToggleReasoning,
 }: {
   accountId: string;
   chat: ChatView;
@@ -105,6 +109,9 @@ export function ChatInfoPanel({
   chats: ChatView[];
   onOpenChat?: (chatId: number) => void;
   onClose: () => void;
+  /** Local-only reasoning preference, stored per account in localStorage. */
+  showReasoning?: boolean;
+  onToggleReasoning?: (next: boolean) => void;
 }) {
   const chatId = chat.id;
   const [info, setInfo] = useState<ChatInfoView | null>(null);
@@ -362,26 +369,50 @@ export function ChatInfoPanel({
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === "overview" && (
-            <OverviewTab
-              info={info}
-              loading={infoLoading}
-              error={infoError}
-              copied={copied}
-              onCopyInvite={() => void copyInvite()}
-              onRetry={() => {
-                setInfoLoading(true);
-                setInfoError(null);
-                getChatInfo(accountId, chatId)
-                  .then((result) => {
-                    setInfo(result);
-                    setInfoLoading(false);
-                  })
-                  .catch((error: unknown) => {
-                    setInfoError(errorMessage(error));
-                    setInfoLoading(false);
-                  });
-              }}
-            />
+            <div className="space-y-4">
+              <OverviewTab
+                info={info}
+                loading={infoLoading}
+                error={infoError}
+                copied={copied}
+                onCopyInvite={() => void copyInvite()}
+                onRetry={() => {
+                  setInfoLoading(true);
+                  setInfoError(null);
+                  getChatInfo(accountId, chatId)
+                    .then((result) => {
+                      setInfo(result);
+                      setInfoLoading(false);
+                    })
+                    .catch((error: unknown) => {
+                      setInfoError(errorMessage(error));
+                      setInfoLoading(false);
+                    });
+                }}
+              />
+              <AiAccessSection accountId={accountId} chatId={chatId} />
+              <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3 text-xs">
+                <input
+                  type="checkbox"
+                  checked={showReasoning ?? true}
+                  disabled={!onToggleReasoning}
+                  onChange={(event) =>
+                    onToggleReasoning?.(event.target.checked)
+                  }
+                  className="mt-0.5 h-3.5 w-3.5 accent-sky-500"
+                />
+                <span>
+                  <span className="block font-medium text-zinc-200">
+                    Показывать размышления в чате
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-zinc-500">
+                    Локальная настройка этого устройства. Собеседнику
+                    размышления не отправляются.
+                  </span>
+                </span>
+              </label>
+              <ChatAutomationsSection accountId={accountId} chatId={chatId} />
+            </div>
           )}
 
           {tab === "media" && (

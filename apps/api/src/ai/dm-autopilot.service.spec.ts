@@ -1,6 +1,12 @@
 import { Subject } from 'rxjs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { SoulModel, TelegramAccountModel } from '@repo/database';
+import type {
+  AiChatAccessModel,
+  AiChatBlockModel,
+  SoulModel,
+  TelegramAccountModel,
+} from '@repo/database';
+import type { AiAccessDecision } from '../ai-access/ai-access.service.js';
 import type { MessageView } from '../messaging/message-view.js';
 import type { RealtimeEvent } from '../realtime/realtime.service.js';
 import { DEFAULT_SOUL_SETTINGS } from './ai.types.js';
@@ -87,8 +93,47 @@ interface Internals {
     senderName: string,
     token: number,
     texts: Array<{ id: number; text: string }>,
+    threadId?: number,
   ): Promise<void>;
   nextToken(chatKey: string): number;
+}
+
+function emptyAccess(): AiAccessDecision {
+  return { allowed: false, access: null, block: null, warnings: 0 };
+}
+
+function decision(overrides: Partial<AiAccessDecision> = {}): AiAccessDecision {
+  return { ...emptyAccess(), ...overrides };
+}
+
+function accessRow(overrides: { enabled: boolean; threadId?: number }) {
+  return {
+    id: 'access-1',
+    userId: 'user-1',
+    accountId: 'account-1',
+    chatId: BigInt(CHAT_ID),
+    threadId: overrides.threadId ?? 0,
+    soulId: null,
+    enabled: overrides.enabled,
+    note: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  } as unknown as AiChatAccessModel;
+}
+
+function blockRow(overrides: { threadId?: number; reason?: string } = {}) {
+  return {
+    id: 'block-1',
+    userId: 'user-1',
+    accountId: 'account-1',
+    chatId: BigInt(CHAT_ID),
+    threadId: overrides.threadId ?? 0,
+    reason: overrides.reason ?? null,
+    warnings: 0,
+    blockedBy: 'user',
+    createdAt: NOW,
+    updatedAt: NOW,
+  } as unknown as AiChatBlockModel;
 }
 
 function harness(
@@ -97,6 +142,10 @@ function harness(
     soul?: SoulModel | null;
     perHour?: number;
     perChat?: number;
+    accessFor?: (
+      chatId: number,
+      threadId: number,
+    ) => AiAccessDecision | Promise<AiAccessDecision>;
   } = {},
 ) {
   const prisma = {
@@ -111,6 +160,13 @@ function harness(
           ? (options.perHour ?? 0)
           : (options.perChat ?? 0),
       ),
+    },
+    soul: {
+      findMany: vi.fn(async () => [] as never[]),
+    },
+    aiChatAccess: {
+      findMany: vi.fn(async () => [] as never[]),
+      upsert: vi.fn(async () => ({})),
     },
   };
   const users = { get: vi.fn(async () => ({ id: 'user-1' })) };
@@ -182,11 +238,33 @@ function harness(
     incoming: vi.fn(async () => ({ readDelayMs: 0, typingDelayMs: 0 })),
     touch: vi.fn(),
   };
+  const speech = {
+    available: vi.fn(() => true),
+    transcribe: vi.fn(async () => ({
+      text: 'расшифровка голосового',
+      language: 'ru',
+      durationMs: 1200,
+    })),
+  };
   const souls = new SoulsService({} as never, {} as never);
   const soul = options.soul === undefined ? soulRow() : options.soul;
   const modelSpy = vi
     .spyOn(souls, 'model')
     .mockResolvedValue(soul);
+  const aiAccess = {
+    accessFor: vi.fn(
+      async (
+        _userId: string,
+        _accountId: string,
+        chatId: number,
+        threadId: number,
+      ) =>
+        options.accessFor
+          ? options.accessFor(chatId, threadId)
+          : emptyAccess(),
+    ),
+  };
+  const agentRuns = { attachMessages: vi.fn(async () => undefined) };
 
   const service = new DmAutopilotService(
     prisma as never,
@@ -199,6 +277,9 @@ function harness(
     memory as never,
     souls,
     presence as never,
+    speech as never,
+    aiAccess as never,
+    agentRuns as never,
   );
   const internals = service as unknown as Internals;
   const tokenFor = (): number => internals.nextToken(`account-1:${CHAT_ID}`);
@@ -217,7 +298,10 @@ function harness(
     memory,
     souls,
     presence,
+    speech,
     modelSpy,
+    aiAccess,
+    agentRuns,
   };
 }
 
@@ -374,6 +458,196 @@ describe('DmAutopilotService.onMessage filters', () => {
 
     expect(h.agent.run).toHaveBeenCalled();
     expect(h.messaging.sendMessage).toHaveBeenCalled();
+  });
+});
+
+describe('DmAutopilotService access gate', () => {
+  it('drops a blocked chat before reading, typing or scheduling', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      accessFor: () =>
+        decision({
+          block: blockRow({ reason: 'spam' }),
+          warnings: 2,
+        }),
+    });
+
+    await h.internals.onMessage('user-1', payload());
+
+    expect(h.aiAccess.accessFor).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      0,
+    );
+    expect(h.presence.incoming).not.toHaveBeenCalled();
+    expect(h.messaging.markRead).not.toHaveBeenCalled();
+    expect(h.messaging.sendTyping).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.agent.run).not.toHaveBeenCalled();
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a disabled access row above allowAllChats', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          allowAllChats: true,
+          replyDelayMs: 0,
+        }),
+      }),
+      accessFor: () => decision({ access: accessRow({ enabled: false }) }),
+    });
+
+    await h.internals.onMessage('user-1', payload());
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(h.agent.run).not.toHaveBeenCalled();
+    expect(h.messaging.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to allowAllChats when there is no access row', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          allowAllChats: true,
+          chatIds: [],
+          replyDelayMs: 0,
+        }),
+      }),
+    });
+
+    await h.internals.onMessage('user-1', payload());
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(h.agent.run).toHaveBeenCalledTimes(1);
+    expect(h.messaging.sendMessage).toHaveBeenCalled();
+  });
+
+  it('falls back to the soul chat allowlist when there is no access row', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+
+    await h.internals.onMessage('user-1', payload());
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(h.agent.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes only the blocked thread, not the whole chat', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+      accessFor: (_chatId, threadId) =>
+        threadId === 7
+          ? decision({ block: blockRow({ threadId: 7 }) })
+          : decision(),
+    });
+
+    await h.internals.onMessage('user-1', {
+      accountId: 'account-1',
+      chatId: CHAT_ID,
+      threadId: 7,
+      message: message({ id: 1001 }),
+    });
+    expect(h.aiAccess.accessFor).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      7,
+    );
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(h.agent.run).not.toHaveBeenCalled();
+
+    await h.internals.onMessage('user-1', payload({ id: 1002 }));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(h.agent.run).toHaveBeenCalledTimes(1);
+    expect(h.messaging.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses access decisions briefly and re-reads them after the TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+
+    await h.internals.onMessage('user-1', payload({ id: 1001 }));
+    await h.internals.onMessage('user-1', payload({ id: 1002 }));
+    expect(h.aiAccess.accessFor).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_001);
+    await h.internals.onMessage('user-1', payload({ id: 1003 }));
+
+    expect(h.aiAccess.accessFor).toHaveBeenCalledTimes(2);
+  });
+
+  it('seeds access rows for chats already allowlisted by souls', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness();
+    h.prisma.soul.findMany.mockResolvedValueOnce([
+      {
+        accountId: 'account-1',
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID, 7, 7],
+        }),
+        account: { userId: 'user-1' },
+      },
+    ] as never[]);
+    h.prisma.aiChatAccess.findMany.mockResolvedValueOnce([
+      { accountId: 'account-1', chatId: BigInt(CHAT_ID), threadId: 0 },
+    ] as never[]);
+
+    await h.service.onModuleInit();
+
+    // CHAT_ID already has a row; only chat 7 is created (once).
+    expect(h.prisma.aiChatAccess.upsert).toHaveBeenCalledTimes(1);
+    expect(h.prisma.aiChatAccess.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          accountId_chatId_threadId: {
+            accountId: 'account-1',
+            chatId: BigInt(7),
+            threadId: 0,
+          },
+        },
+        create: expect.objectContaining({
+          userId: 'user-1',
+          accountId: 'account-1',
+          chatId: BigInt(7),
+          threadId: 0,
+          enabled: true,
+        }),
+      }),
+    );
   });
 });
 
@@ -867,6 +1141,275 @@ describe('DmAutopilotService.reply', () => {
     );
   });
 
+  it('transcribes a voice note and puts it in the prompt', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    const media = {
+      kind: 'voice' as const,
+      mimeType: 'audio/ogg',
+      fileName: null,
+      size: 5,
+      downloadable: true,
+    };
+    h.messaging.downloadMedia.mockResolvedValueOnce({
+      data: Buffer.from('voice'),
+      mimeType: 'audio/ogg',
+      fileName: 'voice.ogg',
+      disposition: 'inline',
+      length: 5,
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: '[voice]', mediaType: 'voice', media }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: '[voice]', media }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.messaging.downloadMedia).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      '1001',
+    );
+    expect(h.speech.transcribe).toHaveBeenCalledWith({
+      data: Buffer.from('voice'),
+      mimeType: 'audio/ogg',
+      fileName: 'voice.ogg',
+    });
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('[голосовое] «расшифровка голосового»'),
+      }),
+    );
+    expect(h.memory.append).toHaveBeenCalledWith(
+      'account-1',
+      CHAT_ID,
+      'user',
+      '[голосовое] «расшифровка голосового»',
+      { messageId: 1001 },
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.not.stringContaining('наушник'),
+      }),
+    );
+  });
+
+  it('transcribes audio sent as a document', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    const media = {
+      kind: 'document' as const,
+      mimeType: 'audio/mpeg',
+      fileName: 'song.mp3',
+      size: 5,
+      downloadable: true,
+    };
+    h.messaging.downloadMedia.mockResolvedValueOnce({
+      data: Buffer.from('song'),
+      mimeType: 'audio/mpeg',
+      fileName: 'song.mp3',
+      disposition: 'attachment',
+      length: 4,
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: '[audio]', mediaType: 'document', media }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: '[audio]', media }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.speech.transcribe).toHaveBeenCalled();
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('[голосовое] «расшифровка голосового»'),
+      }),
+    );
+  });
+
+  it('keeps an honest placeholder when the voice note cannot be transcribed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    h.speech.transcribe.mockResolvedValueOnce(null);
+    const media = {
+      kind: 'voice' as const,
+      mimeType: 'audio/ogg',
+      fileName: null,
+      size: 5,
+      downloadable: true,
+    };
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: '[voice]', mediaType: 'voice', media }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: '[voice]', media }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining(
+          '[голосовое сообщение, расшифровать не удалось]',
+        ),
+      }),
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining('не говори, что у тебя нет наушников'),
+      }),
+    );
+    expect(h.memory.append).toHaveBeenCalledWith(
+      'account-1',
+      CHAT_ID,
+      'user',
+      '[голосовое сообщение, расшифровать не удалось]',
+      { messageId: 1001 },
+    );
+    // The failure never blocks the reply.
+    expect(h.messaging.sendMessage).toHaveBeenCalled();
+  });
+
+  it('does not download audio when no speech engine is installed', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    h.speech.available.mockReturnValue(false);
+    const media = {
+      kind: 'voice' as const,
+      mimeType: 'audio/ogg',
+      fileName: null,
+      size: 5,
+      downloadable: true,
+    };
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: '[voice]', mediaType: 'voice', media }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: '[voice]', media }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.messaging.downloadMedia).not.toHaveBeenCalled();
+    expect(h.speech.transcribe).not.toHaveBeenCalled();
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining(
+          '[голосовое сообщение, расшифровать не удалось]',
+        ),
+      }),
+    );
+  });
+
+  it('keeps text and voice in a burst together', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    const media = {
+      kind: 'voice' as const,
+      mimeType: 'audio/ogg',
+      fileName: null,
+      size: 5,
+      downloadable: true,
+    };
+    h.messaging.downloadMedia.mockResolvedValueOnce({
+      data: Buffer.from('voice'),
+      mimeType: 'audio/ogg',
+      fileName: 'voice.ogg',
+      disposition: 'inline',
+      length: 5,
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1002, text: 'и ещё вопрос' }),
+      'Peer',
+      h.tokenFor(),
+      [
+        { id: 1001, text: '[voice]', media },
+        { id: 1002, text: 'и ещё вопрос' },
+      ],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    const prompt = vi.mocked(h.agent.run).mock.calls[0][0].prompt;
+    expect(prompt).toContain('1. [голосовое] «расшифровка голосового»');
+    expect(prompt).toContain('2. и ещё вопрос');
+    expect(h.messaging.downloadMedia).toHaveBeenCalledTimes(1);
+  });
+
   it('passes the peer username and bio to the agent', async () => {
     vi.useFakeTimers();
     const h = harness({
@@ -1240,6 +1783,100 @@ describe('DmAutopilotService.reply', () => {
       { status: 'typing' },
     );
     expect(h.messaging.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the ids of every sent bubble on the run', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    h.agent.run.mockResolvedValue({
+      runId: 'run-1',
+      text: 'Первый\n---\nВторой',
+      model: 'main-model',
+      steps: 1,
+      trace: [],
+      usage: { promptTokens: 1, completionTokens: 1 },
+    });
+    h.messaging.sendMessage
+      .mockResolvedValueOnce(message({ id: 2002, outgoing: true }))
+      .mockResolvedValueOnce(message({ id: 2003, outgoing: true }));
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(h.agentRuns.attachMessages).toHaveBeenCalledWith('run-1', [
+      2002, 2003,
+    ]);
+  });
+
+  it('keeps reasoning out of Telegram and on the WS payload', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    h.agent.run.mockResolvedValue({
+      runId: 'run-1',
+      text: 'Hello back',
+      reasoning: 'SECRET THOUGHTS',
+      model: 'main-model',
+      steps: 1,
+      trace: [],
+      usage: { promptTokens: 1, completionTokens: 1 },
+    });
+
+    const pending = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message(),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: 'Hi there' }],
+    );
+    await vi.runAllTimersAsync();
+    await pending;
+
+    // Reasoning is metadata for the dashboard, never a Telegram text.
+    const sentTexts = h.messaging.sendMessage.mock.calls.map(
+      (call) => (call[3] as { text: string }).text,
+    );
+    expect(sentTexts.join('\n')).not.toContain('SECRET THOUGHTS');
+    expect(sentTexts).toEqual(['Hello back']);
+    expect(h.realtime.emitToUser).toHaveBeenCalledWith(
+      'user-1',
+      'ai.reply',
+      expect.objectContaining({
+        text: 'Hello back',
+        runId: 'run-1',
+        reasoning: 'SECRET THOUGHTS',
+      }),
+    );
   });
 });
 

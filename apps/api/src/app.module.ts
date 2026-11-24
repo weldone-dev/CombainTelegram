@@ -5,6 +5,8 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AccountsModule } from './accounts/accounts.module.js';
 import { AiModule } from './ai/ai.module.js';
+import { AiProvidersModule } from './ai-providers/ai-providers.module.js';
+import { AiAccessModule } from './ai-access/ai-access.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { LogsModule } from './logs/logs.module.js';
 import { LoggingInterceptor } from './logs/logging.interceptor.js';
@@ -32,7 +34,9 @@ import { UserContextModule } from './user-context/user-context.module.js';
     AuthModule,
     ProxiesModule,
     PushModule,
+    AiProvidersModule,
     AiModule,
+    AiAccessModule,
   ],
   controllers: [AppController],
   providers: [

@@ -16,6 +16,7 @@ import { apiError } from '../common/api-error.js';
 import { AiConfigService } from './ai-config.service.js';
 import { AgentService } from './agent.service.js';
 import { AgentToolsService } from './agent-tools.service.js';
+import { AiRunsService, parseMessageIds } from './ai-runs.service.js';
 import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
@@ -74,6 +75,8 @@ function runView(run: {
   status: string;
   prompt: string;
   output: string | null;
+  reasoning: string | null;
+  messageIds: string | null;
   model: string | null;
   steps: number;
   trace: string;
@@ -97,6 +100,8 @@ function runView(run: {
     status: run.status,
     prompt: run.prompt,
     output: run.output,
+    reasoning: run.reasoning,
+    messageIds: parseMessageIds(run.messageIds),
     model: run.model,
     steps: run.steps,
     trace,
@@ -118,6 +123,7 @@ export class AiController {
     private readonly souls: SoulsService,
     private readonly memory: MemoryService,
     private readonly skills: SkillsService,
+    private readonly runsService: AiRunsService,
   ) {}
 
   @Get('settings')
@@ -128,6 +134,18 @@ export class AiController {
   @Put('settings')
   async updateSettings(@Body() body: Record<string, unknown>) {
     return this.config.update(body);
+  }
+
+  /** Same handler as `PUT`; the dashboard sends partial updates with PATCH. */
+  @Patch('settings')
+  async patchSettings(@Body() body: Record<string, unknown>) {
+    return this.config.update(body);
+  }
+
+  /** Probes the configured remote speech-to-text service. No key is returned. */
+  @Post('stt/test')
+  async sttTest() {
+    return this.config.sttTest();
   }
 
   @Put('policy')
@@ -167,17 +185,26 @@ export class AiController {
 
   @Get('runs')
   async runs(
+    @CurrentUser() user: UserModel,
     @Query('accountId') accountId?: string,
+    @Query('chatId') rawChatId?: string,
     @Query('source') source?: string,
     @Query('limit') rawLimit?: string,
   ) {
     const limit = Number(rawLimit);
-    const rows = await this.agent.runs({
+    const rows = await this.runsService.list({
+      userId: user.id,
       accountId: str(accountId) || null,
+      chatId: num(rawChatId),
       source: str(source) || null,
-      limit: Number.isFinite(limit) ? limit : 30,
+      limit: Number.isFinite(limit) ? limit : null,
     });
     return { runs: rows.map(runView) };
+  }
+
+  @Get('runs/:id')
+  async run(@CurrentUser() user: UserModel, @Param('id') id: string) {
+    return runView(await this.runsService.get(user.id, id));
   }
 
   @Get('mcp')

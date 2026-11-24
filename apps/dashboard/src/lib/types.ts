@@ -119,6 +119,8 @@ export interface MessageTranslationView {
 export interface MessageTranscriptionView {
   text: string;
   pending: boolean;
+  /** The API refused or failed the transcription; shown as unavailable. */
+  unavailable?: boolean;
 }
 
 export interface MessageThreadInfo {
@@ -375,6 +377,17 @@ export interface RealtimeMessageEvent {
   sessionId: string;
   chatId: number;
   message: MessageView;
+}
+
+/** `ai.reply`: one bubble produced by the DM autopilot and its run metadata. */
+export interface AiReplyEvent {
+  accountId: string;
+  chatId: number;
+  text: string;
+  message: MessageView;
+  runId: string;
+  /** Local-only model reasoning; never sent to Telegram. */
+  reasoning: string | null;
 }
 
 export interface RealtimeDeletedEvent {

@@ -95,6 +95,8 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
       const due = await this.automations.due();
       for (const automation of due) {
         if (this.running.has(automation.id)) continue;
+        // `due()` already filters these; keep the guard for direct callers.
+        if (automation.selfPausedAt) continue;
         await this.execute(automation);
         count += 1;
       }
@@ -166,8 +168,11 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
     try {
       const user = await this.users.get();
       const accountId = automation.accountId;
+      // A chat-bound automation falls back to its own chat when the action
+      // does not name one.
+      const boundChatId = number(automation.chatId);
       const chatId =
-        number(action.chatId) ?? number(input.chatId) ?? null;
+        number(action.chatId) ?? number(input.chatId) ?? boundChatId;
       const actionType = automation.actionType;
       let output = '';
 
@@ -211,7 +216,7 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
           }
         }
       } else if (actionType === 'send_message') {
-        const target = number(action.chatId);
+        const target = number(action.chatId) ?? boundChatId;
         const body = text(action.text);
         if (!target || !body) {
           throw new Error('send_message needs chatId and text');
@@ -237,7 +242,7 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
           output = `sent to ${target}`;
         }
       } else if (actionType === 'summarize') {
-        const target = number(action.chatId);
+        const target = number(action.chatId) ?? boundChatId;
         if (!target || !accountId) {
           throw new Error('summarize needs accountId and chatId');
         }
@@ -250,7 +255,11 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.automations.finishRun(run.id, { status: 'ok', output });
-      await this.automations.complete(automation.id, trigger);
+      await this.automations.complete(
+        automation.id,
+        trigger,
+        automation.timezone ?? null,
+      );
       emitLog({
         level: 'info',
         source: 'automation',
@@ -268,7 +277,7 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
         error: message,
       });
       await this.automations
-        .complete(automation.id, trigger)
+        .complete(automation.id, trigger, automation.timezone ?? null)
         .catch(() => undefined);
       emitLog({
         level: 'error',

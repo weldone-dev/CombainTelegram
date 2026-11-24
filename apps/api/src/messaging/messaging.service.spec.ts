@@ -181,11 +181,14 @@ function createFakeClient(
   };
 }
 
-function createService(client: TelegramClient): MessagingService {
+function createService(
+  client: TelegramClient,
+  speech?: { available(): boolean; transcribe: unknown } | null,
+): MessagingService {
   const accounts = {
     resolveSession: async () => ({ client }),
   } as unknown as AccountsService;
-  return new MessagingService(accounts);
+  return new MessagingService(accounts, undefined, speech as never);
 }
 
 describe('uncached peer resolution', () => {
@@ -582,6 +585,110 @@ describe('message-level features', () => {
       msgId: 77,
     });
     expect(result).toEqual({ text: 'привет', pending: true });
+  });
+
+  it('falls back to the local engine when Telegram requires Premium', async () => {
+    const call = vi.fn(async () => {
+      throw new tl.RpcError(403, 'PREMIUM_ACCOUNT_REQUIRED' as never);
+    });
+    const speech = {
+      available: () => true,
+      transcribe: vi.fn(async () => ({
+        text: 'локальная расшифровка',
+        language: null,
+        durationMs: 900,
+      })),
+    };
+    const service = createService(
+      {
+        resolvePeer: vi.fn(async () => inputPeerUser),
+        call,
+      } as unknown as TelegramClient,
+      speech,
+    );
+    const download = vi.spyOn(service, 'downloadMedia').mockResolvedValue({
+      data: Buffer.from('voice'),
+      mimeType: 'audio/ogg',
+      fileName: 'voice.ogg',
+      disposition: 'inline',
+      length: 5,
+    });
+
+    const result = await service.transcribeVoice(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+    );
+
+    expect(result).toEqual({ text: 'локальная расшифровка', pending: false });
+    expect(download).toHaveBeenCalledWith(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '77',
+      undefined,
+    );
+    expect(speech.transcribe).toHaveBeenCalledWith({
+      data: Buffer.from('voice'),
+      mimeType: 'audio/ogg',
+      fileName: 'voice.ogg',
+    });
+  });
+
+  it('rethrows the Premium error when the local engine fails', async () => {
+    const call = vi.fn(async () => {
+      throw new tl.RpcError(403, 'PREMIUM_ACCOUNT_REQUIRED' as never);
+    });
+    const speech = {
+      available: () => true,
+      transcribe: vi.fn(async () => null),
+    };
+    const service = createService(
+      {
+        resolvePeer: vi.fn(async () => inputPeerUser),
+        call,
+      } as unknown as TelegramClient,
+      speech,
+    );
+    vi.spyOn(service, 'downloadMedia').mockResolvedValue({
+      data: Buffer.from('voice'),
+      mimeType: 'audio/ogg',
+      fileName: 'voice.ogg',
+      disposition: 'inline',
+      length: 5,
+    });
+
+    await expect(
+      service.transcribeVoice(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77'),
+    ).rejects.toMatchObject({
+      status: 403,
+      response: { code: 'PREMIUM_REQUIRED' },
+    });
+  });
+
+  it('does not call the local engine for a non-Premium transcription error', async () => {
+    const call = vi.fn(async () => {
+      throw new tl.RpcError(400, 'MSG_VOICE_MISSING' as never);
+    });
+    const speech = { available: () => true, transcribe: vi.fn() };
+    const service = createService(
+      {
+        resolvePeer: vi.fn(async () => inputPeerUser),
+        call,
+      } as unknown as TelegramClient,
+      speech,
+    );
+    const download = vi.spyOn(service, 'downloadMedia');
+
+    await expect(
+      service.transcribeVoice(USER_ID, ACCOUNT_ID, String(CHAT_ID), '77'),
+    ).rejects.toMatchObject({
+      status: 400,
+      response: { code: 'TRANSCRIPTION_UNAVAILABLE' },
+    });
+    expect(speech.transcribe).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
   });
 
   it('serves and caches a thumbnail for ?thumb=1', async () => {

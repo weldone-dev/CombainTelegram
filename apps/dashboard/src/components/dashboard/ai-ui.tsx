@@ -51,7 +51,7 @@ export function Card({
     >
       {(title || actions) && (
         <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
+          <div className="min-w-[12rem] flex-1">
             {title && (
               <h2 className="break-words text-sm font-semibold text-zinc-100">
                 {title}

@@ -1,10 +1,12 @@
 import { Module } from '@nestjs/common';
 import { AccountsModule } from '../accounts/accounts.module.js';
+import { AiAccessModule } from '../ai-access/ai-access.module.js';
 import { MessagingModule } from '../messaging/messaging.module.js';
 import { RealtimeModule } from '../realtime/realtime.module.js';
 import { TelegramModule } from '../telegram/telegram.module.js';
 import { AiConfigService } from './ai-config.service.js';
 import { AiPolicyService } from './ai-policy.service.js';
+import { AiRunsService } from './ai-runs.service.js';
 import { AgentToolsService } from './agent-tools.service.js';
 import { AgentService } from './agent.service.js';
 import { LlmService } from './llm.service.js';
@@ -13,6 +15,7 @@ import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
 import { DmAutopilotService } from './dm-autopilot.service.js';
 import { PresenceService } from './presence.service.js';
+import { SpeechModule } from './speech.module.js';
 import { AiController, SoulController } from './ai.controller.js';
 import { AutomationsService } from '../automations/automations.service.js';
 import { AutomationRunnerService } from '../automations/automation-runner.service.js';
@@ -36,6 +39,8 @@ import { McpController } from '../mcp/mcp.controller.js';
     AccountsModule,
     MessagingModule,
     RealtimeModule,
+    SpeechModule,
+    AiAccessModule,
   ],
   controllers: [
     AiController,
@@ -48,6 +53,7 @@ import { McpController } from '../mcp/mcp.controller.js';
     AiConfigService,
     LlmService,
     AiPolicyService,
+    AiRunsService,
     SkillsService,
     SoulsService,
     MemoryService,

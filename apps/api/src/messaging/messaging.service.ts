@@ -11,7 +11,8 @@ import {
 } from '@mtcute/node';
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
-import { raiseTelegramError } from '../auth/telegram-error.js';
+import { SpeechService } from '../ai/speech.service.js';
+import { raiseTelegramError, mapTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
 import { emitLog } from '../logs/log-sink.js';
 import { TdMessagingService } from '../tdlib/td-messaging.service.js';
@@ -231,6 +232,19 @@ function isImageProcessFailed(error: unknown): boolean {
   return tl.RpcError.is(error) && error.text === 'IMAGE_PROCESS_FAILED';
 }
 
+/** Whether Telegram refused an action because the account has no Premium. */
+function isPremiumRequired(error: unknown): boolean {
+  if (error instanceof HttpException) {
+    const body = error.getResponse();
+    return (
+      typeof body === 'object' &&
+      body !== null &&
+      (body as { code?: unknown }).code === 'PREMIUM_REQUIRED'
+    );
+  }
+  return mapTelegramError(error).code === 'PREMIUM_REQUIRED';
+}
+
 /**
  * Whether the peer is a one-to-one chat. mtcute 0.32 models bots as `User`
  * (`type: 'user'`), but `'bot'` is kept for versions that report it apart.
@@ -373,6 +387,7 @@ export class MessagingService {
   constructor(
     private readonly accounts: AccountsService,
     @Optional() private readonly td?: TdMessagingService,
+    @Optional() private readonly speech?: SpeechService,
   ) {}
 
   /**
@@ -1699,6 +1714,11 @@ export class MessagingService {
   /**
    * Transcribe a voice note. Telegram answers immediately for short notes and
    * with `pending: true` while the server still works; the UI can retry.
+   *
+   * Server-side transcription is a Premium feature (`PREMIUM_ACCOUNT_REQUIRED`),
+   * so that answer falls back to the local engine: the same file is downloaded
+   * and transcribed in-process. Any other failure is rethrown unchanged, and a
+   * failed local attempt leaves the original Telegram error in place.
    */
   async transcribeVoice(
     userId: string,
@@ -1720,11 +1740,24 @@ export class MessagingService {
       try {
         return await td.transcribeVoice(chatId, messageId);
       } catch (error) {
-        this.rethrowTdFailure(
+        this.logTdFailure(
           'transcribeVoice',
           { userId, accountId, sessionId, chatId },
           error,
+          false,
         );
+        if (isPremiumRequired(error)) {
+          const local = await this.transcribeLocally(
+            userId,
+            accountId,
+            chatId,
+            messageId,
+            sessionId,
+          );
+          if (local) return local;
+        }
+        if (error instanceof HttpException) throw error;
+        raiseTelegramError(error);
       }
     }
     const { client } = await this.accounts.resolveSession(
@@ -1742,7 +1775,70 @@ export class MessagingService {
       });
       return { text: raw.text ?? '', pending: raw.pending === true };
     } catch (error) {
+      if (isPremiumRequired(error)) {
+        const local = await this.transcribeLocally(
+          userId,
+          accountId,
+          chatId,
+          messageId,
+          sessionId,
+        );
+        if (local) return local;
+      }
       raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Local engine fallback for {@link transcribeVoice}. Returns `null` — never
+   * an exception — when the speech engine is absent or the file cannot be
+   * fetched, so the caller can surface the original Telegram error.
+   */
+  private async transcribeLocally(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    messageId: number,
+    sessionId?: string,
+  ): Promise<MessageTranscriptionView | null> {
+    if (!this.speech) return null;
+    try {
+      const file = await this.downloadMedia(
+        userId,
+        accountId,
+        String(chatId),
+        String(messageId),
+        sessionId,
+      );
+      const result = await this.speech.transcribe({
+        data: file.data,
+        mimeType: file.mimeType,
+        fileName: file.fileName,
+      });
+      if (!result?.text) return null;
+      emitLog({
+        level: 'debug',
+        source: 'messaging',
+        action: 'messaging.transcribe.local',
+        message: `Transcribed voice note ${messageId} locally (${result.text.length} chars)`,
+        status: 'ok',
+        accountId,
+        chatId,
+        details: { messageId, bytes: file.data.length, chars: result.text.length },
+      });
+      return { text: result.text, pending: false };
+    } catch (error) {
+      emitLog({
+        level: 'warn',
+        source: 'messaging',
+        action: 'messaging.transcribe.local',
+        message: `Local voice transcription failed: ${(error as Error).message}`,
+        status: 'failed',
+        accountId,
+        chatId,
+        details: { messageId, reason: (error as Error).message },
+      });
+      return null;
     }
   }
 

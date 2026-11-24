@@ -9,9 +9,15 @@ import {
   deleteAutomation,
   getAutomationRuns,
   listAutomations,
+  resumeAutomation,
   runAutomation,
   updateAutomation,
 } from "../../lib/ai-api";
+import {
+  browserTimeZone,
+  createdByLabel,
+  isValidTimeZone,
+} from "../../lib/automations-format";
 import { accountName } from "../../lib/format";
 import {
   Card,
@@ -34,6 +40,11 @@ interface Draft {
   name: string;
   description: string;
   accountId: string;
+  /** Optional chat scope of the automation itself (not the action target). */
+  scopeChatId: string;
+  scopeThreadId: string;
+  timezone: string;
+  createdBy: string;
   enabled: boolean;
   triggerKind: TriggerKind;
   minutes: string;
@@ -63,6 +74,16 @@ function draftOf(automation: AutomationView | null): Draft {
     name: automation?.name ?? "",
     description: automation?.description ?? "",
     accountId: automation?.accountId ?? "",
+    scopeChatId:
+      automation?.chatId !== null && automation?.chatId !== undefined
+        ? String(automation.chatId)
+        : "",
+    scopeThreadId:
+      automation?.threadId !== undefined && automation.threadId > 0
+        ? String(automation.threadId)
+        : "",
+    timezone: automation?.timezone ?? browserTimeZone(),
+    createdBy: automation?.createdBy ?? "user",
     enabled: automation?.enabled ?? false,
     triggerKind:
       (trigger.kind as TriggerKind) ??
@@ -124,6 +145,13 @@ function chatIdOf(value: string): number | null {
   if (!text) return null;
   const parsed = Number(text);
   return Number.isSafeInteger(parsed) && parsed !== 0 ? parsed : null;
+}
+
+function threadIdOf(value: string): number | null {
+  const text = value.trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function triggerSummary(automation: AutomationView): string {
@@ -202,6 +230,26 @@ export function AutomationsPanel() {
       if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(draft.at.trim())) {
         return "Время должно быть в формате HH:MM, например 09:00";
       }
+      if (!draft.timezone.trim()) {
+        return "Для ежедневного расписания нужен часовой пояс (IANA)";
+      }
+    }
+    if (draft.timezone.trim() && !isValidTimeZone(draft.timezone.trim())) {
+      return "Неизвестный часовой пояс. Укажите IANA, например Europe/Moscow";
+    }
+    if (draft.scopeChatId.trim() && chatIdOf(draft.scopeChatId) === null) {
+      return "Chat id области — целое число или пусто";
+    }
+    if (draft.scopeChatId.trim() && !draft.accountId) {
+      return "Чтобы привязать автоматизацию к чату, выберите аккаунт";
+    }
+    if (draft.scopeThreadId.trim()) {
+      if (!draft.scopeChatId.trim()) {
+        return "Thread id задаётся только вместе с chat id";
+      }
+      if (threadIdOf(draft.scopeThreadId) === null) {
+        return "Thread id — неотрицательное целое число";
+      }
     }
     if (draft.chatId.trim() && chatIdOf(draft.chatId) === null) {
       return "Chat id — целое число или пусто";
@@ -256,6 +304,10 @@ export function AutomationsPanel() {
     }
     return {
       accountId: draft.accountId || null,
+      chatId: chatIdOf(draft.scopeChatId),
+      threadId: threadIdOf(draft.scopeThreadId) ?? 0,
+      timezone: draft.timezone.trim() || null,
+      createdBy: draft.createdBy,
       name: draft.name.trim(),
       description: draft.description.trim(),
       enabled: draft.enabled,
@@ -307,6 +359,21 @@ export function AutomationsPanel() {
     }
   };
 
+  const resumeRow = async (automation: AutomationView) => {
+    setBusy(true);
+    setError(null);
+    setSaved(null);
+    try {
+      await resumeAutomation(automation.id);
+      await load(automation.id);
+      setSaved(`Автоматизация «${automation.name}» возобновлена`);
+    } catch (resumeError) {
+      setError(aiErrorMessage(resumeError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async () => {
     if (!draft.id) return;
     if (!window.confirm(`Удалить «${draft.name}»?`)) return;
@@ -323,6 +390,10 @@ export function AutomationsPanel() {
       setBusy(false);
     }
   };
+
+  const selected = draft.id
+    ? (automations.find((item) => item.id === draft.id) ?? null)
+    : null;
 
   return (
     <div className="grid min-w-0 gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
@@ -345,28 +416,61 @@ export function AutomationsPanel() {
       >
         <div className="space-y-1">
           {automations.map((automation) => (
-            <button
+            <div
               key={automation.id}
-              type="button"
-              onClick={() => void select(automation)}
-              className={`flex w-full flex-col gap-0.5 rounded-md px-2 py-2 text-left text-sm ${
-                draft.id === automation.id
-                  ? "bg-sky-500/15 text-sky-200"
-                  : "text-zinc-300 hover:bg-zinc-800"
+              className={`flex items-start gap-1 rounded-md ${
+                draft.id === automation.id ? "bg-sky-500/10" : ""
               }`}
             >
-              <span className="flex items-center gap-1.5">
-                <span className="min-w-0 flex-1 truncate">
-                  {automation.name}
+              <button
+                type="button"
+                onClick={() => void select(automation)}
+                className={`flex min-w-0 flex-1 flex-col gap-0.5 rounded-md px-2 py-2 text-left text-sm ${
+                  draft.id === automation.id
+                    ? "text-sky-200"
+                    : "text-zinc-300 hover:bg-zinc-800"
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <span className="min-w-0 flex-1 truncate">
+                    {automation.name}
+                  </span>
+                  <Pill tone={automation.enabled ? "green" : "zinc"}>
+                    {automation.enabled ? "on" : "off"}
+                  </Pill>
                 </span>
-                <Pill tone={automation.enabled ? "green" : "zinc"}>
-                  {automation.enabled ? "on" : "off"}
-                </Pill>
-              </span>
-              <span className="truncate text-[11px] text-zinc-500">
-                {triggerSummary(automation)}
-              </span>
-            </button>
+                <span className="flex flex-wrap items-center gap-1">
+                  <span className="truncate text-[11px] text-zinc-500">
+                    {triggerSummary(automation)}
+                  </span>
+                  {automation.createdBy === "soul" && (
+                    <Pill tone="sky">создано душой</Pill>
+                  )}
+                  {automation.selfPaused && (
+                    <Pill tone="amber">на паузе душой</Pill>
+                  )}
+                </span>
+                {automation.selfPaused && automation.selfPauseReason && (
+                  <span
+                    className="truncate text-[10px] text-amber-200/80"
+                    title={automation.selfPauseReason}
+                  >
+                    {automation.selfPauseReason}
+                  </span>
+                )}
+              </button>
+              {automation.selfPaused && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void resumeRow(automation)}
+                  title="Снять паузу души"
+                  className="mt-1 shrink-0 rounded border border-amber-800/70 px-1.5 py-1 text-[10px] text-amber-200 transition-colors hover:bg-amber-950/40 disabled:opacity-40"
+                >
+                  Возобновить
+                </button>
+              )}
+            </div>
           ))}
           {automations.length === 0 && (
             <p className="text-xs text-zinc-500">Пока нет автоматизаций.</p>
@@ -383,6 +487,14 @@ export function AutomationsPanel() {
           description="По умолчанию автоматизация выключена и не пишет никому."
           actions={
             <div className="flex flex-wrap gap-2">
+              {selected?.selfPaused && (
+                <GhostButton
+                  onClick={() => void resumeRow(selected)}
+                  disabled={busy}
+                >
+                  Возобновить
+                </GhostButton>
+              )}
               {draft.id && (
                 <GhostButton onClick={() => void runNow()} disabled={busy}>
                   Запустить
@@ -429,6 +541,48 @@ export function AutomationsPanel() {
                 ))}
               </select>
             </Field>
+            <Field
+              label="Часовой пояс (IANA)"
+              hint="Обязателен для ежедневного расписания, например Europe/Moscow"
+            >
+              <input
+                value={draft.timezone}
+                onChange={(event) =>
+                  setDraft({ ...draft, timezone: event.target.value })
+                }
+                className={inputClass}
+                placeholder="Europe/Moscow"
+                spellCheck={false}
+              />
+            </Field>
+            <Field
+              label="Чат автоматизации (id)"
+              hint="Необязательно: привязать правило к конкретному чату"
+            >
+              <input
+                value={draft.scopeChatId}
+                onChange={(event) =>
+                  setDraft({ ...draft, scopeChatId: event.target.value })
+                }
+                className={inputClass}
+                inputMode="numeric"
+                placeholder="например -1001878340462"
+              />
+            </Field>
+            <Field
+              label="Thread id"
+              hint="Только с chat id: форум-тема или тред комментариев"
+            >
+              <input
+                value={draft.scopeThreadId}
+                onChange={(event) =>
+                  setDraft({ ...draft, scopeThreadId: event.target.value })
+                }
+                className={inputClass}
+                inputMode="numeric"
+                placeholder="0 = весь чат"
+              />
+            </Field>
             <Field label="Описание" className="sm:col-span-2">
               <input
                 value={draft.description}
@@ -439,6 +593,31 @@ export function AutomationsPanel() {
               />
             </Field>
           </div>
+
+          {selected &&
+            (selected.createdBy === "soul" || selected.selfPaused) && (
+              <div
+                className={`mt-3 rounded-md border px-3 py-2 text-xs ${
+                  selected.selfPaused
+                    ? "border-amber-800/70 bg-amber-950/20 text-amber-200"
+                    : "border-sky-800/60 bg-sky-950/20 text-sky-200"
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span>{createdByLabel(selected.createdBy)}</span>
+                  {selected.selfPaused && (
+                    <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px]">
+                      на паузе душой
+                    </span>
+                  )}
+                  {selected.selfPauseReason && (
+                    <span className="min-w-0 flex-1 truncate opacity-80">
+                      {selected.selfPauseReason}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
 
           <label className="mt-3 flex items-start gap-2 text-xs text-zinc-300">
             <input
@@ -612,7 +791,7 @@ export function AutomationsPanel() {
                 </Field>
               )}
               <Field
-                label="Chat id"
+                label="Chat id действия"
                 hint={
                   draft.actionType === "summarize"
                     ? "Чей диалог сжимать"

@@ -86,6 +86,8 @@ model TelegramAccount {
   soul           Soul?
   bots           TelegramBot[]
   automations    Automation[]
+  aiChatAccess   AiChatAccess[]
+  aiChatBlocks   AiChatBlock[]
 
   @@unique([userId, tgUserId])
   @@index([userId])
@@ -225,6 +227,8 @@ model Soul {
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
   skills       SoulSkill[]
+  chatAccess   AiChatAccess[]
+  automations  Automation[]
 }
 
 model SoulSkill {
@@ -357,28 +361,44 @@ model BotTurn {
 /// Configurable trigger → action rule. Triggers may run on a schedule or on
 /// incoming personal messages; actions either run the agent or send a message.
 model Automation {
-  id          String          @id @default(cuid())
-  accountId   String?
-  account     TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  name        String
-  description String          @default("")
-  enabled     Boolean         @default(true)
+  id              String           @id @default(cuid())
+  accountId       String?
+  account         TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name            String
+  description     String           @default("")
+  enabled         Boolean          @default(true)
   /// schedule | incoming_message | manual
-  triggerType String          @default("manual")
+  triggerType     String           @default("manual")
   /// JSON trigger config
-  trigger     String          @default("{}")
+  trigger         String           @default("{}")
   /// agent | send_message | summarize
-  actionType  String          @default("agent")
+  actionType      String           @default("agent")
   /// JSON action config
-  action      String          @default("{}")
-  lastRunAt   DateTime?
-  nextRunAt   DateTime?
-  runCount    Int             @default(0)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  runs        AutomationRun[]
+  action          String           @default("{}")
+  /// Chat the automation is scoped to. Null = any chat / not chat-bound.
+  chatId          BigInt?
+  /// Forum topic or channel-comment thread. `0` = whole chat (sentinel, see
+  /// `AiChatAccess.threadId`).
+  threadId        Int              @default(0)
+  /// Soul that owns / created the automation, when `createdBy = "soul"`.
+  soulId          String?
+  soul            Soul?            @relation(fields: [soulId], references: [id], onDelete: SetNull)
+  /// user | soul | assistant
+  createdBy       String           @default("user")
+  /// IANA timezone name (e.g. "Europe/Moscow") for schedule triggers.
+  timezone        String?
+  /// Set by the agent when it pauses itself; cleared on manual resume.
+  selfPausedAt    DateTime?
+  selfPauseReason String?
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  runCount        Int              @default(0)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  runs            AutomationRun[]
 
   @@index([enabled, nextRunAt])
+  @@index([accountId, chatId])
 }
 
 model AutomationRun {
@@ -398,64 +418,147 @@ model AutomationRun {
 /// Singleton AI provider + permission policy. Secrets use the standard
 /// envelope (`SessionCryptoService`); API keys are never returned in full.
 model AiSetting {
-  id                String   @id @default("default")
-  provider          String   @default("openai-compatible")
-  baseUrl           String   @default("")
-  model             String   @default("")
-  fastModel         String   @default("")
-  apiKeyEncrypted   Bytes?
-  apiKeyNonce       Bytes?
-  apiKeyTag         Bytes?
-  apiKeyDekWrapped  Bytes?
-  apiKeyDekNonce    Bytes?
-  apiKeyDekTag      Bytes?
-  temperature       Float    @default(0.7)
-  maxSteps          Int      @default(6)
+  id                 String   @id @default("default")
+  provider           String   @default("openai-compatible")
+  baseUrl            String   @default("")
+  model              String   @default("")
+  fastModel          String   @default("")
+  apiKeyEncrypted    Bytes?
+  apiKeyNonce        Bytes?
+  apiKeyTag          Bytes?
+  apiKeyDekWrapped   Bytes?
+  apiKeyDekNonce     Bytes?
+  apiKeyDekTag       Bytes?
+  temperature        Float    @default(0.7)
+  maxSteps           Int      @default(6)
   /// Reasoning effort sent to the model: off | low | medium | high.
-  reasoningEffort   String   @default("low")
+  reasoningEffort    String   @default("low")
+  /// Speech-to-text engine: auto | openai-compatible | disabled.
+  sttEngine          String   @default("auto")
+  sttBaseUrl         String   @default("")
+  sttModel           String?
+  /// STT API key, plain string; the app seals it before returning it.
+  sttApiKey          String?
+  /// BCP-47 language hint for transcription; auto = provider default.
+  sttLanguage        String   @default("auto")
   /// When true, send/edit/delete/react tools answer with a simulated result
   /// instead of touching Telegram. Soul autopilot is exempt (explicit opt-in).
-  dryRun            Boolean  @default(true)
+  dryRun             Boolean  @default(true)
   /// JSON capabilities: read, send, react, edit, delete, admin, souls,
   /// skills, automations, bots, policy.
-  capabilities      String   @default("{}")
+  capabilities       String   @default("{}")
   /// JSON arrays of ids/numbers; empty means "not restricted".
-  allowAccountIds   String   @default("[]")
-  allowChatIds      String   @default("[]")
-  blockChatIds      String   @default("[]")
+  allowAccountIds    String   @default("[]")
+  allowChatIds       String   @default("[]")
+  blockChatIds       String   @default("[]")
   /// Telegram user ids allowed to control the bots. Empty = account owners.
-  ownerTgUserIds    String   @default("[]")
+  ownerTgUserIds     String   @default("[]")
   mcpTokenEncrypted  Bytes?
   mcpTokenNonce      Bytes?
   mcpTokenTag        Bytes?
   mcpTokenDekWrapped Bytes?
   mcpTokenDekNonce   Bytes?
   mcpTokenDekTag     Bytes?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+/// Per-chat permission for the AI soul: may it read / answer this chat (or one
+/// forum topic of it). `enabled = false` is an explicit mute, shadowing the
+/// soul's own chat selection.
+model AiChatAccess {
+  id        String          @id @default(cuid())
+  userId    String
+  accountId String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    BigInt
+  /// Forum topic / channel-comment thread id. `0` = whole chat. Sentinel
+  /// instead of NULL because SQLite treats NULLs as distinct in unique keys,
+  /// which would let duplicate whole-chat rows through.
+  threadId  Int             @default(0)
+  /// Null = applies to any soul of the account.
+  soulId    String?
+  soul      Soul?           @relation(fields: [soulId], references: [id], onDelete: Cascade)
+  enabled   Boolean         @default(true)
+  note      String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([accountId, chatId, threadId])
+  @@index([userId])
+  @@index([accountId, chatId])
+}
+
+/// Blacklist for a chat / thread: a block always wins over `AiChatAccess`
+/// (and over the soul's autopilot). `warnings` counts soft warnings before the
+/// block; `blockedBy` records whether a human or the soul itself blocked it.
+model AiChatBlock {
+  id        String          @id @default(cuid())
+  userId    String
+  accountId String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    BigInt
+  /// Forum topic / channel-comment thread id. `0` = whole chat (sentinel, see
+  /// `AiChatAccess.threadId`).
+  threadId  Int             @default(0)
+  reason    String?
+  warnings  Int             @default(0)
+  /// user | soul
+  blockedBy String          @default("user")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([accountId, chatId, threadId])
+  @@index([userId])
+  @@index([accountId, chatId])
+}
+
+/// LLM provider configurable from the dashboard. The account may have several
+/// and pick one per task; `isDefault` marks the fallback.
+model AiProvider {
+  id              String   @id @default(cuid())
+  name            String
+  /// openai-compatible | anthropic | … (whatever the adapter supports).
+  kind            String   @default("openai-compatible")
+  baseUrl         String   @default("")
+  /// API key, plain string in the DB; the app encrypts it at rest and never
+  /// returns it in full.
+  apiKey          String?
+  /// JSON array of model ids offered by this provider.
+  models          String   @default("[]")
+  defaultModel    String?
+  /// off | low | medium | high
+  reasoningEffort String   @default("low")
+  isDefault       Boolean  @default(false)
+  enabled         Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }
 
 /// One agent invocation: manual chat, MCP tool call, bot message, DM
 /// autopilot or automation. `trace` keeps the tool calls for debugging.
 model AgentRun {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   accountId    String?
   soulId       String?
   chatId       BigInt?
   /// ui | mcp | dm | bot | automation | test
   source       String
-  status       String   @default("running")
+  status       String    @default("running")
   prompt       String
   output       String?
   /// Model reasoning / thinking, when the provider returns it.
   reasoning    String?
   model        String?
-  steps        Int      @default(0)
-  trace        String   @default("[]")
-  inputTokens  Int      @default(0)
-  outputTokens Int      @default(0)
+  steps        Int       @default(0)
+  trace        String    @default("[]")
+  /// JSON array of Telegram message ids the run produced (for attaching the
+  /// reasoning to message bubbles in the dashboard).
+  messageIds   String?
+  inputTokens  Int       @default(0)
+  outputTokens Int       @default(0)
   error        String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
   finishedAt   DateTime?
 
   @@index([accountId, createdAt])

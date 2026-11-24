@@ -1,10 +1,17 @@
 import { ConfigService } from '@nestjs/config';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fetch as httpFetch } from 'undici';
 import type { AiSettingModel } from '@repo/database';
 import { SessionCryptoService } from '../telegram/session-crypto.service.js';
 import { TelegramConfigService } from '../telegram/telegram.config.js';
 import { AiConfigService, parseCapabilities } from './ai-config.service.js';
+import { AiController } from './ai.controller.js';
 import { DEFAULT_CAPABILITIES } from './ai.types.js';
+
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return { ...actual, fetch: vi.fn() };
+});
 
 const NOW = new Date('2026-11-24T10:00:00.000Z');
 
@@ -23,6 +30,12 @@ function row(overrides: Partial<AiSettingModel> = {}): AiSettingModel {
     apiKeyDekTag: null,
     temperature: 0.7,
     maxSteps: 6,
+    reasoningEffort: 'low',
+    sttEngine: 'auto',
+    sttBaseUrl: '',
+    sttModel: null,
+    sttApiKey: null,
+    sttLanguage: 'auto',
     dryRun: true,
     capabilities: JSON.stringify(DEFAULT_CAPABILITIES),
     allowAccountIds: '[]',
@@ -93,6 +106,19 @@ function lastSettingsUpdate(
     );
   if (!call) throw new Error('no settings update was recorded');
   return call[0];
+}
+
+/** The controller only delegates settings work to `AiConfigService`. */
+function controller(service: AiConfigService): AiController {
+  return new AiController(
+    service,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
 }
 
 function decryptRow(
@@ -356,3 +382,369 @@ describe('AiConfigService policy', () => {
     expect(h.prisma.telegramAccount.findMany).toHaveBeenCalledTimes(1);
   });
 });
+
+const fetchMock = vi.mocked(httpFetch);
+
+function healthResponse(ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    body: { cancel: vi.fn(async () => undefined) },
+  } as never;
+}
+
+/** Removes STT variables that a developer machine may export. */
+function clearSttEnv() {
+  vi.stubEnv('STT_BASE_URL', '');
+  vi.stubEnv('STT_REMOTE', '');
+  vi.stubEnv('STT_ENGINE', '');
+}
+
+function decryptSttKey(
+  crypto: SessionCryptoService,
+  stored: string,
+): string {
+  const envelope = new Uint8Array(
+    Buffer.from(stored.slice('enc:v1:'.length), 'base64'),
+  );
+  return crypto
+    .decrypt(crypto.deserialize(envelope), 'ai:stt-key')
+    .toString('utf8');
+}
+
+interface HttpErrorLike {
+  getStatus(): number;
+  response: unknown;
+}
+
+/** `update()` must reject; returns the HttpException for status/code checks. */
+async function updateError(
+  service: AiConfigService,
+  input: Record<string, unknown>,
+): Promise<HttpErrorLike> {
+  try {
+    await service.update(input);
+  } catch (error) {
+    return error as HttpErrorLike;
+  }
+  throw new Error('expected the settings update to fail');
+}
+
+describe('AiConfigService speech-to-text settings', () => {
+  it('returns the stt fields from GET /ai/settings without the key', async () => {
+    const h = harness({
+      existing: row({
+        sttEngine: 'remote',
+        sttBaseUrl: 'https://stt.test/v1',
+        sttModel: 'whisper-large-v3',
+        sttLanguage: 'ru',
+        sttApiKey: 'stt-secret-value',
+      }),
+    });
+
+    const view = await controller(h.service).settings();
+
+    expect(view).toMatchObject({
+      sttEngine: 'remote',
+      sttBaseUrl: 'https://stt.test/v1',
+      sttModel: 'whisper-large-v3',
+      sttLanguage: 'ru',
+      hasSttKey: true,
+    });
+    expect(JSON.stringify(view)).not.toContain('stt-secret-value');
+    // Existing fields stay untouched.
+    expect(view).toHaveProperty('baseUrl');
+    expect(view).toHaveProperty('mcp.token');
+  });
+
+  it('defaults stt fields for a row written before the feature', async () => {
+    const legacy = row();
+    delete (legacy as Partial<AiSettingModel>).sttEngine;
+    delete (legacy as Partial<AiSettingModel>).sttBaseUrl;
+    delete (legacy as Partial<AiSettingModel>).sttModel;
+    delete (legacy as Partial<AiSettingModel>).sttApiKey;
+    delete (legacy as Partial<AiSettingModel>).sttLanguage;
+    const h = harness({ existing: legacy });
+
+    const view = await h.service.view();
+
+    expect(view).toMatchObject({
+      sttEngine: 'auto',
+      sttBaseUrl: '',
+      sttModel: null,
+      sttLanguage: 'auto',
+      hasSttKey: false,
+    });
+  });
+
+  it('persists engine, URL, model and language through PUT and PATCH', async () => {
+    const h = harness();
+    const ctrl = controller(h.service);
+
+    const put = await ctrl.updateSettings({
+      sttEngine: 'remote',
+      sttBaseUrl: 'https://stt.example.com/v1',
+      sttModel: 'whisper-large-v3',
+      sttLanguage: 'ru',
+    });
+    expect(put).toMatchObject({
+      sttEngine: 'remote',
+      sttBaseUrl: 'https://stt.example.com/v1',
+      sttModel: 'whisper-large-v3',
+      sttLanguage: 'ru',
+      hasSttKey: false,
+    });
+    expect(lastSettingsUpdate(h.prisma).data).toMatchObject({
+      sttEngine: 'remote',
+      sttBaseUrl: 'https://stt.example.com/v1',
+      sttModel: 'whisper-large-v3',
+      sttLanguage: 'ru',
+    });
+
+    const patched = await ctrl.patchSettings({
+      sttEngine: 'parakeet',
+      sttLanguage: 'en',
+    });
+    expect(patched).toMatchObject({
+      sttEngine: 'parakeet',
+      sttLanguage: 'en',
+      // Untouched fields survive a partial update.
+      sttBaseUrl: 'https://stt.example.com/v1',
+      sttModel: 'whisper-large-v3',
+    });
+
+    const cleared = await ctrl.patchSettings({
+      sttBaseUrl: '',
+      sttModel: null,
+      sttLanguage: '',
+    });
+    expect(cleared).toMatchObject({
+      sttBaseUrl: '',
+      sttModel: null,
+      sttLanguage: 'auto',
+    });
+  });
+
+  it('encrypts the stt key with the ai:stt-key AAD and clears it', async () => {
+    const h = harness();
+    const ctrl = controller(h.service);
+
+    const view = await ctrl.updateSettings({ sttApiKey: 'stt-live-secret' });
+    expect(view.hasSttKey).toBe(true);
+    expect(JSON.stringify(view)).not.toContain('stt-live-secret');
+
+    const stored = h.current() as AiSettingModel;
+    expect(stored.sttApiKey).toMatch(/^enc:v1:/);
+    expect(stored.sttApiKey).not.toContain('stt-live-secret');
+    expect(decryptSttKey(h.crypto, stored.sttApiKey as string)).toBe(
+      'stt-live-secret',
+    );
+
+    const cleared = await ctrl.patchSettings({ sttApiKey: null });
+    expect(cleared.hasSttKey).toBe(false);
+    expect(h.current()?.sttApiKey).toBeNull();
+
+    // An empty string clears as well.
+    await ctrl.updateSettings({ sttApiKey: 'another-secret' });
+    expect((await ctrl.updateSettings({ sttApiKey: '' })).hasSttKey).toBe(
+      false,
+    );
+    expect(h.current()?.sttApiKey).toBeNull();
+  });
+
+  it('treats a legacy plaintext stt key as configured', async () => {
+    const h = harness({ existing: row({ sttApiKey: 'plain-legacy-key' }) });
+
+    const view = await h.service.view();
+
+    expect(view.hasSttKey).toBe(true);
+    expect(JSON.stringify(view)).not.toContain('plain-legacy-key');
+  });
+
+  it('rejects an unknown engine and a non-http URL', async () => {
+    const h = harness();
+
+    const badEngine = await updateError(h.service, { sttEngine: 'bogus' });
+    expect(badEngine.getStatus()).toBe(400);
+    expect(badEngine.response).toMatchObject({ code: 'INVALID_STT_ENGINE' });
+
+    for (const value of [
+      'ftp://stt.local/v1',
+      'not a url',
+      'javascript:alert(1)',
+    ]) {
+      const badUrl = await updateError(h.service, { sttBaseUrl: value });
+      expect(badUrl.getStatus()).toBe(400);
+      expect(badUrl.response).toMatchObject({ code: 'INVALID_STT_URL' });
+    }
+
+    expect(h.prisma.aiSetting.update).not.toHaveBeenCalled();
+    // Nothing was persisted by the failed writes.
+    expect((await h.service.view()).sttEngine).toBe('auto');
+
+    // Unknown engines are still tolerated when reading a stored row.
+    const stored = harness({ existing: row({ sttEngine: 'openai' }) });
+    expect((await stored.service.view()).sttEngine).toBe('auto');
+
+    // A trailing-slash URL is accepted and kept as sent.
+    const ok = await h.service.update({
+      sttEngine: 'Remote',
+      sttBaseUrl: 'http://192.168.31.108:5092/v1/',
+    });
+    expect(ok).toMatchObject({
+      sttEngine: 'remote',
+      sttBaseUrl: 'http://192.168.31.108:5092/v1/',
+    });
+  });
+
+  it('does not touch stt fields when the payload omits them', async () => {
+    const h = harness({
+      existing: row({
+        sttEngine: 'remote',
+        sttBaseUrl: 'https://stt.test/v1',
+        sttLanguage: 'ru',
+        sttApiKey: 'plain-key',
+      }),
+    });
+
+    const view = await h.service.update({ model: 'gpt-test' });
+
+    expect(view).toMatchObject({
+      model: 'gpt-test',
+      sttEngine: 'remote',
+      sttBaseUrl: 'https://stt.test/v1',
+      sttLanguage: 'ru',
+      hasSttKey: true,
+    });
+    expect(h.current()?.sttApiKey).toBe('plain-key');
+  });
+});
+
+describe('AiConfigService STT probe', () => {
+  beforeEach(() => {
+    clearSttEnv();
+    fetchMock.mockReset();
+  });
+
+  it('probes the default LAN /health with a proxy-free dispatcher', async () => {
+    const h = harness();
+    fetchMock.mockResolvedValueOnce(healthResponse());
+
+    const result = await h.service.sttTest();
+
+    expect(result).toMatchObject({ ok: true, status: 200, engine: 'remote' });
+    expect(typeof result.latencyMs).toBe('number');
+    expect(result).not.toHaveProperty('detail');
+
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { method?: string; dispatcher?: unknown; signal?: unknown },
+    ];
+    expect(String(url)).toBe('http://192.168.31.108:5092/health');
+    expect(init.method).toBe('GET');
+    // The corporate proxy answers 503 for the LAN, so bypass it.
+    expect(init.dispatcher).toBeDefined();
+    expect(init.signal).toBeDefined();
+  });
+
+  it('probes the stored base URL origin and reports HTTP failures', async () => {
+    const h = harness({
+      existing: row({
+        sttEngine: 'remote',
+        sttBaseUrl: 'https://stt.example.com/v1',
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(healthResponse(false, 503));
+
+    const result = await h.service.sttTest();
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 503,
+      engine: 'remote',
+      detail: 'HTTP 503',
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [
+      string,
+      { dispatcher?: unknown },
+    ];
+    expect(String(url)).toBe('https://stt.example.com/health');
+    expect(init.dispatcher).toBeUndefined();
+  });
+
+  it('reports a network failure without leaking the key', async () => {
+    const h = harness();
+    await h.service.update({ sttApiKey: 'stt-secret-key' });
+    fetchMock.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+
+    const result = await h.service.sttTest();
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: null,
+      engine: 'remote',
+      detail: 'connect ECONNREFUSED',
+    });
+    expect(JSON.stringify(result)).not.toContain('stt-secret-key');
+    const [, init] = fetchMock.mock.calls[0] as [
+      string,
+      { headers?: Record<string, string>; body?: unknown },
+    ];
+    expect(init.headers).toBeUndefined();
+    expect(init.body).toBeUndefined();
+  });
+
+  it('skips the probe for local and disabled engines', async () => {
+    const parakeet = harness({ existing: row({ sttEngine: 'parakeet' }) });
+    await expect(parakeet.service.sttTest()).resolves.toMatchObject({
+      ok: true,
+      status: null,
+      latencyMs: 0,
+      engine: 'local',
+    });
+
+    const disabled = harness({ existing: row({ sttEngine: 'disabled' }) });
+    await expect(disabled.service.sttTest()).resolves.toMatchObject({
+      ok: false,
+      status: null,
+      engine: 'local',
+    });
+
+    // `STT_REMOTE=off` also turns the network engine off.
+    const h = harness({ existing: row({ sttEngine: 'auto' }) });
+    vi.stubEnv('STT_REMOTE', 'off');
+    await expect(h.service.sttTest()).resolves.toMatchObject({
+      ok: true,
+      engine: 'local',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('honours STT_BASE_URL and STT_ENGINE from the environment', async () => {
+    const h = harness({ existing: row({ sttBaseUrl: 'https://db.test/v1' }) });
+    vi.stubEnv('STT_BASE_URL', 'http://10.0.0.5:5092');
+    fetchMock.mockResolvedValueOnce(healthResponse());
+
+    await h.service.sttTest();
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, unknown];
+    expect(firstUrl).toBe('http://10.0.0.5:5092/health');
+
+    vi.stubEnv('STT_ENGINE', 'whisper');
+    await expect(h.service.sttTest()).resolves.toMatchObject({
+      ok: true,
+      engine: 'local',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('exposes the probe through POST /ai/stt/test', async () => {
+    const h = harness();
+    fetchMock.mockResolvedValueOnce(healthResponse());
+
+    const result = await controller(h.service).sttTest();
+
+    expect(result).toMatchObject({ ok: true, status: 200, engine: 'remote' });
+    expect(result).not.toHaveProperty('hasSttKey');
+  });
+});
+

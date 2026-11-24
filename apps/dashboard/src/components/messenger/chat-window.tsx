@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { listChatRuns } from "../../lib/ai-api";
 import { errorMessage, mediaUrl } from "../../lib/api";
 import { chatAvatarUrl } from "../../lib/avatar";
 import { copyToClipboard } from "../../lib/clipboard";
@@ -28,18 +29,25 @@ import {
 import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
   AccountView,
+  AiReplyEvent,
   ChatView,
   MessagePollView,
   MessageReactionView,
+  MessageTranscriptionView,
   MessageView,
   RealtimeMessageEvent,
   TypingEntry,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
+import { AiAccessMenu } from "./ai-access-menu";
+import { useAiAccess } from "./ai-access-store";
+import { ChatAiChip } from "./chat-ai-chip";
 import { ChatInfoPanel } from "./chat-info-panel";
 import { CommentThreadDrawer } from "./comment-thread-drawer";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
+import { ReasoningBlock } from "./reasoning-block";
+import { VoiceBubble } from "./voice-bubble";
 
 /** Emoji offered by the inline reaction picker. */
 const REACTION_EMOJI = [
@@ -103,6 +111,15 @@ function applyReactionChange(
     );
   }
   return [...cleared, { emoji, count: 1, chosen: true }];
+}
+
+/** Reasoning of one agent run attached to the bubble it produced. */
+interface MessageReasoning {
+  runId: string;
+  reasoning: string;
+  /** How many Telegram bubbles the run produced (the block sits under the last). */
+  bubbles: number;
+  createdAt: string;
 }
 
 export function ChatWindow({
@@ -183,6 +200,12 @@ export function ChatWindow({
   const [sending, setSending] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [threadFor, setThreadFor] = useState<MessageView | null>(null);
+  const [aiMenu, setAiMenu] = useState<{ x: number; y: number } | null>(null);
+  const [runReasoning, setRunReasoning] = useState<
+    Map<number, MessageReasoning>
+  >(() => new Map());
+  const [showReasoning, setShowReasoning] = useState(true);
+  const { error: aiError, statusFor } = useAiAccess();
   const [threadCounts, setThreadCounts] = useState<Map<number, number>>(
     () => new Map(),
   );
@@ -206,7 +229,7 @@ export function ChatWindow({
   >(() => new Map());
   const [translating, setTranslating] = useState<Set<number>>(() => new Set());
   const [transcripts, setTranscripts] = useState<
-    Map<number, { text: string; pending: boolean }>
+    Map<number, MessageTranscriptionView>
   >(() => new Map());
   const [transcribing, setTranscribing] = useState<Set<number>>(
     () => new Set(),
@@ -230,6 +253,99 @@ export function ChatWindow({
 
   const accountId = account?.id ?? null;
   const chatId = chat?.id ?? null;
+
+  // The reasoning preference is per account and lives on this device only.
+  useEffect(() => {
+    if (!accountId) {
+      setShowReasoning(true);
+      return;
+    }
+    try {
+      setShowReasoning(
+        window.localStorage.getItem(`tg-show-reasoning:${accountId}`) !== "0",
+      );
+    } catch {
+      setShowReasoning(true);
+    }
+  }, [accountId]);
+
+  const toggleReasoning = useCallback(
+    (next: boolean) => {
+      setShowReasoning(next);
+      if (!accountId) return;
+      try {
+        window.localStorage.setItem(
+          `tg-show-reasoning:${accountId}`,
+          next ? "1" : "0",
+        );
+      } catch {
+        // Private mode or a blocked storage: the session still honours it.
+      }
+    },
+    [accountId],
+  );
+
+  // One request per opened chat decorates every bot bubble with its run.
+  useEffect(() => {
+    if (!accountId || !chatId) {
+      setRunReasoning(new Map());
+      return;
+    }
+    let active = true;
+    setRunReasoning(new Map());
+    listChatRuns(accountId, chatId)
+      .then(({ runs }) => {
+        if (!active) return;
+        const next = new Map<number, MessageReasoning>();
+        for (const run of runs) {
+          const reasoning = run.reasoning?.trim();
+          if (!reasoning || run.messageIds.length === 0) continue;
+          const messageId = run.messageIds[run.messageIds.length - 1];
+          if (next.has(messageId)) continue;
+          // A run can send several bubbles; the block goes under the last one.
+          next.set(messageId, {
+            runId: run.id,
+            reasoning,
+            bubbles: run.messageIds.length,
+            createdAt: run.createdAt,
+          });
+        }
+        // Keep a reasoning that arrived live while the request was in flight.
+        setRunReasoning((previous) => {
+          for (const [messageId, value] of previous) {
+            if (!next.has(messageId)) next.set(messageId, value);
+          }
+          return next;
+        });
+      })
+      .catch(() => {
+        // Reasoning is decorative: a failed request renders no blocks.
+      });
+    return () => {
+      active = false;
+    };
+  }, [accountId, chatId]);
+
+  // `ai.reply` arrives after the bubble was sent; attach its reasoning at once.
+  useEffect(() => {
+    if (!accountId || !chatId) return;
+    return subscribeRealtime(({ event, payload }) => {
+      if (event !== "ai.reply") return;
+      const data = payload as AiReplyEvent;
+      if (data.accountId !== accountId || data.chatId !== chatId) return;
+      const reasoning = data.reasoning?.trim();
+      if (!reasoning) return;
+      setRunReasoning((previous) =>
+        new Map(previous).set(data.message.id, {
+          runId: data.runId,
+          reasoning,
+          bubbles: 1,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    });
+  }, [accountId, chatId]);
+
   const draftKey =
     accountId !== null && chatId !== null
       ? draftStorageKey(accountId, chatId)
@@ -248,6 +364,7 @@ export function ChatWindow({
     if (infoChatRef.current === id) return;
     infoChatRef.current = id;
     setInfoOpen(false);
+    setAiMenu(null);
   }, [chat]);
 
   const closeInfo = useCallback(() => setInfoOpen(false), []);
@@ -802,8 +919,16 @@ export function ChatWindow({
         const result = await transcribeMessage(accountId, chatId, messageId);
         setTranscripts((previous) => new Map(previous).set(messageId, result));
         setStatus(null);
-      } catch (caught) {
-        setStatus(errorMessage(caught));
+      } catch {
+        // Voice notes are the only transcribed media; keep the failure inside
+        // the bubble (403 until the API-side transcription fallback lands).
+        setTranscripts((previous) =>
+          new Map(previous).set(messageId, {
+            text: "Расшифровка недоступна",
+            pending: false,
+            unavailable: true,
+          }),
+        );
       } finally {
         transcribingRef.current.delete(messageId);
         setTranscribing((previous) => {
@@ -881,6 +1006,7 @@ export function ChatWindow({
                 : ` (${activeTyping[0]?.status})`}
             </span>
           )}
+          <ChatAiChip chatId={chat.id} chatTitle={chat.title} />
           <label className="flex items-center gap-1 text-[11px] text-zinc-500">
             <span>Перевод</span>
             <select
@@ -914,10 +1040,29 @@ export function ChatWindow({
         </div>
       </div>
 
+      {aiError && (
+        <p
+          role="alert"
+          className="border-b border-red-900/60 bg-red-950/30 px-5 py-1 text-[11px] text-red-300"
+        >
+          {aiError}
+        </p>
+      )}
+
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: right-click only opens the AI menu; the same actions are in the keyboard-reachable header chip. */}
       <div
         ref={scrollRef}
         data-transcript-scroll
         onScroll={handleScroll}
+        onContextMenu={(event) => {
+          // Right-click on the empty transcript area: show the chat's AI actions.
+          if ((event.target as Element).closest("[data-message-id]")) return;
+          event.preventDefault();
+          setAiMenu({
+            x: Math.max(8, Math.min(event.clientX, window.innerWidth - 248)),
+            y: Math.max(8, Math.min(event.clientY, window.innerHeight - 240)),
+          });
+        }}
         className="flex-1 space-y-3 overflow-y-auto px-5 py-4"
       >
         {nextOffsetId !== null && (
@@ -955,6 +1100,7 @@ export function ChatWindow({
           const poll = pollFor(message);
           const translation = translations.get(message.id);
           const transcript = transcripts.get(message.id);
+          const reasoning = runReasoning.get(message.id);
           const reactionBusy = reactionPending.has(message.id);
           const voteBusy = votingId === message.id;
           const menuActions: MessageMenuAction[] = [];
@@ -1164,6 +1310,9 @@ export function ChatWindow({
                               message={message}
                               accountId={account.id}
                               selecting={selecting}
+                              transcript={transcript}
+                              transcribing={transcribing.has(message.id)}
+                              onTranscribe={() => void transcribe(message.id)}
                             />
                           )}
                           {message.text.trim() &&
@@ -1184,13 +1333,6 @@ export function ChatWindow({
                                 [{message.mediaType}]
                               </p>
                             )}
-                          {message.isVoice && transcript && (
-                            <p className="mt-1 rounded bg-black/20 px-2 py-1 text-xs">
-                              {transcript.pending
-                                ? "Расшифровка…"
-                                : transcript.text || "Пустая расшифровка"}
-                            </p>
-                          )}
                           {translation && (
                             <p className="mt-1 rounded border-l-2 border-sky-300/60 bg-black/20 px-2 py-1 text-xs">
                               <span className="mr-1 uppercase opacity-60">
@@ -1198,6 +1340,13 @@ export function ChatWindow({
                               </span>
                               {translation.text}
                             </p>
+                          )}
+                          {showReasoning && reasoning && (
+                            <ReasoningBlock
+                              reasoning={reasoning.reasoning}
+                              bubbles={reasoning.bubbles}
+                              createdAt={reasoning.createdAt}
+                            />
                           )}
                         </>
                       )}
@@ -1525,6 +1674,16 @@ export function ChatWindow({
         />
       )}
 
+      {aiMenu && (
+        <AiAccessMenu
+          chatId={chat.id}
+          chatTitle={chat.title}
+          state={statusFor(chat.id)}
+          position={aiMenu}
+          onClose={() => setAiMenu(null)}
+        />
+      )}
+
       {infoOpen && (
         <ChatInfoPanel
           key={chat.id}
@@ -1533,6 +1692,8 @@ export function ChatWindow({
           chats={chats}
           onOpenChat={onOpenChat}
           onClose={closeInfo}
+          showReasoning={showReasoning}
+          onToggleReasoning={toggleReasoning}
         />
       )}
     </section>
@@ -1704,10 +1865,16 @@ function MessageMedia({
   message,
   accountId,
   selecting,
+  transcript,
+  transcribing,
+  onTranscribe,
 }: {
   message: MessageView;
   accountId: string;
   selecting: boolean;
+  transcript?: MessageTranscriptionView;
+  transcribing: boolean;
+  onTranscribe: () => void;
 }) {
   const media = message.media;
   if (!media || !media.downloadable) return null;
@@ -1748,17 +1915,14 @@ function MessageMedia({
 
   if (media.kind === "voice") {
     return (
-      <audio
-        controls
-        preload="metadata"
+      <VoiceBubble
         src={url}
-        onClick={(event) => {
-          if (selecting) event.preventDefault();
-        }}
-        className="my-1 w-full max-w-xs"
-      >
-        <track kind="captions" />
-      </audio>
+        fileName={media.fileName}
+        selecting={selecting}
+        transcript={transcript}
+        transcribing={transcribing}
+        onTranscribe={onTranscribe}
+      />
     );
   }
 

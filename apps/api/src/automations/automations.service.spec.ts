@@ -14,6 +14,13 @@ function automationRow(
   return {
     id: 'auto-1',
     accountId: null,
+    chatId: null,
+    threadId: 0,
+    soulId: null,
+    createdBy: 'user',
+    timezone: null,
+    selfPausedAt: null,
+    selfPauseReason: null,
     name: 'Digest',
     description: '',
     enabled: true,
@@ -55,6 +62,18 @@ function createHarness(rows: AutomationModel[] = []) {
     where: Record<string, unknown>,
   ): boolean => {
     if (typeof where.accountId === 'string' && row.accountId !== where.accountId) {
+      return false;
+    }
+    if ('chatId' in where && row.chatId !== where.chatId) {
+      return false;
+    }
+    if (typeof where.threadId === 'number' && row.threadId !== where.threadId) {
+      return false;
+    }
+    if (typeof where.soulId === 'string' && row.soulId !== where.soulId) {
+      return false;
+    }
+    if ('selfPausedAt' in where && row.selfPausedAt !== where.selfPausedAt) {
       return false;
     }
     if (where.enabled !== undefined && row.enabled !== where.enabled) {

@@ -23,6 +23,8 @@ export type AiCapability =
 
 export type AiCapabilities = Record<AiCapability, boolean>;
 
+export type AiReasoningEffort = "off" | "low" | "medium" | "high";
+
 export interface AiSettings {
   provider: string;
   baseUrl: string;
@@ -34,7 +36,7 @@ export interface AiSettings {
   temperature: number;
   maxSteps: number;
   /** off | low | medium | high */
-  reasoningEffort: "off" | "low" | "medium" | "high";
+  reasoningEffort: AiReasoningEffort;
   dryRun: boolean;
   capabilities: AiCapabilities;
   allowAccountIds: string[];
@@ -45,6 +47,41 @@ export interface AiSettings {
   envConfigured: boolean;
   mcp: { endpoint: string; token: string };
   updatedAt: string | null;
+  /** Speech-to-text draft fields. Absent while the API does not expose them. */
+  sttEngine?: string;
+  sttBaseUrl?: string;
+  sttModel?: string | null;
+  sttLanguage?: string;
+}
+
+/** One configurable LLM provider. The API key is never returned. */
+export interface AiProviderView {
+  id: string;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  models: string[];
+  defaultModel: string | null;
+  reasoningEffort: AiReasoningEffort;
+  isDefault: boolean;
+  enabled: boolean;
+  hasKey: boolean;
+}
+
+export interface AiProviderTestResult {
+  ok: boolean;
+  status: number | null;
+  latencyMs: number;
+  error?: string;
+}
+
+export interface AiProviderDeleteResult {
+  removed: boolean;
+  promotedId: string | null;
+}
+
+export interface AiProviderImportResult {
+  created: boolean;
 }
 
 export interface SkillView {
@@ -167,6 +204,15 @@ export interface ToolInfo {
 export interface AutomationView {
   id: string;
   accountId: string | null;
+  /** Chat bound to the automation; null = global / not chat-bound. */
+  chatId: number | null;
+  /** Forum topic or comment thread; 0 = whole chat. */
+  threadId: number;
+  soulId: string | null;
+  /** user | soul | assistant */
+  createdBy: string;
+  /** IANA zone the wall clock follows; null = server-local. */
+  timezone: string | null;
   name: string;
   description: string;
   enabled: boolean;
@@ -176,9 +222,54 @@ export interface AutomationView {
   action: Record<string, unknown>;
   lastRunAt: string | null;
   nextRunAt: string | null;
+  nextDueAt: string | null;
+  selfPaused: boolean;
+  selfPausedAt: string | null;
+  selfPauseReason: string | null;
   runCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One automation in a chat card, with the latest run status. */
+export interface ChatAutomationView extends AutomationView {
+  lastRunStatus: string | null;
+  lastRunError: string | null;
+}
+
+export interface ChatAutomationsView {
+  accountId: string;
+  chatId: number;
+  threadId: number | null;
+  automations: ChatAutomationView[];
+  summary: {
+    total: number;
+    active: number;
+    paused: number;
+    nextDueAt: string | null;
+    lastRunAt: string | null;
+  };
+}
+
+/** `GET /ai/runs` row; `messageIds` are the Telegram bubbles the run sent. */
+export interface AgentRunView {
+  id: string;
+  accountId: string | null;
+  chatId: number | null;
+  source: string;
+  status: string;
+  prompt: string;
+  output: string | null;
+  reasoning: string | null;
+  messageIds: number[];
+  model: string | null;
+  steps: number;
+  trace: unknown[];
+  inputTokens: number;
+  outputTokens: number;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
 }
 
 export interface AutomationRunView {
@@ -225,6 +316,7 @@ const AI_ERRORS: Record<string, string> = {
   BOT_TOKEN_MISSING: "У бота ещё нет токена — вставьте токен BotFather",
   BOT_TOKEN_REJECTED: "Telegram не принял токен бота",
   INVALID_BOT_TOKEN: "Токен должен выглядеть как 123456789:AA…",
+  PROVIDER_NOT_FOUND: "Провайдер не найден — обновите список",
 };
 
 /**
@@ -257,6 +349,77 @@ export function updateAiSettings(
   return apiFetch("/ai/settings", { method: "PUT", body });
 }
 
+/**
+ * Partial settings update. The API exposes `PATCH /ai/settings` in newer
+ * builds; older ones only accept `PUT`, so fall back without losing the
+ * request body.
+ */
+export async function patchAiSettings(
+  body: Record<string, unknown>,
+): Promise<AiSettings> {
+  try {
+    return await apiFetch<AiSettings>("/ai/settings", {
+      method: "PATCH",
+      body,
+    });
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      (error.status === 404 || error.status === 405)
+    ) {
+      return updateAiSettings(body);
+    }
+    throw error;
+  }
+}
+
+export function listAiProviders(): Promise<AiProviderView[]> {
+  return apiFetch("/ai/providers");
+}
+
+export function createAiProvider(
+  body: Record<string, unknown>,
+): Promise<AiProviderView> {
+  return apiFetch("/ai/providers", { method: "POST", body });
+}
+
+export function updateAiProvider(
+  id: string,
+  body: Record<string, unknown>,
+): Promise<AiProviderView> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body,
+  });
+}
+
+export function deleteAiProvider(id: string): Promise<AiProviderDeleteResult> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function setDefaultAiProvider(id: string): Promise<AiProviderView> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}/default`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+export function testAiProvider(id: string): Promise<AiProviderTestResult> {
+  return apiFetch(`/ai/providers/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+export function importAiSettings(): Promise<AiProviderImportResult> {
+  return apiFetch("/ai/providers/import-settings", {
+    method: "POST",
+    body: {},
+  });
+}
+
 export function updateAiPolicy(
   body: Record<string, unknown>,
 ): Promise<unknown> {
@@ -284,8 +447,26 @@ export function getAiTools(): Promise<{ tools: ToolInfo[] }> {
   return apiFetch("/ai/tools");
 }
 
-export function listRuns(limit = 30): Promise<{ runs: unknown[] }> {
+export function listRuns(limit = 30): Promise<{ runs: AgentRunView[] }> {
   return apiFetch(`/ai/runs?limit=${limit}`);
+}
+
+/** Runs of one Telegram chat, newest first; used for message reasoning. */
+export function listChatRuns(
+  accountId: string,
+  chatId: number,
+  limit = 20,
+): Promise<{ runs: AgentRunView[] }> {
+  const params = new URLSearchParams({
+    accountId,
+    chatId: String(chatId),
+    limit: String(limit),
+  });
+  return apiFetch(`/ai/runs?${params.toString()}`);
+}
+
+export function getAgentRun(id: string): Promise<AgentRunView> {
+  return apiFetch(`/ai/runs/${encodeURIComponent(id)}`);
 }
 
 export function listSouls(): Promise<{ souls: SoulView[] }> {
@@ -382,6 +563,60 @@ export function deleteSkill(id: string): Promise<{ removed: boolean }> {
 
 export function listAutomations(): Promise<{ automations: AutomationView[] }> {
   return apiFetch("/ai/automations");
+}
+
+/** Chat card: automations bound to one account/chat, plus summary counters. */
+export function getChatAutomations(
+  accountId: string,
+  chatId: number,
+  options: { threadId?: number; soulId?: string } = {},
+): Promise<ChatAutomationsView> {
+  const params = new URLSearchParams();
+  if (options.threadId !== undefined) {
+    params.set("threadId", String(options.threadId));
+  }
+  if (options.soulId) params.set("soulId", options.soulId);
+  const query = params.toString();
+  return apiFetch(
+    `/ai/automations/chats/${encodeURIComponent(accountId)}/${chatId}${query ? `?${query}` : ""}`,
+  );
+}
+
+export function pauseChatAutomations(
+  accountId: string,
+  chatId: number,
+  body: { threadId?: number; soulId?: string; reason?: string | null } = {},
+): Promise<{ paused: AutomationView[] }> {
+  return apiFetch(
+    `/ai/automations/chats/${encodeURIComponent(accountId)}/${chatId}/pause`,
+    { method: "POST", body },
+  );
+}
+
+export function resumeChatAutomations(
+  accountId: string,
+  chatId: number,
+  options: { threadId?: number; soulId?: string } = {},
+): Promise<{ resumed: AutomationView[] }> {
+  const params = new URLSearchParams();
+  if (options.threadId !== undefined) {
+    params.set("threadId", String(options.threadId));
+  }
+  if (options.soulId) params.set("soulId", options.soulId);
+  const query = params.toString();
+  return apiFetch(
+    `/ai/automations/chats/${encodeURIComponent(accountId)}/${chatId}/resume${query ? `?${query}` : ""}`,
+    { method: "POST", body: {} },
+  );
+}
+
+export function resumeAutomation(
+  id: string,
+): Promise<{ automation: AutomationView | null }> {
+  return apiFetch(`/ai/automations/${encodeURIComponent(id)}/resume`, {
+    method: "POST",
+    body: {},
+  });
 }
 
 export function createAutomation(

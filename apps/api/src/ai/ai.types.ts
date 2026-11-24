@@ -55,7 +55,32 @@ export interface AiPolicyView {
   ownerTgUserIds: string[];
 }
 
-export interface AiSettingsView {
+/** Engine preference for voice-note transcription. */
+export type SttEngine = 'auto' | 'remote' | 'parakeet' | 'whisper' | 'disabled';
+
+/** Speech-to-text settings shared by the dashboard and `SpeechService`. */
+export interface SttSettingsView {
+  sttEngine: SttEngine;
+  /** Empty means the built-in remote service. */
+  sttBaseUrl: string;
+  sttModel: string | null;
+  /** `auto` or a locale such as `ru`. */
+  sttLanguage: string;
+  /** True when a key is stored; the key itself is never returned. */
+  hasSttKey: boolean;
+}
+
+/** Result of `POST /ai/stt/test`. */
+export interface SttTestResult {
+  ok: boolean;
+  status: number | null;
+  latencyMs: number;
+  /** `remote` = the HTTP service was probed; `local` = parakeet/whisper/off. */
+  engine: 'remote' | 'local';
+  detail?: string;
+}
+
+export interface AiSettingsView extends SttSettingsView {
   provider: string;
   baseUrl: string;
   model: string;
@@ -91,6 +116,14 @@ export interface AiSettingsUpdate {
   reasoningEffort?: unknown;
   /** Empty string clears the stored key; undefined keeps it. */
   apiKey?: unknown;
+  sttEngine?: unknown;
+  /** Empty string falls back to the built-in remote service. */
+  sttBaseUrl?: unknown;
+  sttModel?: unknown;
+  /** Empty string means `auto`. */
+  sttLanguage?: unknown;
+  /** String sets the key, null/empty clears it, undefined keeps it. */
+  sttApiKey?: unknown;
   temperature?: unknown;
   maxSteps?: unknown;
   dryRun?: unknown;

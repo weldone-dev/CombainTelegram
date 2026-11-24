@@ -5,8 +5,11 @@ import type {
   MessageMediaView,
   MessageView,
 } from '../messaging/message-view.js';
-import type { TelegramAccountModel } from '@repo/database';
+import type { SoulModel, TelegramAccountModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AiAccessService } from '../ai-access/ai-access.service.js';
+import type { AiAccessDecision } from '../ai-access/ai-access.service.js';
+import { AiRunsService } from './ai-runs.service.js';
 import { DefaultUserService } from '../user-context/default-user.service.js';
 import { MessagingService } from '../messaging/messaging.service.js';
 import { RealtimeService } from '../realtime/realtime.service.js';
@@ -17,12 +20,16 @@ import { AgentService } from './agent.service.js';
 import { MemoryService } from './memory.service.js';
 import { SoulsService, parseSoulSettings } from './souls.service.js';
 import { PresenceService } from './presence.service.js';
+import { SpeechService } from './speech.service.js';
 import { typingDurationMs } from './typing.js';
 import { parseReply } from './dm-reply.js';
 
 interface MessageNewPayload {
   accountId?: unknown;
   chatId?: unknown;
+  /** Forum topic / comment thread, when the engine reports one. */
+  threadId?: unknown;
+  messageThreadId?: unknown;
   message?: Partial<MessageView>;
 }
 
@@ -51,6 +58,11 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_IMAGES = 2;
 /** The last photo stays available for a follow-up question this long. */
 const LAST_IMAGE_TTL_MS = 3 * 60_000;
+/** Longest voice transcript forwarded to the model, characters. */
+const MAX_VOICE_CHARS = 1500;
+/** Placeholder for a voice note that could not be transcribed. */
+const VOICE_FAILED_TEXT =
+  '[голосовое сообщение, расшифровать не удалось]';
 
 /**
  * Words that mean the peer is asking about a picture. Used to warn the model
@@ -90,6 +102,26 @@ function isImageMedia(media: MessageMediaView | null | undefined): boolean {
   );
 }
 
+/**
+ * Whether the media is audio the speech engine can listen to: a voice note or
+ * an audio file sent as a document.
+ */
+function isAudioMedia(media: MessageMediaView | null | undefined): boolean {
+  if (!media || !media.downloadable) return false;
+  if (media.kind === 'voice') return true;
+  return (
+    media.kind === 'document' &&
+    (media.mimeType ?? '').toLowerCase().startsWith('audio/')
+  );
+}
+
+/** Per-burst voice transcripts, keyed by message id. */
+interface VoiceResult {
+  transcripts: Map<number, string>;
+  /** At least one audio message could not be turned into text. */
+  failed: boolean;
+}
+
 interface TypingState {
   userId: string;
   accountId: string;
@@ -108,6 +140,40 @@ const PART_PAUSE_MIN_MS = 200;
 const PART_PAUSE_MAX_MS = 400;
 /** How long a fetched peer profile stays fresh, milliseconds. */
 const PEER_PROFILE_TTL_MS = 10 * 60_000;
+/**
+ * How long one `AiAccessService.accessFor` decision is reused, milliseconds.
+ *
+ * The autopilot sees every incoming message, so the gate must not hit the DB
+ * four times per message. A plain TTL cache (no cross-service invalidation) is
+ * enough: a block added from the dashboard starts applying within 10 s, and
+ * the cache is keyed per account+chat+thread.
+ */
+const ACCESS_CACHE_TTL_MS = 10_000;
+/** Upper bound of the access cache; oldest entries are evicted first. */
+const ACCESS_CACHE_MAX = 2_000;
+
+/**
+ * Thread id of the incoming message: a forum topic / comment-thread id when
+ * the engine reports one, otherwise `0` (whole chat).
+ *
+ * `MessageView` currently carries no topic field (private chats, the only ones
+ * the autopilot handles, have no topics), but the realtime payload and future
+ * message metadata may expose `threadId` / `messageThreadId`, so both are read
+ * defensively.
+ */
+function threadIdOf(data: MessageNewPayload, message: MessageView): number {
+  const candidates: unknown[] = [
+    data.threadId,
+    data.messageThreadId,
+    (message as { threadId?: unknown }).threadId,
+    (message as { messageThreadId?: unknown }).messageThreadId,
+  ];
+  for (const candidate of candidates) {
+    const parsed = Number(candidate);
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
+  return 0;
+}
 
 /** Autopilot only ever works in `draft` or `auto`; anything else is off. */
 function isAutopilotMode(mode: string): boolean {
@@ -145,6 +211,11 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     string,
     { at: number; block: string }
   >();
+  /** TTL cache of AI access decisions, keyed `accountId:chatId:threadId`. */
+  private readonly accessCache = new Map<
+    string,
+    { at: number; decision: AiAccessDecision }
+  >();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -157,9 +228,13 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     private readonly memory: MemoryService,
     private readonly souls: SoulsService,
     private readonly presence: PresenceService,
+    private readonly speech: SpeechService,
+    private readonly aiAccess: AiAccessService,
+    private readonly agentRuns: AiRunsService,
   ) {}
 
   async onModuleInit(): Promise<void> {
+    await this.seedChatAccess();
     this.subscription = this.realtime.events$.subscribe((event) => {
       if (event.event !== 'message.new') return;
       void this.onMessage(event.userId, event.payload).catch((error) => {
@@ -190,6 +265,149 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     this.typing.clear();
     for (const timer of this.readTimers) clearTimeout(timer);
     this.readTimers.clear();
+    this.accessCache.clear();
+  }
+
+  /**
+   * One-time seed: every chat already listed in a soul's `chatIds` becomes an
+   * explicit `AiChatAccess` row, so the dashboard shows the chats that already
+   * work without the user re-adding them. Idempotent — existing rows, including
+   * a human's `enabled: false`, are never overwritten.
+   */
+  private async seedChatAccess(): Promise<void> {
+    try {
+      const souls = (await this.prisma.soul.findMany({
+        include: { account: { select: { userId: true } } },
+      })) as Array<{
+        accountId: string;
+        settings: string;
+        account: { userId: string };
+      }>;
+      const wanted = new Map<
+        string,
+        { userId: string; accountId: string; chatId: number }
+      >();
+      for (const soul of souls) {
+        for (const chatId of parseSoulSettings(soul.settings).chatIds) {
+          const key = `${soul.accountId}:${chatId}`;
+          if (!wanted.has(key)) {
+            wanted.set(key, {
+              userId: soul.account.userId,
+              accountId: soul.accountId,
+              chatId,
+            });
+          }
+        }
+      }
+      if (wanted.size === 0) {
+        emitLog({
+          level: 'info',
+          source: 'ai',
+          action: 'ai.access.seed',
+          message: 'Seeded 0 chat access rows (no soul allows a specific chat)',
+          status: 'ok',
+          details: { created: 0, selected: 0 },
+        });
+        return;
+      }
+
+      const accountIds = [
+        ...new Set([...wanted.values()].map((it) => it.accountId)),
+      ];
+      const existing = (await this.prisma.aiChatAccess.findMany({
+        where: { accountId: { in: accountIds } },
+        select: { accountId: true, chatId: true, threadId: true },
+      })) as Array<{ accountId: string; chatId: bigint; threadId: number }>;
+      const known = new Set(
+        existing
+          .filter((row) => row.threadId === 0)
+          .map((row) => `${row.accountId}:${Number(row.chatId)}`),
+      );
+
+      let created = 0;
+      for (const [key, entry] of wanted) {
+        if (known.has(key)) continue;
+        await this.prisma.aiChatAccess.upsert({
+          where: {
+            accountId_chatId_threadId: {
+              accountId: entry.accountId,
+              chatId: BigInt(entry.chatId),
+              threadId: 0,
+            },
+          },
+          create: {
+            userId: entry.userId,
+            accountId: entry.accountId,
+            chatId: BigInt(entry.chatId),
+            threadId: 0,
+            enabled: true,
+          },
+          update: {},
+        });
+        created += 1;
+      }
+
+      emitLog({
+        level: 'info',
+        source: 'ai',
+        action: 'ai.access.seed',
+        message: `Seeded ${created} chat access rows from soul settings (${wanted.size} chats selected)`,
+        status: 'ok',
+        details: { created, selected: wanted.size },
+      });
+    } catch (error) {
+      // A seed failure must never keep the autopilot from starting.
+      this.logger.warn(
+        `Could not seed chat access rows: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Access decision of one chat/topic, cached for {@link ACCESS_CACHE_TTL_MS}.
+   *
+   * Precedence (also applied by {@link chatAllowed}):
+   * block > explicit access row > soul settings (`allowAllChats`/`chatIds`)
+   * > deny.
+   */
+  private async accessDecision(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    threadId: number,
+  ): Promise<AiAccessDecision> {
+    const key = `${accountId}:${chatId}:${threadId}`;
+    const cached = this.accessCache.get(key);
+    if (cached && Date.now() - cached.at < ACCESS_CACHE_TTL_MS) {
+      return cached.decision;
+    }
+    const decision = await this.aiAccess.accessFor(
+      userId,
+      accountId,
+      chatId,
+      threadId,
+    );
+    this.accessCache.set(key, { at: Date.now(), decision });
+    if (this.accessCache.size > ACCESS_CACHE_MAX) {
+      const oldest = this.accessCache.keys().next().value;
+      if (oldest) this.accessCache.delete(oldest);
+    }
+    return decision;
+  }
+
+  /**
+   * Resolves the stored decision against the soul: an explicit access row
+   * shadows the soul's own chat selection, and only a missing row falls back
+   * to `allowAllChats` / `chatIds`. A block always wins.
+   */
+  private chatAllowed(
+    decision: AiAccessDecision,
+    soul: SoulModel,
+    chatId: number,
+  ): boolean {
+    if (decision.block) return false;
+    if (decision.access) return decision.access.enabled === true;
+    return this.souls.allowsChat(soul, chatId);
   }
 
   private async onMessage(userId: string, payload: unknown): Promise<void> {
@@ -209,9 +427,40 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (!account) return;
     if (Number(account.tgUserId) === chatId) return; // Saved Messages
 
+    const threadId = threadIdOf(data, message);
+
+    // Access gate, before anything visible happens (typing, read receipt,
+    // debounce). A block is a hard drop: the message is never scheduled, read
+    // or passed to the agent. Precedence is block > access row > soul
+    // settings > deny; see `chatAllowed`.
+    const decision = await this.accessDecision(
+      userId,
+      accountId,
+      chatId,
+      threadId,
+    );
+    if (decision.block) {
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.blocked',
+        message: `Incoming message in ${chatId} dropped: chat/topic is blocked`,
+        status: 'ok',
+        accountId,
+        chatId,
+        details: {
+          chatId,
+          threadId,
+          warnings: decision.warnings,
+          reason: decision.block.reason,
+        },
+      });
+      return;
+    }
+
     const soul = await this.souls.model(accountId);
     if (!soul || !isAutopilotMode(soul.mode)) return;
-    if (!this.souls.allowsChat(soul, chatId)) return;
+    if (!this.chatAllowed(decision, soul, chatId)) return;
 
     const key = `${accountId}:${chatId}:${message.id}`;
     if (this.seen.has(key)) return;
@@ -265,6 +514,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         senderName,
         token,
         texts,
+        threadId,
       ).catch((error) => {
         this.logger.warn(
           `Autopilot reply failed: ${(error as Error).message}`,
@@ -401,6 +651,121 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       }
     }
     return images;
+  }
+
+  /**
+   * Transcribes every voice note in the burst through the local speech engine.
+   *
+   * Always resolves: a missing engine, a download failure or an empty
+   * transcript marks the batch as failed so the prompt can say honestly that
+   * the audio was not understood, and the reply still goes out.
+   */
+  private async transcribeVoices(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    items: IncomingText[],
+  ): Promise<VoiceResult> {
+    const transcripts = new Map<number, string>();
+    let failed = false;
+    const audio = items.filter((item) => isAudioMedia(item.media));
+    if (audio.length === 0) return { transcripts, failed };
+    const ready = this.speech.available();
+    for (const item of audio) {
+      const started = Date.now();
+      let bytes = 0;
+      if (!ready) {
+        failed = true;
+        emitLog({
+          level: 'warn',
+          source: 'ai',
+          action: 'dm.autopilot.voice',
+          message: `Voice note ${item.id} was not transcribed: no speech engine is installed`,
+          status: 'failed',
+          accountId,
+          chatId,
+          details: {
+            messageId: item.id,
+            bytes,
+            chars: 0,
+            ms: Date.now() - started,
+            reason: 'unavailable',
+          },
+        });
+        continue;
+      }
+      try {
+        const file = await this.messaging.downloadMedia(
+          userId,
+          accountId,
+          String(chatId),
+          String(item.id),
+        );
+        bytes = file.data.length;
+        const result = await this.speech.transcribe({
+          data: file.data,
+          mimeType: file.mimeType,
+          fileName: file.fileName,
+        });
+        const chars = result?.text.length ?? 0;
+        const ms = Date.now() - started;
+        if (!result || chars === 0) {
+          failed = true;
+          emitLog({
+            level: 'warn',
+            source: 'ai',
+            action: 'dm.autopilot.voice',
+            message: `Voice note ${item.id} produced no transcript`,
+            status: 'failed',
+            accountId,
+            chatId,
+            details: {
+              messageId: item.id,
+              bytes,
+              chars,
+              ms,
+              reason: 'empty',
+            },
+          });
+          continue;
+        }
+        const text =
+          result.text.length > MAX_VOICE_CHARS
+            ? `${result.text.slice(0, MAX_VOICE_CHARS)}…`
+            : result.text;
+        transcripts.set(item.id, text);
+        emitLog({
+          level: 'debug',
+          source: 'ai',
+          action: 'dm.autopilot.voice',
+          message: `Transcribed voice note ${item.id} (${chars} chars) in ${ms} ms`,
+          status: 'ok',
+          accountId,
+          chatId,
+          durationMs: ms,
+          details: { messageId: item.id, bytes, chars, ms },
+        });
+      } catch (error) {
+        failed = true;
+        emitLog({
+          level: 'warn',
+          source: 'ai',
+          action: 'dm.autopilot.voice',
+          message: `Voice note ${item.id} could not be transcribed: ${(error as Error).message}`,
+          status: 'failed',
+          accountId,
+          chatId,
+          details: {
+            messageId: item.id,
+            bytes,
+            chars: 0,
+            ms: Date.now() - started,
+            reason: (error as Error).message,
+          },
+        });
+      }
+    }
+    return { transcripts, failed };
   }
 
   /**
@@ -541,12 +906,21 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     senderName: string,
     token: number,
     texts: IncomingText[],
+    threadId = 0,
   ): Promise<void> {
     const chatKey = `${accountId}:${chatId}`;
     if (!this.isCurrent(chatKey, token)) return;
     const soul = await this.souls.model(accountId);
     if (!soul || !isAutopilotMode(soul.mode)) return;
-    if (!this.souls.allowsChat(soul, chatId)) return;
+    // Re-check the gate: an explicit access row shadows the soul allowlist, and
+    // a block may have appeared while the burst was debouncing.
+    const decision = await this.accessDecision(
+      userId,
+      accountId,
+      chatId,
+      threadId,
+    );
+    if (!this.chatAllowed(decision, soul, chatId)) return;
     if (!this.isCurrent(chatKey, token)) return;
     const settings = parseSoulSettings(soul.settings);
 
@@ -597,15 +971,25 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         imageIds.push(cached.id);
       }
     }
-    const images = await this.imagesFor(
-      userId,
-      accountId,
-      chatId,
-      imageIds,
-    );
+    const [images, voice] = await Promise.all([
+      this.imagesFor(userId, accountId, chatId, imageIds),
+      this.transcribeVoices(userId, accountId, chatId, texts),
+    ]);
+    // Voice notes are replaced by their transcript; untranscribed audio keeps
+    // an honest placeholder and the note below tells the model not to invent
+    // an excuse.
+    const items: IncomingText[] = texts.map((item) => {
+      const transcript = voice.transcripts.get(item.id);
+      if (transcript) return { ...item, text: `[голосовое] «${transcript}»` };
+      if (isAudioMedia(item.media)) return { ...item, text: VOICE_FAILED_TEXT };
+      return item;
+    });
     const instruction = [
       images.length > 0
         ? 'Собеседник прислал изображение — посмотри, что на нём, и ответь по смыслу.'
+        : '',
+      voice.transcripts.size > 0
+        ? 'Голосовое сообщение уже расшифровано — расшифровка ниже, ответь по её смыслу.'
         : '',
       soul.mode === 'draft'
         ? 'Предложи ответ от лица владельца.'
@@ -618,9 +1002,12 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     // A question about a picture with no picture attached must not be answered
     // from imagination — say honestly that nothing was received.
     const noImageNote =
-      images.length === 0 && mentionsPicture(texts)
+      images.length === 0 && mentionsPicture(items)
         ? 'Изображения к этому сообщению нет — не выдумывай, что на нём, и не говори, что оно мутное; коротко скажи, что не видишь картинки, и попроси прислать.'
         : '';
+    const noVoiceNote = voice.failed
+      ? 'Голосовое сообщение расшифровать не удалось. Не придумывай его содержание и не говори, что у тебя нет наушников или что ты не можешь послушать аудио: коротко скажи, что не расслышал, и попроси написать текстом.'
+      : '';
     const replyFormat = [
       'Формат ответа:',
       '- 1–3 коротких сообщения; каждое — отдельной частью, части разделяй строкой ---',
@@ -629,23 +1016,25 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       '- пиши как живой человек: без Markdown, без списков, заголовков и подписи.',
     ].join('\n');
     const prompt =
-      texts.length > 1
+      items.length > 1
         ? [
             `Входящие личные сообщения от «${senderName}» подряд:`,
-            ...texts.map(
+            ...items.map(
               (item, index) => `${index + 1}. ${item.text.slice(0, 2000)}`,
             ),
             '',
             ...(noImageNote ? [noImageNote, ''] : []),
+            ...(noVoiceNote ? [noVoiceNote, ''] : []),
             instruction,
             '',
             replyFormat,
           ].join('\n')
         : [
             `Входящее личное сообщение от «${senderName}»:`,
-            (texts[0]?.text ?? '').slice(0, 4000),
+            (items[0]?.text ?? '').slice(0, 4000),
             '',
             ...(noImageNote ? [noImageNote, ''] : []),
+            ...(noVoiceNote ? [noVoiceNote, ''] : []),
             instruction,
             '',
             replyFormat,
@@ -662,7 +1051,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (!this.isCurrent(chatKey, token)) return;
     // Stored before generating: a cancelled run still keeps the incoming
     // messages, so the next reply sees the whole consecutive exchange.
-    for (const item of texts) {
+    for (const item of items) {
       await this.memory.append(accountId, chatId, 'user', item.text, {
         messageId: item.id,
       });
@@ -729,6 +1118,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         text: draftText,
         senderName,
         runId: result.runId,
+        reasoning: result.reasoning ?? null,
       });
       return;
     }
@@ -783,7 +1173,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
 
       const replyToId =
         part.messageIndex !== undefined
-          ? (texts[part.messageIndex - 1]?.id ?? message.id)
+          ? (items[part.messageIndex - 1]?.id ?? message.id)
           : message.id;
       const input: { text: string; replyToId: number; quote?: string } = {
         text: part.text,
@@ -810,7 +1200,21 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         text: part.text,
         message: sent,
         runId: result.runId,
+        // Reasoning is shown only in the dashboard bubble; it is never sent to
+        // Telegram (only `part.text` goes into `sendMessage`).
+        reasoning: result.reasoning ?? null,
       });
+    }
+
+    // Remember which bubbles this run produced so the dashboard can attach the
+    // reasoning to them. Best-effort: a bookkeeping failure cannot undo a sent
+    // reply.
+    try {
+      await this.agentRuns.attachMessages(result.runId, messageIds);
+    } catch (error) {
+      this.logger.warn(
+        `Could not attach messages to run ${result.runId}: ${(error as Error).message}`,
+      );
     }
 
     emitLog({
