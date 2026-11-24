@@ -37,7 +37,7 @@ interface ChatCompletionResponse {
   error?: { message?: string; type?: string; code?: string };
 }
 
-const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_ATTEMPTS = 3;
 
 function extraHeaders(): Record<string, string> {
@@ -93,7 +93,12 @@ export class LlmService {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       try {
-        const response = await fetch(url, {
+        const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        // `AbortSignal` alone is not enough when the request goes through a
+        // proxy that never answers: race the fetch with a hard timer so the
+        // agent loop always makes progress.
+        const controller = new AbortController();
+        const pending = fetch(url, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -101,10 +106,22 @@ export class LlmService {
             ...extraHeaders(),
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(
-            request.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-          ),
+          signal: controller.signal,
         });
+        pending.catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`LLM request timed out after ${timeoutMs} ms`));
+          }, timeoutMs);
+        });
+        let response: Response;
+        try {
+          response = await Promise.race([pending, timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
         const raw = await response.text();
         if (!response.ok) {
           const error = new Error(
@@ -176,6 +193,19 @@ export class LlmService {
         };
       } catch (error) {
         lastError = error as Error;
+        emitLog({
+          level: 'warn',
+          source: 'ai',
+          action: 'llm.retry',
+          message: `LLM ${request.model} attempt ${attempt}/${MAX_ATTEMPTS} failed after ${Date.now() - started} ms: ${lastError.message}`,
+          status: 'failed',
+          durationMs: Date.now() - started,
+          details: {
+            model: request.model,
+            attempt,
+            error: lastError.message,
+          },
+        });
         if (attempt < MAX_ATTEMPTS) {
           await sleep(400 * attempt);
           continue;

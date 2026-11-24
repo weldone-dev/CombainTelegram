@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { OnModuleInit } from '@nestjs/common';
 import type { AgentRunModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AiConfigService } from './ai-config.service.js';
@@ -61,7 +62,7 @@ function traceResult(value: unknown, limit = 1200): unknown {
  * results → final text. Every run is persisted in `AgentRun` with its trace.
  */
 @Injectable()
-export class AgentService {
+export class AgentService implements OnModuleInit {
   private readonly logger = new Logger(AgentService.name);
 
   constructor(
@@ -73,6 +74,25 @@ export class AgentService {
     private readonly skills: SkillsService,
     private readonly tools: AgentToolsService,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    // A restart kills in-flight runs; leaving them "running" hides the fact
+    // that nothing will ever finish them.
+    try {
+      await this.prisma.agentRun.updateMany({
+        where: { status: 'running' },
+        data: {
+          status: 'error',
+          error: 'Interrupted by restart',
+          finishedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Could not close stale agent runs: ${(error as Error).message}`,
+      );
+    }
+  }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const provider = await this.config.requireProvider();

@@ -55,6 +55,7 @@ describe('message DTO mapping', () => {
       isVoice: false,
       service: false,
       thread: null,
+      sendingState: null,
     });
   });
 

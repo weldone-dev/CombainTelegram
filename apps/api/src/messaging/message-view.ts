@@ -38,6 +38,8 @@ export interface MessageLike {
   text: string;
   date: Date;
   isOutgoing: boolean;
+  /** Outgoing message that the server has not confirmed yet. */
+  sendingState?: 'pending' | 'failed' | null;
   sender: PeerLike;
   chat: PeerLike;
   replyToMessage: { id: number | null } | null;
@@ -180,6 +182,11 @@ export interface MessageView {
    * post with a linked discussion group.
    */
   thread: MessageThreadInfo | null;
+  /**
+   * `pending` while Telegram has not confirmed an outgoing message yet,
+   * `failed` when TDLib gave up. `null` for delivered and incoming messages.
+   */
+  sendingState?: 'pending' | 'failed' | null;
 }
 
 export interface ChatView {
@@ -448,6 +455,7 @@ export function toMessageView(message: MessageLike): MessageView {
     isVoice: message.media?.type === 'voice',
     service: message.raw._ === 'messageService',
     thread: toMessageThreadInfo(message),
+    sendingState: message.sendingState ?? null,
   };
 }
 

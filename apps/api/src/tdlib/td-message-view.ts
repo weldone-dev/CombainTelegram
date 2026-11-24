@@ -533,6 +533,12 @@ function messageLike(
     text,
     date: new Date((entry.date || 0) * 1000),
     isOutgoing: entry.is_outgoing === true,
+    sendingState:
+      entry.sending_state?._ === 'messageSendingStatePending'
+        ? 'pending'
+        : entry.sending_state?._ === 'messageSendingStateFailed'
+          ? 'failed'
+          : null,
     sender,
     chat: chatPeer,
     replyToMessage:
