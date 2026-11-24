@@ -706,7 +706,19 @@ describe('DmAutopilotService.reply', () => {
       }),
       'Peer',
       h.tokenFor(),
-      [{ id: 1001, text: '[изображение]' }],
+      [
+        {
+          id: 1001,
+          text: '[изображение]',
+          media: {
+            kind: 'photo',
+            mimeType: 'image/png',
+            fileName: null,
+            size: 10,
+            downloadable: true,
+          },
+        },
+      ],
     );
     await vi.runAllTimersAsync();
     await pending;
@@ -721,6 +733,66 @@ describe('DmAutopilotService.reply', () => {
       expect.objectContaining({
         images: [{ mime: 'image/png', data: Buffer.from('fake-image') }],
         prompt: expect.stringContaining('изображение'),
+      }),
+    );
+  });
+
+  it('reuses the last image for a follow-up text question', async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      soul: soulRow({
+        settings: JSON.stringify({
+          ...DEFAULT_SOUL_SETTINGS,
+          chatIds: [CHAT_ID],
+          replyDelayMs: 0,
+          typing: false,
+        }),
+      }),
+    });
+    const media = {
+      kind: 'photo' as const,
+      mimeType: 'image/png',
+      fileName: null,
+      size: 10,
+      downloadable: true,
+    };
+
+    const first = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1001, text: '', mediaType: 'photo', media }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1001, text: '[изображение]', media }],
+    );
+    await vi.runAllTimersAsync();
+    await first;
+    h.agent.run.mockClear();
+    h.messaging.downloadMedia.mockClear();
+
+    const second = h.internals.reply(
+      'user-1',
+      'account-1',
+      CHAT_ID,
+      message({ id: 1002, text: 'Что тут находится?' }),
+      'Peer',
+      h.tokenFor(),
+      [{ id: 1002, text: 'Что тут находится?' }],
+    );
+    await vi.runAllTimersAsync();
+    await second;
+
+    expect(h.messaging.downloadMedia).toHaveBeenCalledWith(
+      'user-1',
+      'account-1',
+      String(CHAT_ID),
+      '1001',
+    );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        images: [{ mime: 'image/png', data: Buffer.from('fake-image') }],
+        prompt: expect.stringContaining('Что тут находится?'),
       }),
     );
   });

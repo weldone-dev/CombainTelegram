@@ -1,7 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { Subscription } from 'rxjs';
-import type { MessageView } from '../messaging/message-view.js';
+import type {
+  MessageMediaView,
+  MessageView,
+} from '../messaging/message-view.js';
 import type { TelegramAccountModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { DefaultUserService } from '../user-context/default-user.service.js';
@@ -26,6 +29,7 @@ interface MessageNewPayload {
 interface IncomingText {
   id: number;
   text: string;
+  media?: MessageMediaView | null;
 }
 
 interface Pending {
@@ -43,6 +47,20 @@ interface Pending {
 const MAX_BURST = 5;
 /** Biggest image forwarded to a vision model, bytes. */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** How many images one reply may carry. */
+const MAX_IMAGES = 2;
+/** The last photo stays available for a follow-up question this long. */
+const LAST_IMAGE_TTL_MS = 3 * 60_000;
+
+/** Whether the media is a picture a vision model can look at. */
+function isImageMedia(media: MessageMediaView | null | undefined): boolean {
+  if (!media || !media.downloadable) return false;
+  return (
+    media.kind === 'photo' ||
+    (media.kind === 'document' &&
+      (media.mimeType ?? '').toLowerCase().startsWith('image/'))
+  );
+}
 
 interface TypingState {
   userId: string;
@@ -90,6 +108,11 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
   private readonly seen = new Set<string>();
   /** Delayed read receipts for messages that arrived while offline. */
   private readonly readTimers = new Set<ReturnType<typeof setTimeout>>();
+  /**
+   * Last picture per chat. A photo is often followed by a text question
+   * ("что тут?"), which arrives as a separate message with no media of its own.
+   */
+  private readonly lastImages = new Map<string, { id: number; at: number }>();
   private readonly peerProfiles = new Map<
     string,
     { at: number; block: string }
@@ -201,7 +224,7 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (existing) clearTimeout(existing.timer);
     const texts = [
       ...(existing?.texts ?? []),
-      { id: message.id, text },
+      { id: message.id, text, media: message.media },
     ].slice(-MAX_BURST);
     const settings = parseSoulSettings(soul.settings);
     const timer = setTimeout(() => {
@@ -301,54 +324,55 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     userId: string,
     accountId: string,
     chatId: number,
-    message: MessageView,
+    messageIds: number[],
   ): Promise<Array<{ mime: string; data: Buffer }>> {
-    const media = message.media;
-    if (!media || !media.downloadable) return [];
-    const isImage =
-      media.kind === 'photo' ||
-      (media.kind === 'document' &&
-        (media.mimeType ?? '').toLowerCase().startsWith('image/'));
-    if (!isImage) return [];
-    if (media.size !== null && media.size > MAX_IMAGE_BYTES) {
-      emitLog({
-        level: 'warn',
-        source: 'ai',
-        action: 'dm.autopilot.image',
-        message: `Skipped an image of ${media.size} bytes (limit ${MAX_IMAGE_BYTES})`,
-        status: 'failed',
-        accountId,
-        chatId,
-        details: { messageId: message.id, bytes: media.size },
-      });
-      return [];
+    const images: Array<{ mime: string; data: Buffer }> = [];
+    let total = 0;
+    for (const messageId of messageIds.slice(0, MAX_IMAGES)) {
+      try {
+        const file = await this.messaging.downloadMedia(
+          userId,
+          accountId,
+          String(chatId),
+          String(messageId),
+        );
+        if (!file.mimeType.toLowerCase().startsWith('image/')) continue;
+        if (total + file.data.length > MAX_IMAGE_BYTES) {
+          emitLog({
+            level: 'warn',
+            source: 'ai',
+            action: 'dm.autopilot.image',
+            message: `Skipped an image of ${file.data.length} bytes (limit ${MAX_IMAGE_BYTES})`,
+            status: 'failed',
+            accountId,
+            chatId,
+            details: { messageId, bytes: file.data.length },
+          });
+          continue;
+        }
+        total += file.data.length;
+        images.push({ mime: file.mimeType, data: file.data });
+        emitLog({
+          level: 'debug',
+          source: 'ai',
+          action: 'dm.autopilot.image',
+          message: `Forwarded a ${file.mimeType} image (${file.data.length} bytes) to the model`,
+          status: 'ok',
+          accountId,
+          chatId,
+          details: {
+            messageId,
+            mime: file.mimeType,
+            bytes: file.data.length,
+          },
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Could not download the image of ${messageId}: ${(error as Error).message}`,
+        );
+      }
     }
-    try {
-      const file = await this.messaging.downloadMedia(
-        userId,
-        accountId,
-        String(chatId),
-        String(message.id),
-      );
-      if (!file.mimeType.toLowerCase().startsWith('image/')) return [];
-      if (file.data.length > MAX_IMAGE_BYTES) return [];
-      emitLog({
-        level: 'debug',
-        source: 'ai',
-        action: 'dm.autopilot.image',
-        message: `Forwarded a ${file.mimeType} image (${file.data.length} bytes) to the model`,
-        status: 'ok',
-        accountId,
-        chatId,
-        details: { messageId: message.id, mime: file.mimeType, bytes: file.data.length },
-      });
-      return [{ mime: file.mimeType, data: file.data }];
-    } catch (error) {
-      this.logger.warn(
-        `Could not download the image of ${message.id}: ${(error as Error).message}`,
-      );
-      return [];
-    }
+    return images;
   }
 
   /**
@@ -533,7 +557,24 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const images = await this.imagesFor(userId, accountId, chatId, message);
+    const imageIds = texts
+      .filter((item) => isImageMedia(item.media))
+      .map((item) => item.id);
+    const latestImage = texts.find((item) => isImageMedia(item.media));
+    if (latestImage) {
+      this.lastImages.set(chatKey, { id: latestImage.id, at: Date.now() });
+    } else {
+      const cached = this.lastImages.get(chatKey);
+      if (cached && Date.now() - cached.at < LAST_IMAGE_TTL_MS) {
+        imageIds.push(cached.id);
+      }
+    }
+    const images = await this.imagesFor(
+      userId,
+      accountId,
+      chatId,
+      imageIds,
+    );
     const instruction = [
       images.length > 0
         ? 'Собеседник прислал изображение — посмотри, что на нём, и ответь по смыслу.'

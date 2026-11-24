@@ -200,8 +200,11 @@ no dashboard open) and:
    message to memory; when `peerProfile` is on, the system prompt also carries
    the peer's username and profile bio (`getChatInfo`), so the soul knows who it
    is talking to; photos and image documents up to 5 MB are downloaded and sent
-   to the model as `image_url` content parts, so a vision model can answer about
-   the picture itself (the text placeholder is `[изображение]`);
+   to the model as `image_url` content parts (max 2 images, 5 MB total), so a
+   vision model can answer about the picture itself (the text placeholder is
+   `[изображение]`); the last photo stays attached for follow-up text questions
+   like «что тут?» for 3 minutes, because such a question arrives as a separate
+   message with no media of its own;
 6. `draft` stores a `draft` turn and emits `ai.draft`; `auto` keeps the thinking
    phase silent (no `typing…` while the model works), then for each reply
    bubble starts a `typing…` heartbeat every 4 s, holds it until
