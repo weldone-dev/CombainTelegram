@@ -350,6 +350,9 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
         systemExtra: [
           peerBlock,
           'Это живая переписка. Не упоминай ИИ, инструменты и настройки. Один короткий ответ, без кавычек и Markdown.',
+          peerBlock
+            ? 'Данные собеседника выше взяты из его профиля Telegram. Если он спрашивает свой username, имя или профиль — назови их прямо и не говори, что видишь только имя.'
+            : '',
         ]
           .filter(Boolean)
           .join('\n'),

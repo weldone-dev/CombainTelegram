@@ -456,6 +456,11 @@ describe('DmAutopilotService.reply', () => {
         systemExtra: expect.stringContaining('Пишу код и тестирую ботов'),
       }),
     );
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemExtra: expect.stringContaining('назови их прямо'),
+      }),
+    );
   });
 
   it('never fetches the peer profile when the option is off', async () => {
@@ -484,6 +489,11 @@ describe('DmAutopilotService.reply', () => {
 
     expect(h.messaging.getChatInfo).not.toHaveBeenCalled();
     expect(h.messaging.sendMessage).toHaveBeenCalled();
+    expect(h.agent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemExtra: expect.not.stringContaining('назови их прямо'),
+      }),
+    );
   });
 
   it('still replies when the peer profile cannot be fetched', async () => {
