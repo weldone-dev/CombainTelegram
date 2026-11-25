@@ -1,0 +1,50 @@
+# SearXNG settings for the n8n Assistant's web search.
+#
+# Mounted read-only at /etc/searxng/settings.yml (see ../docker-compose.yml).
+# This file is NOT a full configuration: `use_default_settings` (as a mapping,
+# which behaves like `true`) merges it over the image's upstream defaults and
+# only lets us drop individual engines.
+use_default_settings:
+  engines:
+    remove:
+      - ahmia
+      - torch
+
+general:
+  instance_name: "n8n Assistant (local SearXNG)"
+  # The wikipedia / wikidata / openstreetmap engines refuse to load without a
+  # contact (Wikipedia's User-Agent policy). There is no public admin address
+  # for a loopback-only instance, so the local UI URL is used.
+  contact_url: "http://127.0.0.1:8081/"
+
+server:
+  # Placeholder only: the container's SEARXNG_SECRET from ../.env overrides it
+  # at runtime (searx/settings_defaults.py, environ_name='SEARXNG_SECRET').
+  # Kept non-empty so the file is valid when a secret is not set.
+  secret_key: "CHANGE_ME_searxng_secret"
+  # n8n's Assistant calls from the n8n container (one shared IP for every
+  # request). With the limiter on that looks like a bot flood -> HTTP 429.
+  limiter: false
+  # Proxy result thumbnails through SearXNG so the browser never talks to
+  # Google/Bing/etc. directly and mixed-content blocks disappear.
+  image_proxy: true
+
+search:
+  formats:
+    # `json` is what n8n's SearXNG tool asks for; without it the API answers
+    # 403 "format not supported" / HTML only. `html` keeps the local UI usable
+    # at http://127.0.0.1:8081 for debugging.
+    - html
+    - json
+
+# Upstream leaves most general engines off. Bing answered keyless requests
+# from this host and is switched on; everything else stays at its upstream
+# default. Verified dead/unusable from here and left disabled:
+#   google, qwant  -> access denied
+#   brave          -> HTTP 405 (needs an API key)
+#   duckduckgo     -> CAPTCHA right now (may recover by itself)
+#   startpage, mojeek -> `inactive: true` upstream (proof-of-work CAPTCHA),
+#                        enabling them does nothing
+engines:
+  - name: bing
+    disabled: false

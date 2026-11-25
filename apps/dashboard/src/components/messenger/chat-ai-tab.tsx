@@ -23,6 +23,7 @@ import {
   TabHeader,
   useCachedResource,
 } from "./chat-tab-ui";
+import { ChatTypingOverride } from "./chat-typing-override";
 
 /** Matches the API default (`AI_BLOCK_AFTER_WARNINGS`). */
 const WARNINGS_TO_BLOCK = 3;
@@ -483,6 +484,12 @@ export function ChatAiTab({
           </div>
         )}
       </PanelCard>
+
+      <ChatTypingOverride
+        accountId={accountId}
+        chatId={chatId}
+        threadId={threadId}
+      />
 
       <PanelCard
         title="История"

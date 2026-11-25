@@ -114,6 +114,43 @@ export class PresenceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Explicit owner switch: forces the account online or offline right now.
+   *
+   * Pending "come back online" and idle timers are cancelled first, so the
+   * forced value is not immediately overwritten by the scheduler. Going
+   * online re-arms the idle window, so the account still goes offline after
+   * `presenceIdleMinutes` of inactivity.
+   */
+  async setOnline(
+    accountId: string,
+    online: boolean,
+  ): Promise<{ online: boolean }> {
+    const state = this.state(accountId);
+    if (state.onlineTimer) {
+      clearTimeout(state.onlineTimer);
+      state.onlineTimer = undefined;
+      state.onlineAt = undefined;
+    }
+    if (state.idleTimer) {
+      clearTimeout(state.idleTimer);
+      state.idleTimer = undefined;
+    }
+    state.online = online;
+    await this.applyOnline(accountId, online);
+    if (online) void this.scheduleIdle(accountId);
+    emitLog({
+      level: 'info',
+      source: 'ai',
+      action: 'presence.forced',
+      message: `Presence forced ${online ? 'online' : 'offline'} by the owner`,
+      status: 'ok',
+      accountId,
+      details: { online },
+    });
+    return { online };
+  }
+
+  /**
    * Called for an incoming DM before the autopilot reads it. Returns how long
    * to wait before marking it read: `0` while the account is already online,
    * otherwise "time until online" + the configured read delay. The account

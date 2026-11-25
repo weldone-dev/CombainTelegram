@@ -12,6 +12,11 @@ import {
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { UserModel } from '@repo/database';
+import { AccountAiStateService } from '../account-ai-state/account-ai-state.service.js';
+import type {
+  AccountVariablesView,
+  ChatSettingsView,
+} from '../account-ai-state/account-ai-state.service.js';
 import { CurrentUser } from '../user-context/current-user.decorator.js';
 import { parseBoolean } from '../common/validation.js';
 import { notFound } from '../common/api-error.js';
@@ -26,7 +31,10 @@ import type { AccountView } from './account-view.js';
 @ApiTags('accounts')
 @Controller('accounts')
 export class AccountsController {
-  constructor(private readonly accounts: AccountsService) {}
+  constructor(
+    private readonly accounts: AccountsService,
+    private readonly aiState: AccountAiStateService,
+  ) {}
 
   @Get()
   list(@CurrentUser() user: UserModel): Promise<AccountView[]> {
@@ -106,5 +114,44 @@ export class AccountsController {
     @Param('sessionId') sessionId: string,
   ): Promise<AccountView> {
     return this.accounts.activateSession(user.id, id, sessionId);
+  }
+
+  /** Free-form variables a workflow reads from the n8n event payload. */
+  @Get(':id/ai-variables')
+  aiVariables(
+    @CurrentUser() user: UserModel,
+    @Param('id') id: string,
+  ): Promise<AccountVariablesView> {
+    return this.aiState.variables(user.id, id);
+  }
+
+  @Patch(':id/ai-variables')
+  setAiVariables(
+    @CurrentUser() user: UserModel,
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+  ): Promise<AccountVariablesView> {
+    return this.aiState.setVariables(user.id, id, body);
+  }
+
+  /** Per-chat AI overrides (typing mode, max parts, ...). `0` = whole chat. */
+  @Get(':id/chats/:chatId/ai-chat-settings')
+  aiChatSettings(
+    @CurrentUser() user: UserModel,
+    @Param('id') id: string,
+    @Param('chatId') chatId: string,
+    @Query('threadId') threadId?: string,
+  ): Promise<ChatSettingsView> {
+    return this.aiState.chatSettings(user.id, id, chatId, threadId);
+  }
+
+  @Patch(':id/chats/:chatId/ai-chat-settings')
+  setAiChatSettings(
+    @CurrentUser() user: UserModel,
+    @Param('id') id: string,
+    @Param('chatId') chatId: string,
+    @Body() body: Record<string, unknown>,
+  ): Promise<ChatSettingsView> {
+    return this.aiState.setChatSettings(user.id, id, chatId, body);
   }
 }

@@ -6,6 +6,7 @@ export type LogSource =
   | "auth"
   | "accounts"
   | "messaging"
+  | "media"
   | "proxy"
   | "telegram"
   | "realtime"

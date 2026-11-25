@@ -46,6 +46,7 @@
         "@types/supertest": "^7.0.0",
         "@types/web-push": "^3.6.4",
         "@vitest/coverage-v8": "^4.1.2",
+        "lottie-web": "^5.13.0",
         "oxlint": "^1.58.0",
         "oxlint-tsgolint": "^7.0.2001",
         "prettier": "^3.4.2",
@@ -60,6 +61,7 @@
       "name": "dashboard",
       "version": "0.1.0",
       "dependencies": {
+        "lottie-web": "^5.13.0",
         "next": "16.4.6",
         "qrcode.react": "4.2.0",
         "react": "19.3.0",
@@ -1130,6 +1132,8 @@
     "log-symbols": ["log-symbols@7.0.1", "", { "dependencies": { "is-unicode-supported": "^2.0.0", "yoctocolors": "^2.1.1" } }, "sha512-ja1E3yCr9i/0hmBVaM0bfwDjnGy8I/s6PP4DFp+yP+a+mrHO4Rm7DtmnqROTUkHIkqffC84YY7AeqX6oFk0WFg=="],
 
     "long": ["long@5.3.2", "", {}, "sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA=="],
+
+    "lottie-web": ["lottie-web@5.13.0", "", {}, "sha512-+gfBXl6sxXMPe8tKQm7qzLnUy5DUPJPKIyRHwtpCpyUEYjHYRJC/5gjUvdkuO2c3JllrPtHXH5UJJK8LRYl5yQ=="],
 
     "lru.min": ["lru.min@1.1.5", "", {}, "sha512-5J9ysMYUpYIg9RF2vJpy9SinEmSviFSe0GyPpCQ4L5QSkLAgeLXlTAOu2ZwWUU5m+0SBl6gUU1R1ZQB3aKypfA=="],
 

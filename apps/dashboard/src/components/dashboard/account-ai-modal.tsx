@@ -11,16 +11,28 @@ import {
 import { ApiError } from "../../lib/api";
 import { accountName } from "../../lib/format";
 import type { AccountView } from "../../lib/types";
+import { AccountWorkflowPicker } from "../workflows/account-workflow-picker";
 import { AccountAiPermissions } from "./account-ai-permissions";
+import { AccountAiVariables } from "./account-ai-variables";
 import { Card, ErrorBanner, GhostButton, PrimaryButton } from "./ai-ui";
 import { defaultSoul, SoulSettingsForm } from "./soul-settings-form";
 
-type AiTab = "soul" | "permissions";
+type AiTab = "soul" | "permissions" | "variables" | "workflow";
 
 const AI_TABS: Array<{ id: AiTab; label: string }> = [
   { id: "soul", label: "Душа" },
   { id: "permissions", label: "Права ИИ" },
+  { id: "variables", label: "Переменные" },
+  { id: "workflow", label: "Workflow" },
 ];
+
+const TAB_HINTS: Record<AiTab, string> = {
+  soul: "Душа, присутствие, чаты, лимиты и скиллы этого аккаунта",
+  permissions: "Индивидуальные права ИИ поверх глобальных настроек",
+  variables:
+    "Свободные строки, которые n8n видит в событии как account.variables",
+  workflow: "n8n workflow, который отвечает за этот аккаунт",
+};
 
 /**
  * AI settings of one account, opened from the accounts list: the soul/persona
@@ -116,9 +128,7 @@ export function AccountAiModal({
               Настройки ИИ · {label}
             </h2>
             <p className="truncate text-[11px] text-zinc-500">
-              {tab === "soul"
-                ? "Душа, присутствие, чаты, лимиты и скиллы этого аккаунта"
-                : "Индивидуальные права ИИ поверх глобальных настроек"}
+              {TAB_HINTS[tab]}
             </p>
           </div>
           <button
@@ -206,6 +216,19 @@ export function AccountAiModal({
           {/* Kept mounted while hidden so unsaved edits survive tab switches. */}
           <div hidden={tab !== "permissions"} className="min-w-0">
             <AccountAiPermissions accountId={account.id} onNotice={onNotice} />
+          </div>
+
+          {/* Kept mounted while hidden so unsaved edits survive tab switches. */}
+          <div hidden={tab !== "variables"} className="min-w-0">
+            <AccountAiVariables
+              accountId={account.id}
+              active={tab === "variables"}
+              onNotice={onNotice}
+            />
+          </div>
+
+          <div hidden={tab !== "workflow"} className="min-w-0">
+            <AccountWorkflowPicker accountId={account.id} onNotice={onNotice} />
           </div>
         </div>
       </div>

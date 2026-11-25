@@ -38,8 +38,14 @@ const SETTINGS_ID = 'default';
 const AAD_KEY = 'ai:api-key';
 const AAD_MCP = 'ai:mcp-token';
 const AAD_STT_KEY = 'ai:stt-key';
+/** AAD of the sealed n8n API key; matches `N8nClientService` exactly. */
+const AAD_N8N_KEY = 'ai:n8n-key';
 /** Stored STT keys carry this prefix; legacy plain values still work. */
 const STT_SECRET_PREFIX = 'enc:v1:';
+/** n8n keys use the same envelope prefix as the provider/STT secrets. */
+const N8N_SECRET_PREFIX = 'enc:v1:';
+/** Local n8n docker-compose default (`infra/n8n`). */
+const DEFAULT_N8N_BASE_URL = 'http://127.0.0.1:5678';
 /**
  * Same fallback as `speech.service.ts` (the Proxmox `parakeet-lxc` service);
  * the constant is not exported there, so it is mirrored here for the probe.
@@ -156,6 +162,42 @@ function requireSttBaseUrl(value: unknown): string {
     );
   }
   return raw;
+}
+
+/**
+ * n8n base URL: empty resets to the local default, anything else must be an
+ * absolute `http(s)://` URL. Trailing slashes are dropped so the client can
+ * append `/api/v1` without doubling them.
+ */
+export function requireN8nBaseUrl(value: unknown): string {
+  if (value === undefined || value === null) return DEFAULT_N8N_BASE_URL;
+  if (typeof value !== 'string') {
+    throw apiError(
+      'INVALID_N8N_URL',
+      'n8nBaseUrl must be an absolute http(s) URL or an empty string',
+      400,
+    );
+  }
+  const raw = value.trim();
+  if (!raw) return DEFAULT_N8N_BASE_URL;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw apiError(
+      'INVALID_N8N_URL',
+      'n8nBaseUrl must be an absolute http(s) URL or an empty string',
+      400,
+    );
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw apiError(
+      'INVALID_N8N_URL',
+      'n8nBaseUrl must be an absolute http(s) URL or an empty string',
+      400,
+    );
+  }
+  return url.toString().replace(/\/+$/, '');
 }
 
 /** `<origin>/health`, tolerating a base URL with a path (same as speech). */
@@ -411,6 +453,41 @@ export class AiConfigService implements OnModuleInit {
   }
 
   /**
+   * n8n API key, sealed in the plain `AiSetting.n8nApiKey` column exactly like
+   * the STT key: `enc:v1:<base64 envelope>` with AAD `ai:n8n-key`, which is
+   * what `N8nClientService` decrypts. Plain legacy values keep working.
+   */
+  private readN8nKey(row: AiSettingModel): string | null {
+    const stored = row.n8nApiKey?.trim();
+    if (!stored) return null;
+    if (!stored.startsWith(N8N_SECRET_PREFIX)) return stored;
+    try {
+      const envelope = new Uint8Array(
+        Buffer.from(stored.slice(N8N_SECRET_PREFIX.length), 'base64'),
+      );
+      return this.crypto
+        .decrypt(this.crypto.deserialize(envelope), AAD_N8N_KEY)
+        .toString('utf8');
+    } catch (error) {
+      emitLog({
+        level: 'error',
+        source: 'ai',
+        action: 'ai.n8n-key.read',
+        message: `Could not decrypt the n8n API key: ${(error as Error).message}`,
+        status: 'failed',
+      });
+      return null;
+    }
+  }
+
+  private sealN8nKey(value: string): string {
+    const envelope = this.crypto.serialize(
+      this.crypto.encrypt(value, AAD_N8N_KEY),
+    );
+    return `${N8N_SECRET_PREFIX}${Buffer.from(envelope).toString('base64')}`;
+  }
+
+  /**
    * Optional integration with Orca's OpenCode Go subscription: read the live
    * OAuth access token from the local OpenCode database, which Orca refreshes.
    * Falls back to `AI_API_KEY` when the file/schema is unavailable.
@@ -587,6 +664,15 @@ export class AiConfigService implements OnModuleInit {
       const value = optionalText(input.sttApiKey);
       data.sttApiKey = value ? this.sealSttKey(value) : null;
     }
+    // n8n connection (dashboard editor). An empty base URL resets to the local
+    // default; an omitted key keeps the stored one, `null`/`''` clears it.
+    if (input.n8nBaseUrl !== undefined) {
+      data.n8nBaseUrl = requireN8nBaseUrl(input.n8nBaseUrl);
+    }
+    if (input.n8nApiKey !== undefined) {
+      const value = optionalText(input.n8nApiKey);
+      data.n8nApiKey = value ? this.sealN8nKey(value) : null;
+    }
     if (input.capabilities !== undefined) {
       data.capabilities = JSON.stringify(
         parseCapabilities(input.capabilities),
@@ -715,6 +801,10 @@ export class AiConfigService implements OnModuleInit {
         endpoint: '/mcp',
         token,
       },
+      // The stored row is what the dashboard edits; `N8N_BASE_URL` still wins
+      // at call time in `N8nClientService`, exactly like `N8N_API_KEY`.
+      n8nBaseUrl: text(row.n8nBaseUrl, DEFAULT_N8N_BASE_URL),
+      hasN8nKey: Boolean(this.readN8nKey(row) ?? this.env('N8N_API_KEY')),
       updatedAt: row.updatedAt.toISOString(),
     };
   }

@@ -1,7 +1,12 @@
 "use client";
 
 import { type ReactNode, useState } from "react";
-import { getChatMemory } from "./chat-ai-api";
+import { errorMessage } from "../../lib/api";
+import {
+  clearChatMemory,
+  getChatMemory,
+  simulateIncoming,
+} from "./chat-ai-api";
 import {
   EmptyNote,
   formatStamp,
@@ -64,7 +69,8 @@ function Collapsible({
 
 /**
  * «Память» tab: the recent dialogue turns and the long-term picture the soul
- * keeps about one chat. Read-only; memory is written by the soul itself.
+ * keeps about one chat. Read-mostly; the whole context can be cleared here,
+ * while individual facts are added/removed by the soul itself.
  */
 export function ChatMemoryTab({
   accountId,
@@ -77,6 +83,10 @@ export function ChatMemoryTab({
 }) {
   const [shortOpen, setShortOpen] = useState(true);
   const [longOpen, setLongOpen] = useState(true);
+  const [clearing, setClearing] = useState(false);
+  const [simulating, setSimulating] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const memory = useCachedResource(
     `chat-memory:${accountId}:${chatId}:${threadId}`,
     () => getChatMemory(accountId, chatId, 50),
@@ -85,6 +95,55 @@ export function ChatMemoryTab({
   const shortTerm = memory.data?.shortTerm ?? [];
   const facts = memory.data?.longTerm.facts ?? [];
   const summary = memory.data?.longTerm.summary?.trim() ?? "";
+
+  const clearContext = async () => {
+    if (
+      !window.confirm(
+        "Очистить контекст этого чата? Душа забудет все реплики, сводку и факты об этом чате. Сама переписка в Telegram останется.",
+      )
+    ) {
+      return;
+    }
+    setClearing(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      await clearChatMemory(accountId, chatId);
+      setNotice("Контекст очищен: следующий ответ начнётся с чистого листа.");
+      memory.reload();
+    } catch (caught) {
+      setActionError(errorMessage(caught));
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const simulate = async () => {
+    if (
+      !window.confirm(
+        "Отправить тестовое входящее? Душа ответит в этот чат реальным сообщением Telegram.",
+      )
+    ) {
+      return;
+    }
+    setSimulating(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      await simulateIncoming(
+        accountId,
+        chatId,
+        "Тестовое входящее сообщение. Ответь коротко.",
+      );
+      setNotice(
+        "Тестовое входящее отправлено. Ответ души появится в чате через несколько секунд.",
+      );
+    } catch (caught) {
+      setActionError(errorMessage(caught));
+    } finally {
+      setSimulating(false);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -219,18 +278,49 @@ export function ChatMemoryTab({
         </>
       )}
 
-      <p className="text-[10px] leading-relaxed text-zinc-600">
-        Память ведётся по чату целиком и доступна только для чтения. Очистить её
-        можно на странице души.
-      </p>
-      <button
-        type="button"
-        onClick={memory.reload}
-        disabled={memory.loading}
-        className={`w-full ${SMALL_BUTTON}`}
-      >
-        {memory.loading ? "Загрузка…" : "Обновить память"}
-      </button>
+      {actionError && <TabError text={actionError} />}
+      {notice && (
+        <output className="block rounded-lg border border-emerald-800/60 bg-emerald-950/20 px-2 py-1.5 text-[11px] text-emerald-300">
+          {notice}
+        </output>
+      )}
+
+      <div className="space-y-2">
+        <p className="text-[10px] leading-relaxed text-zinc-600">
+          «Тест входящего» симулирует сообщение от собеседника и запускает
+          workflow: душа ответит в этот чат реальным сообщением. «Очистить
+          контекст» удаляет краткосрочные реплики, сводку и факты, которые душа
+          помнит об этом чате. Переписка в Telegram не удаляется.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => void simulate()}
+            disabled={simulating || clearing || memory.loading}
+            title="Симулировать входящее и проверить ответ души"
+            className="rounded border border-sky-800/70 bg-sky-950/20 px-2 py-1 text-[11px] text-sky-300 transition-colors hover:border-sky-600 hover:text-sky-200 disabled:opacity-40"
+          >
+            {simulating ? "Запускаю…" : "Тест входящего"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void clearContext()}
+            disabled={clearing || simulating || memory.loading}
+            title="Забыть весь контекст этого чата"
+            className="rounded border border-red-900/70 bg-red-950/20 px-2 py-1 text-[11px] text-red-300 transition-colors hover:border-red-700 hover:text-red-200 disabled:opacity-40"
+          >
+            {clearing ? "Очищаю…" : "Очистить контекст"}
+          </button>
+          <button
+            type="button"
+            onClick={memory.reload}
+            disabled={memory.loading || clearing || simulating}
+            className={`ml-auto ${SMALL_BUTTON}`}
+          >
+            {memory.loading ? "Загрузка…" : "Обновить память"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

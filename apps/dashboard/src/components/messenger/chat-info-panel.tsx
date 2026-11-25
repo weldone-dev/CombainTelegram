@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useRef,
@@ -36,6 +38,41 @@ import { ChatAutomationsSection } from "./chat-automations-section";
 import { ChatLogsTab } from "./chat-logs-tab";
 import { ChatMemoryTab } from "./chat-memory-tab";
 import { ChatSkillsTab } from "./chat-skills-tab";
+
+/** Same storage key on purpose: one panel width per browser/device. */
+const INFO_PANEL_WIDTH_KEY = "tg-info-panel-width";
+const INFO_PANEL_MIN_WIDTH = 280;
+const INFO_PANEL_DEFAULT_WIDTH = 360;
+const INFO_PANEL_ABSOLUTE_MAX_WIDTH = 720;
+/** Space that must remain for the message column on a wide screen. */
+const INFO_PANEL_MESSAGE_MIN_WIDTH = 520;
+/** Below this viewport the panel keeps its overlay/mobile width. */
+const INFO_PANEL_RESIZE_MIN_VIEWPORT = 900;
+
+function clampWidth(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function readStoredPanelWidth(): number {
+  if (typeof window === "undefined") return INFO_PANEL_DEFAULT_WIDTH;
+  try {
+    const value = Number(window.localStorage.getItem(INFO_PANEL_WIDTH_KEY));
+    if (Number.isFinite(value) && value > 0) {
+      return clampWidth(
+        value,
+        INFO_PANEL_MIN_WIDTH,
+        INFO_PANEL_ABSOLUTE_MAX_WIDTH,
+      );
+    }
+  } catch {
+    // Private mode or a blocked storage: fall back to the default width.
+  }
+  return INFO_PANEL_DEFAULT_WIDTH;
+}
+
+function currentViewportWidth(): number {
+  return typeof window === "undefined" ? 0 : window.innerWidth;
+}
 
 type InfoTab =
   | "overview"
@@ -142,6 +179,130 @@ export function ChatInfoPanel({
   const loadedKinds = useRef<Set<ChatInfoMediaKind>>(new Set());
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  // Resizable right drawer. The stored width survives open/close; the visual
+  // width is additionally clamped to the current viewport without writing the
+  // clamped value back (a wide window restores the user's chosen width).
+  const [panelWidth, setPanelWidth] = useState(readStoredPanelWidth);
+  const panelWidthRef = useRef(panelWidth);
+  panelWidthRef.current = panelWidth;
+  const [viewportWidth, setViewportWidth] = useState(currentViewportWidth);
+  const [dragging, setDragging] = useState(false);
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+
+  const canResize = viewportWidth >= INFO_PANEL_RESIZE_MIN_VIEWPORT;
+  const maxWidth = canResize
+    ? Math.max(
+        INFO_PANEL_MIN_WIDTH,
+        Math.min(
+          INFO_PANEL_ABSOLUTE_MAX_WIDTH,
+          viewportWidth - INFO_PANEL_MESSAGE_MIN_WIDTH,
+        ),
+      )
+    : INFO_PANEL_ABSOLUTE_MAX_WIDTH;
+  const effectiveWidth = canResize
+    ? clampWidth(panelWidth, INFO_PANEL_MIN_WIDTH, maxWidth)
+    : INFO_PANEL_DEFAULT_WIDTH;
+
+  const persistWidth = useCallback((value: number) => {
+    try {
+      window.localStorage.setItem(
+        INFO_PANEL_WIDTH_KEY,
+        String(Math.round(value)),
+      );
+    } catch {
+      // Private mode or a blocked storage: keep the width for this session.
+    }
+  }, []);
+
+  useEffect(() => {
+    const onWindowResize = () => setViewportWidth(currentViewportWidth());
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, []);
+
+  const finishDrag = useCallback(() => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setDragging(false);
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    persistWidth(panelWidthRef.current);
+  }, [persistWidth]);
+
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!canResize || event.button !== 0) return;
+    event.preventDefault();
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: effectiveWidth,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+  };
+
+  const moveResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const next = clampWidth(
+      drag.startWidth + (drag.startX - event.clientX),
+      INFO_PANEL_MIN_WIDTH,
+      maxWidth,
+    );
+    panelWidthRef.current = next;
+    setPanelWidth(next);
+  };
+
+  const endResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (event.currentTarget.hasPointerCapture(drag.pointerId)) {
+      event.currentTarget.releasePointerCapture(drag.pointerId);
+    }
+    finishDrag();
+  };
+
+  const resetPanelWidth = () => {
+    if (!canResize) return;
+    const next = clampWidth(
+      INFO_PANEL_DEFAULT_WIDTH,
+      INFO_PANEL_MIN_WIDTH,
+      maxWidth,
+    );
+    panelWidthRef.current = next;
+    setPanelWidth(next);
+    persistWidth(next);
+  };
+
+  const onResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!canResize) return;
+    const step = event.shiftKey ? 48 : 16;
+    let next: number;
+    if (event.key === "ArrowLeft") next = effectiveWidth + step;
+    else if (event.key === "ArrowRight") next = effectiveWidth - step;
+    else if (event.key === "Home") next = INFO_PANEL_MIN_WIDTH;
+    else if (event.key === "End") next = maxWidth;
+    else return;
+    event.preventDefault();
+    const clamped = clampWidth(next, INFO_PANEL_MIN_WIDTH, maxWidth);
+    panelWidthRef.current = clamped;
+    setPanelWidth(clamped);
+    persistWidth(clamped);
+  };
 
   // Profile card and similar chats load together: the "Похожие" tab only
   // exists once the endpoint returned at least one chat.
@@ -307,8 +468,36 @@ export function ChatInfoPanel({
         role="dialog"
         aria-modal="true"
         aria-label={`Информация о чате ${title}`}
-        className="relative flex h-full w-[360px] max-w-full flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
+        style={canResize ? { width: effectiveWidth } : undefined}
+        className={`relative flex h-full shrink-0 flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl ${
+          canResize ? "" : "w-[360px] max-w-full"
+        }`}
       >
+        {canResize && (
+          // biome-ignore lint/a11y/useSemanticElements: a focusable vertical splitter needs value semantics; <hr> cannot carry the drag interaction.
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Ширина панели информации"
+            aria-valuenow={effectiveWidth}
+            aria-valuemin={INFO_PANEL_MIN_WIDTH}
+            aria-valuemax={maxWidth}
+            tabIndex={0}
+            title="Потяните, чтобы изменить ширину. Двойной клик — сбросить."
+            onPointerDown={startResize}
+            onPointerMove={moveResize}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            onLostPointerCapture={finishDrag}
+            onDoubleClick={resetPanelWidth}
+            onKeyDown={onResizeKeyDown}
+            className={`absolute inset-y-0 left-0 z-20 m-0 h-full w-2 -translate-x-px cursor-col-resize touch-none border-0 border-l transition-colors focus:outline-none focus-visible:bg-sky-400/50 ${
+              dragging
+                ? "border-sky-300 bg-sky-400/60"
+                : "border-zinc-600/60 bg-transparent hover:bg-sky-400/40"
+            }`}
+          />
+        )}
         <div className="flex items-start justify-between gap-2 border-b border-zinc-800 px-4 py-3">
           <span className="text-sm font-semibold text-zinc-200">
             Информация

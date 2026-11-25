@@ -77,12 +77,35 @@ export interface SessionRemovalView {
   accountRemoved: boolean;
 }
 
+/**
+ * Structured media kinds the dashboard knows how to render. `other` stays for
+ * media the API does not classify yet (old payloads and unsupported types).
+ */
+export type MessageMediaKind =
+  | "photo"
+  | "document"
+  | "voice"
+  | "audio"
+  | "video"
+  | "video_note"
+  | "sticker"
+  | "animation"
+  | "other";
+
 export interface MessageMediaView {
-  kind: "photo" | "document" | "voice" | "other";
+  kind: MessageMediaKind;
   mimeType: string | null;
   fileName: string | null;
   size: number | null;
   downloadable: boolean;
+  /** Sticker/emoji character association, e.g. `😀`. */
+  emoji?: string | null;
+  isAnimated?: boolean | null;
+  width?: number | null;
+  height?: number | null;
+  durationSec?: number | null;
+  /** Sticker set (short) name, when Telegram reports one. */
+  stickerSet?: string | null;
 }
 
 export interface MessageReactionView {

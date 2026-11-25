@@ -24,6 +24,8 @@ import { resolveActiveSession } from '../accounts/active-session.js';
 import type { ChatInfoView, ChatPeerView } from '../messaging/chat-info.js';
 import {
   canSendMessages,
+  defaultMediaFileName,
+  defaultMediaMime,
   toMessagePollView,
 } from '../messaging/message-view.js';
 import type {
@@ -1482,20 +1484,11 @@ export class TdSessionMessenger implements TdMessenger {
       maxBytes: options.maxBytes,
     });
     const mimeType = normalizeMimeType(
-      info.mimeType ??
-        (info.type === 'photo'
-          ? 'image/jpeg'
-          : info.type === 'voice'
-            ? 'audio/ogg'
-            : null),
+      info.mimeType ?? defaultMediaMime(info.type),
     );
     const fileName = sanitizeFileName(
       info.fileName,
-      info.type === 'photo'
-        ? 'photo.jpg'
-        : info.type === 'voice'
-          ? 'voice.ogg'
-          : 'document',
+      defaultMediaFileName(info.type, mimeType),
     );
     return {
       data,

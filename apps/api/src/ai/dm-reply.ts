@@ -18,6 +18,14 @@ export interface ReplyPart {
 
 /** A reply never becomes more than a few bubbles, even if the model rambles. */
 export const MAX_REPLY_PARTS = 5;
+/** Hard cap of the bubble policy: one answer is at most three bubbles. */
+export const MAX_BUBBLES = 3;
+/** Default bubble policy: one message with everything inside. */
+export const DEFAULT_MAX_PARTS = 1;
+/** Below this total length a split reply is merged back into one bubble. */
+export const MIN_SPLIT_TOTAL_CHARS = 200;
+/** Any bubble shorter than this is merged: a lone "ок" is a second bubble. */
+export const MIN_SPLIT_PART_CHARS = 40;
 /** Telegram's own text limit; anything longer is truncated, not sent as-is. */
 export const MAX_REPLY_PART_CHARS = 4000;
 
@@ -179,4 +187,63 @@ export function parseReply(raw: string): ReplyPart[] {
     return [{ text: capChars(text, MAX_REPLY_PART_CHARS) }];
   }
   return parts;
+}
+
+/** Result of the bubble policy applied to the parsed reply. */
+export interface PartsPolicyResult {
+  /** Bubbles that will be sent; at least one when the model said anything. */
+  parts: ReplyPart[];
+  /** How many bubbles the model produced. */
+  raw: number;
+  /** True when several raw bubbles were joined into one. */
+  merged: boolean;
+  /** Normalised cap that was applied (1–3). */
+  maxParts: number;
+}
+
+/**
+ * Bubble policy of one generated reply.
+ *
+ * One bubble is the default: the model is told not to split, and a reply that
+ * split anyway is joined back. More bubbles are only allowed when the soul (or
+ * the Action API) asks for `maxParts > 1`, and even then a reply whose total
+ * text is short or that contains a tiny part is merged into one bubble — two
+ * messages for "ок\n---\nспасибо" look broken in Telegram. The `[#N]` index and
+ * the quote of the first kept part survive the merge.
+ */
+export function applyPartsPolicy(
+  parts: ReplyPart[],
+  maxParts: number = DEFAULT_MAX_PARTS,
+): PartsPolicyResult {
+  const limit = Math.min(
+    MAX_BUBBLES,
+    Math.max(1, Math.round(Number.isFinite(maxParts) ? maxParts : DEFAULT_MAX_PARTS)),
+  );
+  const valid = parts.filter((part) => part.text.trim().length > 0);
+  const raw = valid.length;
+  if (raw <= 1) {
+    return { parts: valid, raw, merged: false, maxParts: limit };
+  }
+
+  const totalChars = valid.reduce((sum, part) => sum + [...part.text].length, 0);
+  const anyShort = valid.some(
+    (part) => [...part.text].length < MIN_SPLIT_PART_CHARS,
+  );
+  if (limit === 1 || totalChars < MIN_SPLIT_TOTAL_CHARS || anyShort) {
+    const first = valid[0] as ReplyPart;
+    const joined = valid.map((part) => part.text).join('\n\n');
+    const merged: ReplyPart = { text: capChars(joined, MAX_REPLY_PART_CHARS) };
+    if (first.messageIndex !== undefined) {
+      merged.messageIndex = first.messageIndex;
+    }
+    if (first.quote) merged.quote = first.quote;
+    return { parts: [merged], raw, merged: true, maxParts: limit };
+  }
+
+  return {
+    parts: valid.slice(0, limit),
+    raw,
+    merged: false,
+    maxParts: limit,
+  };
 }

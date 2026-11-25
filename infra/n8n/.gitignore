@@ -1,0 +1,8 @@
+# n8n runtime state (workflows, executions, postgres cluster) - host-side only
+data/
+
+# real secrets; .env.example is committed instead
+.env
+
+# sandbox/: generated mTLS material (contains the root CA key) - never commit
+sandbox/tls/

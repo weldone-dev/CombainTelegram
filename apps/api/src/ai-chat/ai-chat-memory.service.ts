@@ -100,6 +100,28 @@ export class AiChatMemoryService {
     };
   }
 
+  /**
+   * Drops the whole AI context of one chat: the short-term turn buffer, the
+   * rolling summary and the durable facts. The next reply starts from a clean
+   * slate; the Telegram history itself is untouched.
+   */
+  async clear(
+    userId: string,
+    accountId: string,
+    chatId: number,
+  ): Promise<{ cleared: true; chatId: number }> {
+    await this.requireAccount(userId, accountId);
+    const chat = BigInt(chatId);
+    await this.prisma.$transaction([
+      this.prisma.soulTurn.deleteMany({ where: { accountId, chatId: chat } }),
+      this.prisma.soulSummary.deleteMany({
+        where: { accountId, chatId: chat },
+      }),
+      this.prisma.soulMemory.deleteMany({ where: { accountId, chatId: chat } }),
+    ]);
+    return { cleared: true, chatId };
+  }
+
   /** Same ownership rule as `AccountsService.requireAccount`. */
   private async requireAccount(userId: string, accountId: string): Promise<void> {
     const account = await this.prisma.telegramAccount.findFirst({

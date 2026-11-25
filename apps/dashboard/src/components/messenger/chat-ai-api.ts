@@ -119,6 +119,31 @@ export function getChatMemory(
   );
 }
 
+/** Drops turns, summary and facts of one chat; the Telegram history stays. */
+export function clearChatMemory(
+  accountId: string,
+  chatId: number,
+): Promise<{ cleared: true; chatId: number }> {
+  return apiFetch(`${accountPath(accountId)}/chats/${chatId}/memory`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Queues a synthetic incoming message; the workflow answers with a real
+ * Telegram message. The synthetic bubble is local and vanishes on refetch.
+ */
+export function simulateIncoming(
+  accountId: string,
+  chatId: number,
+  text?: string,
+): Promise<{ queued: true; messageId: number }> {
+  return apiFetch("/ai/simulate-incoming", {
+    method: "POST",
+    body: { accountId, chatId, text },
+  });
+}
+
 /** Effective skills, their source, the soul set and the matching catalog rows. */
 export function getChatSkills(
   accountId: string,
@@ -160,6 +185,35 @@ export function getAccountAiSettings(
   accountId: string,
 ): Promise<AccountAiSettingsView> {
   return apiFetch(`${accountPath(accountId)}/ai-settings`);
+}
+
+export interface ChatAiSettingsView {
+  /** Stored overrides only; `{}` = the chat inherits everything. */
+  settings: Record<string, unknown>;
+}
+
+/** Raw per-chat/topic AI overrides (`typingMode`, `maxParts`, ...). */
+export function getChatAiSettings(
+  accountId: string,
+  chatId: number,
+  threadId = 0,
+): Promise<ChatAiSettingsView> {
+  return apiFetch(
+    `${accountPath(accountId)}/chats/${chatId}/ai-chat-settings${threadQuery(threadId)}`,
+  );
+}
+
+/** Replaces the whole override object of one chat/topic. */
+export function setChatAiSettings(
+  accountId: string,
+  chatId: number,
+  settings: Record<string, unknown>,
+  threadId = 0,
+): Promise<ChatAiSettingsView> {
+  return apiFetch(
+    `${accountPath(accountId)}/chats/${chatId}/ai-chat-settings`,
+    { method: "PATCH", body: { settings, threadId } },
+  );
 }
 
 /** Structured log entries scoped to one account and chat. */

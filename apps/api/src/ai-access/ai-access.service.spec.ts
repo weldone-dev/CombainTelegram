@@ -74,6 +74,7 @@ function harness() {
             ? { id: ACCOUNT_ID }
             : null,
       ),
+      findUnique: vi.fn(async () => ({ userId: USER_ID })),
     },
     soul: {
       findFirst: vi.fn(
@@ -294,7 +295,10 @@ function harness() {
     },
   };
 
-  const eventsService = new AiChatEventsService(prisma as never);
+  const eventsService = new AiChatEventsService(
+    prisma as never,
+    { emitToUser: vi.fn() } as never,
+  );
   const service = new AiAccessService(prisma as never, eventsService);
   return { service, eventsService, prisma, accesses, blocks, events };
 }

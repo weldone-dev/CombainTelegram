@@ -7,6 +7,7 @@ import {
   type SoulSettings,
   type SoulView,
   saveSoul,
+  type TypingMode,
 } from "../../lib/ai-api";
 import {
   Card,
@@ -29,8 +30,14 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   replyDelayMs: 1200,
   maxPerHour: 12,
   maxPerChatPerDay: 40,
+  maxParts: 1,
   typing: true,
+  typingMode: "smart",
   typingSpeed: 300,
+  typingStartDelayMs: 600,
+  typingMinMs: 600,
+  typingMaxMs: 45_000,
+  typingHeartbeatMs: 4_000,
   peerProfile: true,
   presenceIdleMinutes: 5,
   presenceReadDelaySeconds: 0,
@@ -73,14 +80,19 @@ interface SoulFormState {
   mode: SoulMode;
   temperature: string;
   allowAllChats: boolean;
-  typing: boolean;
+  typingMode: TypingMode;
   peerProfile: boolean;
   chatIds: string;
   excludeChatIds: string;
   replyDelayMs: string;
   maxPerHour: string;
   maxPerChatPerDay: string;
+  maxParts: string;
   typingSpeed: string;
+  typingStartDelayMs: string;
+  typingMinMs: string;
+  typingMaxMs: string;
+  typingHeartbeatMs: string;
   presenceIdleMinutes: string;
   presenceReadDelaySeconds: string;
   presenceOnlineDelaySeconds: string;
@@ -94,6 +106,10 @@ type NumberKey =
   | "maxPerHour"
   | "maxPerChatPerDay"
   | "typingSpeed"
+  | "typingStartDelayMs"
+  | "typingMinMs"
+  | "typingMaxMs"
+  | "typingHeartbeatMs"
   | "presenceIdleMinutes"
   | "presenceReadDelaySeconds"
   | "presenceOnlineDelaySeconds"
@@ -109,6 +125,38 @@ interface NumberSpec {
 }
 
 const NUMBER_SPECS: Record<NumberKey, NumberSpec> = {
+  typingStartDelayMs: {
+    label: "Старт «печатает…» через, мс",
+    hint: "0–30000; пауза после прочтения в режиме smart",
+    min: 0,
+    max: 30_000,
+    step: 100,
+    integer: true,
+  },
+  typingMinMs: {
+    label: "Минимальная длительность, мс",
+    hint: "0–60000; короче — «печатает…» не показывать",
+    min: 0,
+    max: 60_000,
+    step: 100,
+    integer: true,
+  },
+  typingMaxMs: {
+    label: "Максимальная длительность, мс",
+    hint: "0–60000; дольше — не держать «печатает…»",
+    min: 0,
+    max: 60_000,
+    step: 500,
+    integer: true,
+  },
+  typingHeartbeatMs: {
+    label: "Обновлять «печатает…» каждые, мс",
+    hint: "2000–5000; Telegram скрывает статус через ~5 с",
+    min: 2_000,
+    max: 5_000,
+    step: 500,
+    integer: true,
+  },
   presenceIdleMinutes: {
     label: "Уходить в оффлайн через, мин",
     hint: "0 — не уходить в оффлайн",
@@ -177,6 +225,34 @@ const NUMBER_SPECS: Record<NumberKey, NumberSpec> = {
   },
 };
 
+/** Typing-mode choices in display order; `smart` is the default. */
+const TYPING_MODE_OPTIONS: Array<{
+  value: TypingMode;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "smart",
+    label: "Умный (smart)",
+    hint: "После прочтения пауза, затем печатает по длине",
+  },
+  {
+    value: "on_think",
+    label: "Пока думает (on_think)",
+    hint: "Печатает, пока модель думает",
+  },
+  {
+    value: "on_compose",
+    label: "Когда текст готов (on_compose)",
+    hint: "Показывает «печатает…» только на готовом тексте",
+  },
+  {
+    value: "off",
+    label: "Никогда (off)",
+    hint: "Не показывает «печатает…»",
+  },
+];
+
 const FIELD_LABELS: Record<keyof SoulFormState, string> = {
   name: "Имя",
   language: "Язык",
@@ -189,14 +265,19 @@ const FIELD_LABELS: Record<keyof SoulFormState, string> = {
   mode: "Режим",
   temperature: "Температура",
   allowAllChats: "Все чаты",
-  typing: "«печатает…»",
+  typingMode: "Печать",
   peerProfile: "Профиль собеседника",
   chatIds: "Разрешённые чаты",
   excludeChatIds: "Исключения",
   replyDelayMs: "Пауза ответа",
   maxPerHour: "Лимит в час",
   maxPerChatPerDay: "Лимит в день",
+  maxParts: "Частей в ответе",
   typingSpeed: "Скорость печати",
+  typingStartDelayMs: "Старт печати",
+  typingMinMs: "Мин. печать",
+  typingMaxMs: "Макс. печать",
+  typingHeartbeatMs: "Heartbeat печати",
   presenceIdleMinutes: "Оффлайн",
   presenceReadDelaySeconds: "Задержка чтения",
   presenceOnlineDelaySeconds: "Задержка онлайна",
@@ -218,14 +299,19 @@ function formOf(soul: SoulView): SoulFormState {
     // Prisma stores Float 0.7 as 0.699999988079071; show two decimals.
     temperature: String(Number(soul.temperature.toFixed(2))),
     allowAllChats: soul.settings.allowAllChats,
-    typing: soul.settings.typing,
+    typingMode: soul.settings.typingMode ?? "smart",
     peerProfile: soul.settings.peerProfile,
     chatIds: soul.settings.chatIds.join(", "),
     excludeChatIds: soul.settings.excludeChatIds.join(", "),
     replyDelayMs: String(soul.settings.replyDelayMs),
     maxPerHour: String(soul.settings.maxPerHour),
     maxPerChatPerDay: String(soul.settings.maxPerChatPerDay),
+    maxParts: String(soul.settings.maxParts ?? 1),
     typingSpeed: String(soul.settings.typingSpeed),
+    typingStartDelayMs: String(soul.settings.typingStartDelayMs ?? 600),
+    typingMinMs: String(soul.settings.typingMinMs ?? 600),
+    typingMaxMs: String(soul.settings.typingMaxMs ?? 45_000),
+    typingHeartbeatMs: String(soul.settings.typingHeartbeatMs ?? 4_000),
     presenceIdleMinutes: String(soul.settings.presenceIdleMinutes),
     presenceReadDelaySeconds: String(soul.settings.presenceReadDelaySeconds),
     presenceOnlineDelaySeconds: String(
@@ -415,6 +501,21 @@ export function SoulSettingsForm({
         result[key] = `От ${spec.min} до ${spec.max}`;
       }
     }
+    if (!TYPING_MODE_OPTIONS.some((item) => item.value === form.typingMode)) {
+      result.typingMode = "Выберите режим печати";
+    }
+    if (!["1", "2", "3"].includes(form.maxParts.trim())) {
+      result.maxParts = "Выберите 1, 2 или 3";
+    }
+    const minTypingMs = parseNumber("typingMinMs", form.typingMinMs);
+    const maxTypingMs = parseNumber("typingMaxMs", form.typingMaxMs);
+    if (
+      minTypingMs !== null &&
+      maxTypingMs !== null &&
+      maxTypingMs < minTypingMs
+    ) {
+      result.typingMaxMs = "Не меньше минимальной длительности";
+    }
     return result;
   }, [form, chatIds, excludeChatIds]);
 
@@ -475,14 +576,20 @@ export function SoulSettingsForm({
         temperature: number("temperature"),
         settings: {
           allowAllChats: form.allowAllChats,
-          typing: form.typing,
+          typing: form.typingMode !== "off",
+          typingMode: form.typingMode,
           peerProfile: form.peerProfile,
           chatIds: chatIds.ids,
           excludeChatIds: excludeChatIds.ids,
           replyDelayMs: number("replyDelayMs"),
           maxPerHour: number("maxPerHour"),
           maxPerChatPerDay: number("maxPerChatPerDay"),
+          maxParts: Number(form.maxParts),
           typingSpeed: number("typingSpeed"),
+          typingStartDelayMs: number("typingStartDelayMs"),
+          typingMinMs: number("typingMinMs"),
+          typingMaxMs: number("typingMaxMs"),
+          typingHeartbeatMs: number("typingHeartbeatMs"),
           presenceIdleMinutes: number("presenceIdleMinutes"),
           presenceReadDelaySeconds: number("presenceReadDelaySeconds"),
           presenceOnlineDelaySeconds: number("presenceOnlineDelaySeconds"),
@@ -535,6 +642,10 @@ export function SoulSettingsForm({
       </Labeled>
     );
   };
+
+  const typingHint = TYPING_MODE_OPTIONS.find(
+    (item) => item.value === form.typingMode,
+  )?.hint;
 
   const saveButtons = (
     <>
@@ -732,6 +843,73 @@ export function SoulSettingsForm({
         </Section>
 
         <Section
+          title="Печать"
+          description="Когда показывать «печатает…», с какой скоростью и на сколько частей делить ответ."
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Labeled
+              label="Режим печати"
+              hint={typingHint}
+              error={visibleError("typingMode")}
+            >
+              <select
+                autoComplete="off"
+                value={form.typingMode}
+                aria-invalid={Boolean(visibleError("typingMode"))}
+                onChange={(event) =>
+                  update({ typingMode: event.target.value as TypingMode })
+                }
+                className={`${inputClass} ${
+                  visibleError("typingMode")
+                    ? "border-red-700 focus:border-red-500"
+                    : ""
+                }`}
+              >
+                {TYPING_MODE_OPTIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </Labeled>
+            <Labeled
+              label="Частей в ответе"
+              hint="1 — одно сообщение, 3 — максимум"
+              error={visibleError("maxParts")}
+            >
+              <select
+                autoComplete="off"
+                value={form.maxParts}
+                aria-invalid={Boolean(visibleError("maxParts"))}
+                onChange={(event) => update({ maxParts: event.target.value })}
+                className={`${inputClass} ${
+                  visibleError("maxParts")
+                    ? "border-red-700 focus:border-red-500"
+                    : ""
+                }`}
+              >
+                <option value="1">1 — одно сообщение</option>
+                <option value="2">2 — до двух</option>
+                <option value="3">3 — максимум</option>
+              </select>
+            </Labeled>
+            {renderNumber("typingSpeed")}
+          </div>
+
+          <details className="mt-3 rounded-md border border-zinc-800 px-2.5 py-2">
+            <summary className="cursor-pointer text-[11px] text-zinc-400">
+              Тайминги печати (дополнительно)
+            </summary>
+            <div className="mt-2 grid gap-3 sm:grid-cols-2">
+              {renderNumber("typingStartDelayMs")}
+              {renderNumber("typingHeartbeatMs")}
+              {renderNumber("typingMinMs")}
+              {renderNumber("typingMaxMs")}
+            </div>
+          </details>
+        </Section>
+
+        <Section
           title="Чаты"
           description="ID пользователей через запятую или пробел. Отрицательные — группы и каналы."
         >
@@ -786,12 +964,6 @@ export function SoulSettingsForm({
               hint="Кроме списка исключений"
             />
             <Toggle
-              checked={form.typing}
-              onChange={(value) => update({ typing: value })}
-              label="Показывать «печатает…»"
-              hint={`Скорость: ${form.typingSpeed || "—"} симв/мин`}
-            />
-            <Toggle
               checked={form.peerProfile}
               onChange={(value) => update({ peerProfile: value })}
               label="Передавать профиль собеседника"
@@ -806,7 +978,6 @@ export function SoulSettingsForm({
         >
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {renderNumber("replyDelayMs")}
-            {renderNumber("typingSpeed")}
             {renderNumber("maxPerHour")}
             {renderNumber("maxPerChatPerDay")}
             {renderNumber("temperature")}

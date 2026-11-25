@@ -19,7 +19,9 @@ import { AgentToolsService } from './agent-tools.service.js';
 import { AiRunsService, parseMessageIds } from './ai-runs.service.js';
 import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
-import { SoulsService } from './souls.service.js';
+import { SoulsService, parseSoulSettings } from './souls.service.js';
+import { DmAutopilotService } from './dm-autopilot.service.js';
+import { ChatStateService } from './chat-state.service.js';
 import type { SoulUpdate } from './ai.types.js';
 
 interface ChatMessageInput {
@@ -124,6 +126,7 @@ export class AiController {
     private readonly memory: MemoryService,
     private readonly skills: SkillsService,
     private readonly runsService: AiRunsService,
+    private readonly autopilot: DmAutopilotService,
   ) {}
 
   @Get('settings')
@@ -249,6 +252,62 @@ export class AiController {
         502,
       );
     }
+  }
+
+  /**
+   * Generates a reply and returns its bubbles without sending or typing.
+   *
+   * This is the split an n8n workflow uses: `generate` produces the parts
+   * (soul, skills, permissions, memory and media resolved inside), and
+   * `send-text` sends them later or the workflow decides not to.
+   */
+  @Post('generate')
+  async generate(
+    @CurrentUser() user: UserModel,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const accountId = str(body.accountId);
+    const chatId = num(body.chatId);
+    if (!accountId) {
+      throw apiError('INVALID_ACCOUNT', 'accountId is required', 400);
+    }
+    if (!chatId) throw apiError('INVALID_CHAT', 'chatId is required', 400);
+    const messageId = num(body.messageId);
+    const maxParts = num(body.maxParts);
+    return this.autopilot.generateReply({
+      userId: user.id,
+      accountId,
+      chatId,
+      threadId: num(body.threadId) ?? undefined,
+      messageId: messageId ?? undefined,
+      prompt: str(body.prompt) || undefined,
+      maxParts: maxParts ?? undefined,
+    });
+  }
+
+  /**
+   * Injects a synthetic incoming message for the dashboard's test button.
+   * The workflow reacts and sends a real reply; the fake incoming bubble is
+   * local and disappears on the next history refetch.
+   */
+  @Post('simulate-incoming')
+  async simulateIncoming(
+    @CurrentUser() user: UserModel,
+    @Body() body: Record<string, unknown>,
+  ) {
+    const accountId = str(body.accountId);
+    const chatId = num(body.chatId);
+    const text = str(body.text);
+    if (!accountId) {
+      throw apiError('INVALID_ACCOUNT', 'accountId is required', 400);
+    }
+    if (!chatId) throw apiError('INVALID_CHAT', 'chatId is required', 400);
+    return this.autopilot.simulateIncoming(
+      user.id,
+      accountId,
+      chatId,
+      text || undefined,
+    );
   }
 
   @Post('chat')
@@ -379,5 +438,37 @@ export class SoulController {
     if (!chatId) throw apiError('INVALID_CHAT', 'chatId is required', 400);
     await this.memory.clearChat(accountId, chatId);
     return { cleared: true };
+  }
+}
+
+/**
+ * Live AI state of one chat: `idle`, `received`, `read`, `waiting`,
+ * `thinking`, `composing`, `sending`, `sent`, `blocked`, `superseded` or
+ * `error`. In-memory by design — it describes a run of this process.
+ */
+@ApiTags('ai')
+@Controller('accounts/:accountId/chats/:chatId/state')
+export class ChatStateController {
+  constructor(
+    private readonly states: ChatStateService,
+    private readonly souls: SoulsService,
+  ) {}
+
+  @Get()
+  async state(
+    @Param('accountId') accountId: string,
+    @Param('chatId') rawChatId: string,
+  ) {
+    const chatId = num(rawChatId);
+    if (!chatId) throw apiError('INVALID_CHAT', 'chatId is required', 400);
+    const record = this.states.get(accountId, chatId);
+    // A chat nothing has run in yet carries no policy; fall back to the soul.
+    if (record.typingMode === null) {
+      const soul = await this.souls.model(accountId);
+      if (soul) {
+        record.typingMode = parseSoulSettings(soul.settings).typingMode;
+      }
+    }
+    return record;
   }
 }

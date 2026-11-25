@@ -1,0 +1,208 @@
+# Self-hosted n8n with Postgres.
+#
+# All state lives on the host disk next to this file:
+#   ./data/n8n      -> /home/node/.n8n   (settings, encryption key material, binary data, logs)
+#   ./data/postgres -> /var/lib/postgresql/data  (workflows, executions, credentials, users)
+# Copy this folder + .env to another machine and everything moves with it.
+#
+# llm-proxy (./llm-proxy) is stateless: it only adds OpenCode Go's required
+# x-opencode-session header for n8n's built-in Assistant, see README.md.
+#
+# Usage (from this directory):
+#   cp .env.example .env   # then fill in secrets
+#   docker network create n8n-sandbox 2>/dev/null || true   # shared with ./sandbox, see README
+#   docker compose up -d
+#   docker compose ps
+#   docker compose logs -f n8n
+#
+# Pinned versions (checked against the registry):
+#   docker.n8n.io/n8nio/n8n:2.49.6  (the "stable"/"latest" tag points at 2.49.6;
+#                                    2.50.x is still published as a pre-release)
+#   postgres:16.16-alpine
+#   searxng/searxng:2026.11.23-a7163d091  (current release on Docker Hub,
+#                                    same digest as "latest"; no stable branch)
+
+name: n8n
+
+services:
+  postgres:
+    image: postgres:16.16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required, see .env.example}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required, see .env.example}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required, see .env.example}
+      # Keep the cluster inside the bind mount.
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-Europe/Moscow}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    # Not published: n8n talks to it over the compose network only.
+    # To debug from the host: docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    shm_size: 128mb
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.49.6
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5678:5678"
+    environment:
+      # --- database ---
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      # --- secrets ---
+      # Generated ONCE with `openssl rand -hex 32`. Encrypts every stored credential.
+      # If this key is lost or changed, all saved credentials become unrecoverable.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?N8N_ENCRYPTION_KEY is required, see .env.example}
+      # --- public urls ---
+      N8N_HOST: ${N8N_HOST:?N8N_HOST is required, see .env.example}
+      # Keep this at 5678: n8n listens on it and the port mapping above assumes it.
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${WEBHOOK_URL:?WEBHOOK_URL is required, see .env.example}
+      # --- runtime ---
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Europe/Moscow}
+      TZ: ${TZ:-Europe/Moscow}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      # LAN over plain HTTP. Set to true as soon as n8n is served over TLS.
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-false}
+      # 1 = sit behind exactly one reverse proxy (the existing proxy host).
+      # 0 = clients talk to n8n directly.
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-0}
+      N8N_LOG_LEVEL: ${N8N_LOG_LEVEL:-info}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+    volumes:
+      - ./data/n8n:/home/node/.n8n
+    # The app (apps/api) listens on the HOST at 3001. Inside a container
+    # 127.0.0.1 is n8n itself, so workflows reach the app through
+    # host.docker.internal, which this mapping resolves to the docker bridge
+    # gateway (= the host). Requires Docker 20.10+ (host-gateway).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # `default` keeps Postgres/llm-proxy reachable; `sandbox` is the external
+    # network shared with ../sandbox/docker-compose.yml, where the Assistant's
+    # sandbox API answers as http://sandbox-api:8080. Create it once with
+    # `docker network create n8n-sandbox` (the sandbox stack expects it too).
+    networks:
+      - default
+      - sandbox
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+  # OpenAI-compatible shim: adds the x-opencode-session header (and the real
+  # key) that OpenCode Go requires, so n8n's Assistant can use it. Stateless.
+  llm-proxy:
+    build: ./llm-proxy
+    restart: unless-stopped
+    ports:
+      # Published on the LAN: the Assistant may call the model from the browser.
+      # n8n in the browser and the n8n container both reach it via the host IP.
+      - "4100:4000"
+    environment:
+      PORT: "4000"
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/inference/go/openai/v1}
+      # Fallback only - normally the token is read live from opencode.db below.
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENCODE_SESSION: ${OPENCODE_SESSION:-combain-n8n}
+      OPENCODE_DB_PATH: /data/opencode/opencode.db
+    volumes:
+      # Live OpenCode Go token: the opencode CLI refreshes this file and keeps
+      # its WAL open, so the whole directory is mounted read-only (SQLite needs
+      # the -shm/-wal siblings; a file-only ro mount fails with "attempt to
+      # write a readonly database"). Re-read every 60 s - no restart needed
+      # after a CLI re-login. OPTIONAL: without it the proxy falls back to
+      # OPENCODE_API_KEY from .env. On another machine point OPENCODE_DB_DIR at
+      # that user's ~/.local/share/opencode (or drop the volume entirely).
+      - ${OPENCODE_DB_DIR:-/home/roman/.local/share/opencode}:/data/opencode:ro
+    # Same host alias as n8n: lets a future proxy/assistant build reach the
+    # app on the host without knowing its LAN IP.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  # Metasearch backend for n8n's Assistant web search. n8n calls it as
+  # http://searxng:8080 (the wizard value); 127.0.0.1 inside the n8n container
+  # is n8n itself. Loopback-only 8081 is for `curl` and the local UI.
+  # Settings: ./searxng/settings.yml (JSON format + limiter off, see README).
+  searxng:
+    image: searxng/searxng:2026.11.23-a7163d091
+    restart: unless-stopped
+    ports:
+      # Host-local only: the Assistant uses the compose network, not this port.
+      - "127.0.0.1:8081:8080"
+    environment:
+      # Public base URL SearXNG renders into its own pages. The container name
+      # is what n8n resolves; the host port is irrelevant inside the network.
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://searxng:8080/}
+      # Overrides server.secret_key from settings.yml (the image reads this
+      # env var directly). Compose refuses to start without it.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is required, see .env.example}
+    volumes:
+      # Read-only config: limiter off + json in search.formats, everything else
+      # inherited from the image's defaults (use_default_settings mapping).
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+      # Disposable engine-results cache. Bind-mounted (not a named volume) so
+      # all of the stack's bytes stay under this folder; safe to delete.
+      - ./searxng/cache:/var/cache/searxng
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+networks:
+  # External, defined by `docker network create n8n-sandbox`. It is the only
+  # link between this stack and ../sandbox (the Assistant sandbox API).
+  sandbox:
+    external: true
+    name: n8n-sandbox

@@ -181,3 +181,47 @@ describe('PresenceService', () => {
     );
   });
 });
+
+describe('PresenceService.setOnline', () => {
+  it('forces offline and cancels the pending idle timer', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.service.onModuleInit();
+
+    await expect(h.service.setOnline(ACCOUNT, false)).resolves.toEqual({
+      online: false,
+    });
+    expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
+      'user-1',
+      ACCOUNT,
+      false,
+    );
+
+    // The cancelled idle timer must not flip anything again.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(h.messaging.setOnline).toHaveBeenCalledTimes(1);
+  });
+
+  it('forces online and re-arms the idle window', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    await h.service.setOnline(ACCOUNT, false);
+
+    await expect(h.service.setOnline(ACCOUNT, true)).resolves.toEqual({
+      online: true,
+    });
+    expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
+      'user-1',
+      ACCOUNT,
+      true,
+    );
+
+    // Back on the normal schedule: idle after presenceIdleMinutes (5 min).
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(h.messaging.setOnline).toHaveBeenLastCalledWith(
+      'user-1',
+      ACCOUNT,
+      false,
+    );
+  });
+});

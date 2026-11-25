@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountAiStateModule } from '../account-ai-state/account-ai-state.module.js';
 import { RealtimeModule } from '../realtime/realtime.module.js';
 import { TelegramModule } from '../telegram/telegram.module.js';
 import { AccountSessionsService } from './account-sessions.service.js';
@@ -12,7 +13,7 @@ import {
 import { TdlibAuthService } from './tdlib-auth.service.js';
 
 @Module({
-  imports: [TelegramModule, RealtimeModule],
+  imports: [TelegramModule, RealtimeModule, AccountAiStateModule],
   controllers: [
     AccountsController,
     TdlibMigrationController,

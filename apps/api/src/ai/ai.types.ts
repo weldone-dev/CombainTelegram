@@ -1,3 +1,6 @@
+import { DEFAULT_TYPING_POLICY } from './typing.js';
+import type { TypingPolicy } from './typing.js';
+
 /** AI capability flags. `policy` additionally allows editing this policy. */
 export interface AiCapabilities {
   /** Read accounts, chats, messages, logs, memory, runs. */
@@ -114,6 +117,10 @@ export interface AiSettingsView extends SttSettingsView {
     /** Local single-user app: the token is shown so it can be copied. */
     token: string;
   };
+  /** Base URL of the n8n instance the workflows module talks to. */
+  n8nBaseUrl: string;
+  /** True when an n8n API key is stored (the key itself is never returned). */
+  hasN8nKey: boolean;
   updatedAt: string | null;
 }
 
@@ -134,6 +141,10 @@ export interface AiSettingsUpdate {
   sttLanguage?: unknown;
   /** String sets the key, null/empty clears it, undefined keeps it. */
   sttApiKey?: unknown;
+  /** Absolute http(s) URL; empty resets to the local n8n default. */
+  n8nBaseUrl?: unknown;
+  /** String sets the key, null/empty clears it, undefined keeps it. */
+  n8nApiKey?: unknown;
   temperature?: unknown;
   maxSteps?: unknown;
   dryRun?: unknown;
@@ -324,7 +335,7 @@ export interface ToolCallView {
 }
 
 /** Autopilot settings stored as JSON in `Soul.settings`. */
-export interface SoulSettings {
+export interface SoulSettings extends TypingPolicy {
   /** Reply in every DM except `excludeChatIds`. */
   allowAllChats: boolean;
   /** Explicit allowlist of private chat ids (Telegram user ids). */
@@ -334,9 +345,8 @@ export interface SoulSettings {
   replyDelayMs: number;
   maxPerHour: number;
   maxPerChatPerDay: number;
-  typing: boolean;
-  /** Typing simulation speed in characters per minute (40–600). */
-  typingSpeed: number;
+  /** Reply bubbles per answer: 1 by default, at most 3. */
+  maxParts: number;
   /** Pass the peer's username and profile bio to the agent. */
   peerProfile: boolean;
   /** Minutes without activity before the account goes offline; 0 disables. */
@@ -356,8 +366,8 @@ export const DEFAULT_SOUL_SETTINGS: SoulSettings = {
   replyDelayMs: 1200,
   maxPerHour: 12,
   maxPerChatPerDay: 40,
-  typing: true,
-  typingSpeed: 300,
+  maxParts: 1,
+  ...DEFAULT_TYPING_POLICY,
   peerProfile: true,
   presenceIdleMinutes: 5,
   presenceReadDelaySeconds: 0,

@@ -184,11 +184,19 @@ function createFakeClient(
 function createService(
   client: TelegramClient,
   speech?: { available(): boolean; transcribe: unknown } | null,
+  frames?: { collage(input: { data: Buffer; mimeType: string }): Promise<Buffer | null> },
+  prisma?: { soul: { findUnique(args: unknown): Promise<unknown> } } | null,
 ): MessagingService {
   const accounts = {
     resolveSession: async () => ({ client }),
   } as unknown as AccountsService;
-  return new MessagingService(accounts, undefined, speech as never);
+  return new MessagingService(
+    accounts,
+    undefined,
+    speech as never,
+    frames as never,
+    prisma as never,
+  );
 }
 
 describe('uncached peer resolution', () => {
@@ -925,5 +933,238 @@ describe('channel comment threads', () => {
       response: { code: 'VALIDATION_ERROR' },
     });
     expect(fake.getDiscussionMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('message frame collages', () => {
+  const stickerMessage = {
+    id: 88,
+    text: '',
+    date: new Date('2026-11-20T12:00:00.000Z'),
+    isOutgoing: false,
+    sender: userPeer,
+    chat: userPeer,
+    replyToMessage: null,
+    media: {
+      type: 'sticker',
+      mimeType: 'application/x-tgsticker',
+      fileName: null,
+      fileSize: 101,
+      emoji: '🐷',
+      sourceType: 'animated',
+      width: 512,
+      height: 512,
+      thumbnails: [],
+    },
+    raw: { _: 'message' },
+  };
+
+  it('returns a JPEG collage of a sticker', async () => {
+    const getMessages = vi.fn(async () => [stickerMessage]);
+    vi.mocked(downloadFileBuffer).mockResolvedValueOnce(Buffer.from('tgs'));
+    const collage = vi.fn(async () => Buffer.from('jpeg-collage'));
+    const service = createService(
+      { getMessages } as unknown as TelegramClient,
+      undefined,
+      { collage },
+    );
+
+    const frames = await service.messageFrames(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '88',
+    );
+
+    expect(collage).toHaveBeenCalledWith({
+      data: Buffer.from('tgs'),
+      mimeType: 'application/x-tgsticker',
+    });
+    expect(frames.mimeType).toBe('image/jpeg');
+    expect(frames.data.toString()).toBe('jpeg-collage');
+    expect(frames.disposition.startsWith('inline')).toBe(true);
+    expect(frames.length).toBe(Buffer.byteLength('jpeg-collage'));
+  });
+
+  it('serves a cached collage without downloading again', async () => {
+    const getMessages = vi.fn(async () => [stickerMessage]);
+    vi.mocked(downloadFileBuffer).mockResolvedValue(Buffer.from('tgs'));
+    const collage = vi.fn(async () => Buffer.from('jpeg-collage'));
+    const service = createService(
+      { getMessages } as unknown as TelegramClient,
+      undefined,
+      { collage },
+    );
+
+    await service.messageFrames(USER_ID, ACCOUNT_ID, String(CHAT_ID), '88');
+    const second = await service.messageFrames(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      '88',
+    );
+
+    expect(second.data.toString()).toBe('jpeg-collage');
+    expect(collage).toHaveBeenCalledTimes(1);
+    expect(getMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it('404s with FRAMES_UNAVAILABLE when no collage can be produced', async () => {
+    const getMessages = vi.fn(async () => [stickerMessage]);
+    vi.mocked(downloadFileBuffer).mockResolvedValue(Buffer.from('tgs'));
+    const service = createService(
+      { getMessages } as unknown as TelegramClient,
+      undefined,
+      { collage: async () => null },
+    );
+
+    await expect(
+      service.messageFrames(USER_ID, ACCOUNT_ID, String(CHAT_ID), '88'),
+    ).rejects.toMatchObject({
+      status: 404,
+      response: { code: 'FRAMES_UNAVAILABLE' },
+    });
+  });
+
+  it('404s with FRAMES_UNAVAILABLE when the message has no media', async () => {
+    const noMedia = { ...stickerMessage, media: null };
+    const getMessages = vi.fn(async () => [noMedia]);
+    const service = createService(
+      { getMessages } as unknown as TelegramClient,
+      undefined,
+      { collage: async () => Buffer.from('never') },
+    );
+
+    await expect(
+      service.messageFrames(USER_ID, ACCOUNT_ID, String(CHAT_ID), '88'),
+    ).rejects.toMatchObject({
+      status: 404,
+      response: { code: 'FRAMES_UNAVAILABLE' },
+    });
+  });
+});
+
+describe('sendMessage typing', () => {
+  it('shows "typing…" for an explicit duration and cancels it after sending', async () => {
+    const fake = createFakeClient();
+    const service = createService(fake.client);
+    const typing = vi
+      .spyOn(service, 'sendTyping')
+      .mockResolvedValue({ status: 'typing' });
+
+    await service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+      text: 'привет',
+      typing: 5,
+    });
+
+    expect(typing).toHaveBeenNthCalledWith(
+      1,
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      { status: 'typing', sessionId: undefined },
+    );
+    expect(typing).toHaveBeenNthCalledWith(
+      2,
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      { status: 'cancel', sessionId: undefined },
+    );
+    expect(fake.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends instantly when typing is off', async () => {
+    const fake = createFakeClient();
+    const service = createService(fake.client);
+    const typing = vi.spyOn(service, 'sendTyping');
+
+    await service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+      text: 'привет',
+      typing: 'off',
+    });
+
+    expect(typing).not.toHaveBeenCalled();
+    expect(fake.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the old behaviour when typing is omitted', async () => {
+    const fake = createFakeClient();
+    const service = createService(fake.client);
+    const typing = vi.spyOn(service, 'sendTyping');
+
+    await service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+      text: 'привет',
+    });
+
+    expect(typing).not.toHaveBeenCalled();
+  });
+
+  it('applies the soul policy for typing: auto', async () => {
+    const fake = createFakeClient();
+    const prisma = {
+      soul: {
+        findUnique: async () => ({
+          settings: JSON.stringify({
+            typingMode: 'on_compose',
+            typingSpeed: 300,
+            // A 1 ms window keeps the test fast; the clamp is unit-tested.
+            typingMinMs: 1,
+            typingMaxMs: 1,
+            typingHeartbeatMs: 4_000,
+          }),
+        }),
+      },
+    };
+    const service = createService(fake.client, null, undefined, prisma);
+    const typing = vi
+      .spyOn(service, 'sendTyping')
+      .mockResolvedValue({ status: 'typing' });
+
+    await service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+      text: 'привет',
+      typing: 'auto',
+    });
+
+    expect(typing).toHaveBeenCalledWith(
+      USER_ID,
+      ACCOUNT_ID,
+      String(CHAT_ID),
+      { status: 'typing', sessionId: undefined },
+    );
+    expect(fake.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours an off policy with typing: auto', async () => {
+    const fake = createFakeClient();
+    const prisma = {
+      soul: {
+        findUnique: async () => ({
+          settings: JSON.stringify({ typingMode: 'off' }),
+        }),
+      },
+    };
+    const service = createService(fake.client, null, undefined, prisma);
+    const typing = vi.spyOn(service, 'sendTyping');
+
+    await service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+      text: 'привет',
+      typing: 'auto',
+    });
+
+    expect(typing).not.toHaveBeenCalled();
+  });
+
+  it('rejects a junk typing value', async () => {
+    const fake = createFakeClient();
+    const service = createService(fake.client);
+
+    await expect(
+      service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
+        text: 'привет',
+        typing: 'soon',
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(fake.sendText).not.toHaveBeenCalled();
   });
 });

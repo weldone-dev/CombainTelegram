@@ -109,17 +109,80 @@ describe('message DTO mapping', () => {
   it('maps unsupported media as other and keeps it non-downloadable', () => {
     expect(
       toMessageMediaView({
+        type: 'webpage',
+        fileName: null,
+        mimeType: null,
+        fileSize: 0,
+      }),
+    ).toEqual({
+      kind: 'other',
+      mimeType: null,
+      fileName: null,
+      size: 0,
+      downloadable: false,
+    });
+  });
+
+  it('maps video, round video notes and GIFs to distinct kinds', () => {
+    expect(
+      toMessageMediaView({
         type: 'video',
         fileName: 'clip.mp4',
         mimeType: 'video/mp4',
         fileSize: 99,
       }),
     ).toEqual({
-      kind: 'other',
+      kind: 'video',
       mimeType: 'video/mp4',
       fileName: 'clip.mp4',
       size: 99,
       downloadable: false,
+    });
+
+    expect(
+      toMessageMediaView({
+        type: 'video',
+        mimeType: 'video/mp4',
+        isRound: true,
+      }),
+    ).toMatchObject({ kind: 'video_note', downloadable: true });
+
+    expect(
+      toMessageMediaView({
+        type: 'video',
+        mimeType: 'video/mp4',
+        isAnimation: true,
+      }),
+    ).toMatchObject({
+      kind: 'animation',
+      isAnimated: true,
+      downloadable: true,
+    });
+  });
+
+  it('maps an animated sticker with emoji, size and sticker set', () => {
+    const view = toMessageMediaView({
+      type: 'sticker',
+      mimeType: 'application/x-tgsticker',
+      fileSize: 20_000,
+      emoji: '🐷',
+      sourceType: 'animated',
+      width: 512,
+      height: 512,
+      inputStickerSet: { shortName: 'pink_pigs' },
+    });
+
+    expect(view).toEqual({
+      kind: 'sticker',
+      mimeType: 'application/x-tgsticker',
+      fileName: null,
+      size: 20_000,
+      downloadable: true,
+      emoji: '🐷',
+      isAnimated: true,
+      width: 512,
+      height: 512,
+      stickerSet: 'pink_pigs',
     });
   });
 

@@ -343,7 +343,7 @@ describe('td-message-view', () => {
     );
     expect(audio.mediaType).toBe('audio');
     expect(audio.media).toMatchObject({
-      kind: 'other',
+      kind: 'audio',
       mimeType: 'audio/mpeg',
     });
 
@@ -396,8 +396,164 @@ describe('td-message-view', () => {
     expect(animation.media?.size).toBe(800_000);
   });
 
-  it('maps sticker and dice', () => {
-    const sticker = toMessageViewFromTd(
+  it('maps sticker, animated emoji, GIF and video note without placeholders', () => {
+    const baseSticker = {
+      _: 'sticker',
+      id: '1',
+      set_id: '2',
+      width: 512,
+      height: 512,
+      emoji: '🐷',
+      full_type: { _: 'stickerFullTypeRegular', premium_animation: null },
+      thumbnail: null,
+      sticker: file(16, 30_000),
+    };
+
+    const staticSticker = toMessageViewFromTd(
+      message({
+        _: 'messageSticker',
+        sticker: { ...baseSticker, format: { _: 'stickerFormatWebp' } },
+        is_premium: false,
+      }),
+      ctx,
+    );
+    expect(staticSticker.text).toBe('🐷');
+    expect(staticSticker.mediaType).toBe('sticker');
+    expect(staticSticker.media).toEqual({
+      kind: 'sticker',
+      mimeType: 'image/webp',
+      fileName: 'sticker.webp',
+      size: 30_000,
+      downloadable: true,
+      emoji: '🐷',
+      width: 512,
+      height: 512,
+    });
+
+    const tgsSticker = toMessageViewFromTd(
+      message({
+        _: 'messageSticker',
+        sticker: { ...baseSticker, format: { _: 'stickerFormatTgs' } },
+        is_premium: false,
+      }),
+      ctx,
+    );
+    expect(tgsSticker.media).toMatchObject({
+      kind: 'sticker',
+      mimeType: 'application/x-tgsticker',
+      fileName: 'sticker.tgs',
+      emoji: '🐷',
+      isAnimated: true,
+      width: 512,
+      height: 512,
+    });
+
+    const webmSticker = toMessageViewFromTd(
+      message({
+        _: 'messageSticker',
+        sticker: { ...baseSticker, format: { _: 'stickerFormatWebm' } },
+        is_premium: false,
+      }),
+      ctx,
+    );
+    expect(webmSticker.media).toMatchObject({
+      mimeType: 'video/webm',
+      fileName: 'sticker.webm',
+      isAnimated: true,
+    });
+
+    const animatedEmoji = toMessageViewFromTd(
+      message({
+        _: 'messageAnimatedEmoji',
+        animated_emoji: {
+          _: 'animatedEmoji',
+          sticker: { ...baseSticker, format: { _: 'stickerFormatTgs' } },
+          sticker_width: 512,
+          sticker_height: 512,
+          fitzpatrick_type: 0,
+          sound: null,
+          is_regular_emoji: true,
+        },
+        emoji: '🐷',
+      }),
+      ctx,
+    );
+    expect(animatedEmoji.text).toBe('🐷');
+    expect(animatedEmoji.text).not.toBe('[Unsupported message]');
+    expect(animatedEmoji.media).toMatchObject({
+      kind: 'sticker',
+      mimeType: 'application/x-tgsticker',
+      emoji: '🐷',
+      isAnimated: true,
+    });
+
+    const gif = toMessageViewFromTd(
+      message({
+        _: 'messageAnimation',
+        animation: {
+          _: 'animation',
+          duration: 3,
+          width: 480,
+          height: 270,
+          file_name: 'cat.gif',
+          mime_type: 'image/gif',
+          has_stickers: false,
+          minithumbnail: null,
+          thumbnail: null,
+          animation: file(17, 900_000),
+        },
+        caption: text('смотри'),
+        show_caption_above_media: false,
+        has_spoiler: false,
+        is_secret: false,
+      }),
+      ctx,
+    );
+    expect(gif.text).toBe('смотри');
+    expect(gif.mediaType).toBe('video');
+    expect(gif.media).toMatchObject({
+      kind: 'animation',
+      mimeType: 'image/gif',
+      fileName: 'cat.gif',
+      size: 900_000,
+      downloadable: true,
+      isAnimated: true,
+      width: 480,
+      height: 270,
+      durationSec: 3,
+    });
+
+    const note = toMessageViewFromTd(
+      message({
+        _: 'messageVideoNote',
+        video_note: {
+          _: 'videoNote',
+          duration: 7,
+          waveform: '',
+          length: 240,
+          minithumbnail: null,
+          thumbnail: null,
+          speech_recognition_result: null,
+          video: file(18, 700_000),
+        },
+        is_viewed: false,
+        is_secret: false,
+      }),
+      ctx,
+    );
+    expect(note.mediaType).toBe('video');
+    expect(note.media).toMatchObject({
+      kind: 'video_note',
+      mimeType: 'video/mp4',
+      downloadable: true,
+      width: 240,
+      height: 240,
+      durationSec: 7,
+    });
+  });
+
+  it('keeps a sticker emoji in text even when Telegram omits it', () => {
+    const view = toMessageViewFromTd(
       message({
         _: 'messageSticker',
         sticker: {
@@ -406,18 +562,22 @@ describe('td-message-view', () => {
           set_id: '2',
           width: 512,
           height: 512,
-          emoji: '🙂',
+          emoji: '',
           format: { _: 'stickerFormatWebp' },
           full_type: { _: 'stickerFullTypeRegular', premium_animation: null },
           thumbnail: null,
-          sticker: file(16, 30_000),
+          sticker: file(19, 1000),
         },
         is_premium: false,
       }),
       ctx,
     );
-    expect(sticker.mediaType).toBe('sticker');
+    expect(view.text).toBe('');
+    expect(view.text).not.toBe('[Unsupported message]');
+    expect(view.media?.emoji).toBeUndefined();
+  });
 
+  it('maps a dice', () => {
     const dice = toMessageViewFromTd(
       message({
         _: 'messageDice',

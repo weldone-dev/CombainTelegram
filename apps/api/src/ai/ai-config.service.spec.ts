@@ -896,3 +896,107 @@ describe('AiConfigService STT probe', () => {
   });
 });
 
+
+function decryptN8nKey(
+  crypto: SessionCryptoService,
+  stored: string,
+): string {
+  const envelope = new Uint8Array(
+    Buffer.from(stored.slice('enc:v1:'.length), 'base64'),
+  );
+  return crypto
+    .decrypt(crypto.deserialize(envelope), 'ai:n8n-key')
+    .toString('utf8');
+}
+
+describe('AiConfigService n8n connection settings', () => {
+  beforeEach(() => {
+    // The sealed test fixtures must not depend on the developer's shell.
+    vi.stubEnv('N8N_API_KEY', '');
+    vi.stubEnv('N8N_BASE_URL', '');
+  });
+
+  it('round-trips the base URL and the key without exposing the key', async () => {
+    const h = harness();
+    const ctrl = controller(h.service);
+
+    expect((await h.service.view()).n8nBaseUrl).toBe(
+      'http://127.0.0.1:5678',
+    );
+    expect((await h.service.view()).hasN8nKey).toBe(false);
+
+    const view = await ctrl.updateSettings({
+      n8nBaseUrl: 'https://n8n.example.com/',
+      n8nApiKey: 'n8n-live-secret',
+    });
+    expect(view.n8nBaseUrl).toBe('https://n8n.example.com');
+    expect(view.hasN8nKey).toBe(true);
+    expect(JSON.stringify(view)).not.toContain('n8n-live-secret');
+
+    const stored = h.current() as AiSettingModel;
+    expect(stored.n8nApiKey).toMatch(/^enc:v1:/);
+    expect(stored.n8nApiKey).not.toContain('n8n-live-secret');
+    expect(decryptN8nKey(h.crypto, stored.n8nApiKey as string)).toBe(
+      'n8n-live-secret',
+    );
+  });
+
+  it('keeps the key when only the URL changes and clears it explicitly', async () => {
+    const h = harness();
+    const ctrl = controller(h.service);
+    await ctrl.updateSettings({ n8nApiKey: 'keep-me' });
+    const before = h.current()?.n8nApiKey;
+
+    const updated = await ctrl.patchSettings({
+      n8nBaseUrl: 'http://n8n.local:5678/',
+    });
+    expect(updated.hasN8nKey).toBe(true);
+    expect(h.current()?.n8nApiKey).toBe(before);
+
+    expect((await ctrl.patchSettings({ n8nApiKey: null })).hasN8nKey).toBe(
+      false,
+    );
+    expect(h.current()?.n8nApiKey).toBeNull();
+
+    await ctrl.updateSettings({ n8nApiKey: 'second' });
+    expect((await ctrl.updateSettings({ n8nApiKey: '' })).hasN8nKey).toBe(
+      false,
+    );
+    expect(h.current()?.n8nApiKey).toBeNull();
+  });
+
+  it('resets an empty URL to the local default and rejects invalid ones', async () => {
+    const h = harness();
+    const ctrl = controller(h.service);
+
+    const reset = await ctrl.updateSettings({
+      n8nBaseUrl: 'https://n8n.example.com/api/v1',
+    });
+    expect(reset.n8nBaseUrl).toBe('https://n8n.example.com/api/v1');
+    expect((await ctrl.updateSettings({ n8nBaseUrl: '' })).n8nBaseUrl).toBe(
+      'http://127.0.0.1:5678',
+    );
+
+    for (const bad of ['n8n.example.com', 'ftp://n8n.example.com', 42]) {
+      const error = await updateError(h.service, { n8nBaseUrl: bad });
+      expect(error.getStatus()).toBe(400);
+      expect(error.response).toMatchObject({ code: 'INVALID_N8N_URL' });
+    }
+  });
+
+  it('treats a legacy plaintext key as configured without echoing it', async () => {
+    const h = harness({ existing: row({ n8nApiKey: 'plain-n8n-key' }) });
+
+    const view = await h.service.view();
+
+    expect(view.hasN8nKey).toBe(true);
+    expect(JSON.stringify(view)).not.toContain('plain-n8n-key');
+  });
+
+  it('reports a key configured only through N8N_API_KEY', async () => {
+    vi.stubEnv('N8N_API_KEY', 'env-n8n-key');
+    const h = harness();
+
+    expect((await h.service.view()).hasN8nKey).toBe(true);
+  });
+});

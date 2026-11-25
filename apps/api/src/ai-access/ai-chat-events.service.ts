@@ -3,6 +3,7 @@ import type { AiChatBlockModel, AiChatEventModel } from '@repo/database';
 import { notFound } from '../common/api-error.js';
 import { parseLimit } from '../messaging/params.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { RealtimeService } from '../realtime/realtime.service.js';
 import { emitLog } from '../logs/log-sink.js';
 
 /** Why a chat's AI state changed; mirrors the `AiChatEvent.kind` column. */
@@ -73,12 +74,15 @@ function toView(row: AiChatEventModel): AiChatEventView {
  */
 @Injectable()
 export class AiChatEventsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtime: RealtimeService,
+  ) {}
 
   /** Best-effort append; a logging failure never fails the caller. */
   async record(input: RecordAiChatEventInput): Promise<void> {
     try {
-      await this.prisma.aiChatEvent.create({
+      const row = (await this.prisma.aiChatEvent.create({
         data: {
           accountId: input.accountId,
           chatId: BigInt(input.chatId),
@@ -88,7 +92,8 @@ export class AiChatEventsService {
           warnings: input.warnings ?? 0,
           actor: input.actor ?? 'user',
         },
-      });
+      })) as AiChatEventModel;
+      await this.publish(row);
     } catch (error) {
       emitLog({
         level: 'warn',
@@ -100,6 +105,33 @@ export class AiChatEventsService {
         chatId: input.chatId,
         details: { kind: input.kind },
       });
+    }
+  }
+
+  /**
+   * Mirrors the audit row on the realtime bus so the n8n event outbox can turn
+   * it into a durable `access.changed` / `block.changed` row. The owner is
+   * resolved from the account because `AiChatEvent` itself carries no user.
+   * Publishing is best-effort: the state change already happened.
+   */
+  private async publish(row: AiChatEventModel): Promise<void> {
+    try {
+      const account = await this.prisma.telegramAccount.findUnique({
+        where: { id: row.accountId },
+        select: { userId: true },
+      });
+      if (!account?.userId) return;
+      this.realtime.emitToUser(account.userId, 'access.changed', {
+        accountId: row.accountId,
+        chatId: Number(row.chatId),
+        threadId: row.threadId,
+        action: row.kind,
+        reason: row.reason,
+        warnings: row.warnings,
+        actor: row.actor,
+      });
+    } catch {
+      // A missing account or a closed bus must not fail the audit write.
     }
   }
 

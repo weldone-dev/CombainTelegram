@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { RealtimeModule } from '../realtime/realtime.module.js';
 import { AiAccessController } from './ai-access.controller.js';
 import { AiAccessService } from './ai-access.service.js';
 import { AiChatEventsService } from './ai-chat-events.service.js';
@@ -17,6 +18,7 @@ import { AiChatEventsService } from './ai-chat-events.service.js';
  */
 @Global()
 @Module({
+  imports: [RealtimeModule],
   controllers: [AiAccessController],
   providers: [AiAccessService, AiChatEventsService],
   exports: [AiAccessService, AiChatEventsService],

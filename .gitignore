@@ -49,3 +49,6 @@ yarn-error.log*
 
 # TypeScript incremental build info
 *.tsbuildinfo
+
+# Self-hosted n8n runtime state (see infra/n8n/README.md)
+infra/n8n/data/

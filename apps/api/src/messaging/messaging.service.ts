@@ -12,6 +12,13 @@ import {
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
 import { SpeechService } from '../ai/speech.service.js';
+import type { TypingPolicy } from '../ai/typing.js';
+import {
+  DEFAULT_TYPING_POLICY,
+  parseTypingPolicyFromRaw,
+  typingPlan,
+} from '../ai/typing.js';
+import { PrismaService } from '../prisma/prisma.service.js';
 import { raiseTelegramError, mapTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
 import { emitLog } from '../logs/log-sink.js';
@@ -34,6 +41,10 @@ import {
   pickThumbnail,
   sanitizeFileName,
 } from './media.js';
+import {
+  defaultMediaFileName,
+  defaultMediaMime,
+} from './message-view.js';
 import {
   toChatInfoFromFullChat,
   toChatInfoFromPeer,
@@ -80,9 +91,11 @@ import {
   parseSearchQuery,
   parseThumbFlag,
   parseTranslateLanguage,
+  parseTypingSendOption,
 } from './params.js';
 import type { ChatInfoKind } from './params.js';
 import { downloadFileBuffer } from './telegram-download.js';
+import { FramesService } from '../media/frames.service.js';
 
 export type { ChatInfoView, ChatPeerView } from './chat-info.js';
 
@@ -228,6 +241,11 @@ const PEER_DIALOG_SCAN_LIMIT = 500;
  * (very small PNGs, odd colour profiles) fail as photos but upload fine as
  * documents.
  */
+/** Awaits `ms` milliseconds; used by the typing simulation of a send. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function isImageProcessFailed(error: unknown): boolean {
   return tl.RpcError.is(error) && error.text === 'IMAGE_PROCESS_FAILED';
 }
@@ -373,6 +391,32 @@ interface DownloadCacheEntry {
   ttlMs?: number;
 }
 
+/** Media types the download endpoint can serve. */
+const DOWNLOADABLE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  'photo',
+  'document',
+  'voice',
+  'audio',
+  'video',
+  'video_note',
+  'animation',
+  'sticker',
+]);
+
+/** Frame collages are small JPEGs, kept for a while to make re-renders cheap. */
+const FRAMES_CACHE_TTL_MS = 30 * 60 * 1000;
+const FRAMES_CACHE_MAX_ENTRIES = 64;
+const FRAMES_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+/** Media types whose `?thumb=1` preview exists on the Telegram side. */
+const THUMBNAILABLE_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  'photo',
+  'document',
+  'sticker',
+  'video',
+  'video_note',
+  'animation',
+]);
+
 @Injectable()
 export class MessagingService {
   private readonly avatars = new Map<
@@ -384,11 +428,32 @@ export class MessagingService {
   /** Sum of `data.byteLength` over `downloads`, kept in sync with every write. */
   private downloadBytes = 0;
 
+  /** Collage JPEGs by message, so repeated vision calls never re-run ffmpeg. */
+  private readonly frameCollages = new Map<
+    string,
+    { data: Buffer; at: number }
+  >();
+  private frameBytes = 0;
+  /** Lazily created when the module is unit-tested without DI. */
+  private framesFallback?: FramesService;
+
   constructor(
     private readonly accounts: AccountsService,
     @Optional() private readonly td?: TdMessagingService,
     @Optional() private readonly speech?: SpeechService,
+    @Optional() private readonly frames?: FramesService,
+    /**
+     * Only read for `typing: 'auto'` (the soul's typing policy). Optional so a
+     * unit test may build the service with a fake client only.
+     */
+    @Optional() private readonly prisma?: PrismaService,
   ) {}
+
+  /** Collage renderer: injected in the app, created on demand in unit tests. */
+  private collageService(): FramesService {
+    this.framesFallback ??= this.frames ?? new FramesService();
+    return this.framesFallback;
+  }
 
   /**
    * TDLib facade for this request, or `null` when mtcute should handle it.
@@ -1158,6 +1223,13 @@ export class MessagingService {
     }
   }
 
+  /**
+   * Sends one text message.
+   *
+   * `typing` is optional and off by default, so every non-AI caller keeps the
+   * old behaviour. `auto` applies the soul's explicit typing policy, a number
+   * is an explicit simulation in milliseconds, `off` sends immediately.
+   */
   async sendMessage(
     userId: string,
     accountId: string,
@@ -1167,6 +1239,7 @@ export class MessagingService {
       replyToId?: unknown;
       quote?: unknown;
       sessionId?: unknown;
+      typing?: unknown;
     } = {},
   ): Promise<MessageView> {
     const chatId = parseChatId(rawChatId);
@@ -1174,6 +1247,79 @@ export class MessagingService {
     const replyToId = parseOptionalMessageId(body.replyToId);
     const quote = parseOptionalQuote(body.quote);
     const sessionId = parseOptionalSessionId(body.sessionId);
+    const typing = parseTypingSendOption(body.typing);
+    const plan = await this.typingPlanFor(accountId, text, typing);
+    if (plan.durationMs <= 0) {
+      return this.sendMessageNow(userId, accountId, chatId, {
+        text,
+        replyToId,
+        quote,
+        sessionId,
+      });
+    }
+
+    await this.sendTyping(userId, accountId, String(chatId), {
+      status: 'typing',
+      sessionId,
+    }).catch(() => undefined);
+    try {
+      await sleep(Math.min(plan.durationMs, 60_000));
+      return await this.sendMessageNow(userId, accountId, chatId, {
+        text,
+        replyToId,
+        quote,
+        sessionId,
+      });
+    } finally {
+      // Telegram clears the action on the sent message anyway; this is for the
+      // failure path, where nothing was sent.
+      await this.sendTyping(userId, accountId, String(chatId), {
+        status: 'cancel',
+        sessionId,
+      }).catch(() => undefined);
+    }
+  }
+
+  /** Typing simulation of one send, from the explicit policy or the soul. */
+  private async typingPlanFor(
+    accountId: string,
+    text: string,
+    typing: ReturnType<typeof parseTypingSendOption>,
+  ): Promise<{ durationMs: number }> {
+    if (typing === undefined || typing === 'off') return { durationMs: 0 };
+    if (typeof typing === 'number') {
+      return { durationMs: Math.min(60_000, Math.max(0, typing)) };
+    }
+    return typingPlan(text, await this.soulTypingPolicy(accountId));
+  }
+
+  /** The soul's typing policy; the defaults when the account has none. */
+  private async soulTypingPolicy(accountId: string): Promise<TypingPolicy> {
+    if (!this.prisma) return DEFAULT_TYPING_POLICY;
+    try {
+      const soul = (await this.prisma.soul.findUnique({
+        where: { accountId },
+        select: { settings: true },
+      })) as { settings: string } | null;
+      return parseTypingPolicyFromRaw(soul?.settings);
+    } catch {
+      return DEFAULT_TYPING_POLICY;
+    }
+  }
+
+  /** One send attempt on the active engine, no typing simulation. */
+  private async sendMessageNow(
+    userId: string,
+    accountId: string,
+    chatId: number,
+    input: {
+      text: string;
+      replyToId?: number;
+      quote?: string;
+      sessionId?: string;
+    },
+  ): Promise<MessageView> {
+    const { text, replyToId, quote, sessionId } = input;
     const td = await this.tdFor(userId, accountId, sessionId, 'sendMessage');
     if (td) {
       try {
@@ -1431,17 +1577,15 @@ export class MessagingService {
       !message ||
       !media ||
       !descriptor?.downloadable ||
-      (media.type !== 'photo' &&
-        media.type !== 'document' &&
-        media.type !== 'voice')
+      !DOWNLOADABLE_MEDIA_TYPES.has(media.type)
     ) {
       throw notFound(
         'MEDIA_NOT_FOUND',
-        'This message has no downloadable photo, document or voice note',
+        'This message has no downloadable media',
       );
     }
 
-    if (wantThumb && (media.type === 'photo' || media.type === 'document')) {
+    if (wantThumb && THUMBNAILABLE_MEDIA_TYPES.has(media.type)) {
       try {
         const thumb = pickThumbnail(
           media as Parameters<typeof pickThumbnail>[0],
@@ -1514,20 +1658,11 @@ export class MessagingService {
     // only raster images are served `inline`; voice notes are played from
     // the API origin by an `<audio>` element, so they stay inline too.
     const mimeType = normalizeMimeType(
-      descriptor.mimeType ??
-        (descriptor.kind === 'photo'
-          ? 'image/jpeg'
-          : descriptor.kind === 'voice'
-            ? 'audio/ogg'
-            : null),
+      descriptor.mimeType ?? defaultMediaMime(media.type, null),
     );
     const defaultFileName = sanitizeFileName(
       descriptor.fileName,
-      descriptor.kind === 'photo'
-        ? 'photo.jpg'
-        : descriptor.kind === 'voice'
-          ? 'voice.ogg'
-          : 'document',
+      defaultMediaFileName(media.type, mimeType),
     );
     const fileName = sanitizeFileName(
       requestedName ?? defaultFileName,
@@ -1548,6 +1683,152 @@ export class MessagingService {
       mimeType,
       fileName,
       disposition: contentDisposition(fileName, inline),
+      length: data.byteLength,
+    };
+  }
+
+  /** Live collage entry, refreshed to LRU position; `undefined` when stale. */
+  private cachedFrames(key: string): Buffer | undefined {
+    const entry = this.frameCollages.get(key);
+    if (!entry) return undefined;
+    if (Date.now() - entry.at >= FRAMES_CACHE_TTL_MS) {
+      this.frameCollages.delete(key);
+      this.frameBytes -= entry.data.byteLength;
+      if (this.frameBytes < 0) this.frameBytes = 0;
+      return undefined;
+    }
+    this.frameCollages.delete(key);
+    this.frameCollages.set(key, entry);
+    return entry.data;
+  }
+
+  private rememberFrames(key: string, data: Buffer): void {
+    const previous = this.frameCollages.get(key);
+    if (previous) {
+      this.frameBytes -= previous.data.byteLength;
+      this.frameCollages.delete(key);
+    }
+    this.frameCollages.set(key, { data, at: Date.now() });
+    this.frameBytes += data.byteLength;
+    while (
+      this.frameCollages.size > FRAMES_CACHE_MAX_ENTRIES ||
+      this.frameBytes > FRAMES_CACHE_MAX_BYTES
+    ) {
+      const oldest = this.frameCollages.keys().next().value;
+      if (oldest === undefined) break;
+      const entry = this.frameCollages.get(oldest);
+      this.frameCollages.delete(oldest);
+      if (entry) this.frameBytes -= entry.data.byteLength;
+    }
+    if (this.frameBytes < 0) this.frameBytes = 0;
+  }
+
+  /**
+   * A single JPEG with a 3×3 grid of frames of the message's media, so a
+   * vision model can judge motion (stickers, animated emoji, GIFs, video
+   * notes). Animated `.tgs`/`.webm` media is rendered by {@link FramesService};
+   * static media collapses into one big frame, which is still a valid image.
+   *
+   * Returns `FRAMES_UNAVAILABLE` (404) when nothing viewable can be produced.
+   * Same ownership and session checks as {@link downloadMedia}.
+   */
+  async messageFrames(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawMessageId: string,
+    sessionIdParam?: unknown,
+  ): Promise<MediaDownloadView> {
+    const chatId = parseChatId(rawChatId);
+    const messageId = parseMessageId(rawMessageId);
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+
+    // Ownership/session check first: a cache hit must not bypass it.
+    await this.accounts.resolveSession(userId, accountId, sessionId);
+
+    const key = `${userId}:${accountId}:${chatId}:${messageId}`;
+    const cached = this.cachedFrames(key);
+    if (cached) return this.framesView(cached);
+
+    const unavailable = (): Error =>
+      notFound(
+        'FRAMES_UNAVAILABLE',
+        'A frame collage could not be produced for this message',
+      );
+
+    let media: MediaDownloadView;
+    try {
+      media = await this.downloadMedia(
+        userId,
+        accountId,
+        rawChatId,
+        rawMessageId,
+        sessionId,
+      );
+    } catch (error) {
+      if (
+        error instanceof HttpException &&
+        (error.getResponse() as { code?: unknown })?.code === 'FRAMES_UNAVAILABLE'
+      ) {
+        throw error;
+      }
+      throw unavailable();
+    }
+
+    const collage = this.collageService();
+    let jpeg = await collage.collage({
+      data: media.data,
+      mimeType: media.mimeType,
+    });
+
+    // A `.tgs` render can fail on an exotic Lottie file. Telegram's static
+    // preview still shows the sticker, so it is a useful vision fallback.
+    if (!jpeg) {
+      try {
+        const thumb = await this.downloadMedia(
+          userId,
+          accountId,
+          rawChatId,
+          rawMessageId,
+          sessionId,
+          undefined,
+          '1',
+        );
+        if (thumb.data !== media.data) {
+          jpeg = await collage.collage({
+            data: thumb.data,
+            mimeType: thumb.mimeType,
+          });
+        }
+      } catch {
+        // No preview either; the 404 below is the honest answer.
+      }
+    }
+
+    if (!jpeg) throw unavailable();
+    this.rememberFrames(key, jpeg);
+    emitLog({
+      level: 'debug',
+      source: 'messaging',
+      action: 'messaging.frames',
+      message: `Rendered a ${jpeg.byteLength}-byte collage for message ${messageId}`,
+      status: 'ok',
+      userId,
+      accountId,
+      chatId,
+      details: { messageId, mime: media.mimeType, bytes: jpeg.byteLength },
+    });
+    return this.framesView(jpeg);
+  }
+
+  /** HTTP payload of a cached collage. */
+  private framesView(data: Buffer): MediaDownloadView {
+    const fileName = 'frames.jpg';
+    return {
+      data,
+      mimeType: 'image/jpeg',
+      fileName,
+      disposition: contentDisposition(fileName, true),
       length: data.byteLength,
     };
   }

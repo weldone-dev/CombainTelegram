@@ -11,28 +11,28 @@ datasource db {
 
 /// Local application user (not a Telegram account).
 model User {
-  id           String           @id @default(cuid())
-  email        String?          @unique
-  name         String?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
-  accounts     TelegramAccount[]
-  authAttempts AuthAttempt[]
-  tdataUploads TdataUpload[]
-  proxies      Proxy[]
+  id                String             @id @default(cuid())
+  email             String?            @unique
+  name              String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  accounts          TelegramAccount[]
+  authAttempts      AuthAttempt[]
+  tdataUploads      TdataUpload[]
+  proxies           Proxy[]
   pushSubscriptions PushSubscription[]
 }
 
 /// Browser Web Push subscription (one per browser/device endpoint).
 model PushSubscription {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  endpoint  String   @unique
-  p256dh    String
-  auth      String
-  userAgent String?
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint   String   @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime @default(now())
   lastSeenAt DateTime @default(now())
 
   @@index([userId])
@@ -42,18 +42,18 @@ model PushSubscription {
 /// `secretEncrypted` holds the password (socks/http) or MTProto secret,
 /// encrypted with `SessionCryptoService` (AAD `proxy:<id>`).
 model Proxy {
-  id              String           @id @default(cuid())
+  id              String            @id @default(cuid())
   userId          String
-  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   name            String
-  kind            String           @default("socks5")
+  kind            String            @default("socks5")
   host            String
   port            Int
   username        String?
   secretEncrypted Bytes?
-  enabled         Boolean          @default(true)
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  enabled         Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
   sessions        TelegramSession[]
 
   @@unique([userId, name])
@@ -62,38 +62,46 @@ model Proxy {
 
 /// One attached Telegram account slot. A local user can have many.
 model TelegramAccount {
-  id             String           @id @default(cuid())
-  userId         String
-  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tgUserId       BigInt
-  phoneEncrypted Bytes?
-  phoneNonce     Bytes?
-  phoneTag       Bytes?
-  firstName      String
-  lastName       String?
-  username       String?
+  id                     String            @id @default(cuid())
+  userId                 String
+  user                   User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tgUserId               BigInt
+  phoneEncrypted         Bytes?
+  phoneNonce             Bytes?
+  phoneTag               Bytes?
+  firstName              String
+  lastName               String?
+  username               String?
   /// Cloud password (2FA), sealed by SessionCryptoService (AAD `cloud:<id>`).
   cloudPasswordEncrypted Bytes?
   cloudPasswordNonce     Bytes?
   cloudPasswordTag       Bytes?
-  deviceProfile  String           @default("{}")
-  isActive       Boolean          @default(false)
+  deviceProfile          String            @default("{}")
+  /// Free-form per-account variables handed to n8n (JSON object).
+  aiVariables            String            @default("{}")
+  isActive               Boolean           @default(false)
   /// Session the app uses as the account's transport (engine + routing).
-  activeSessionId String?
-  lastUsedAt     DateTime?
-  createdAt      DateTime         @default(now())
-  sessions       TelegramSession[]
-  soul           Soul?
-  bots           TelegramBot[]
-  automations    Automation[]
-  aiChatAccess   AiChatAccess[]
-  aiChatBlocks   AiChatBlock[]
-  aiChatSkills   AiChatSkill[]
-  aiChatEvents   AiChatEvent[]
-  aiSetting      AiAccountSetting?
+  activeSessionId        String?
+  lastUsedAt             DateTime?
+  createdAt              DateTime          @default(now())
+  sessions               TelegramSession[]
+  soul                   Soul?
+  bots                   TelegramBot[]
+  automations            Automation[]
+  aiChatAccess           AiChatAccess[]
+  aiChatBlocks           AiChatBlock[]
+  aiChatSkills           AiChatSkill[]
+  aiChatTags             AiChatTag[]
+  aiChatSettings         AiChatSetting[]
+  aiChatEvents           AiChatEvent[]
+  aiSetting              AiAccountSetting?
+  /// Workflow engine assignment. Null = AI disabled for this account.
+  workflowId             String?
+  workflow               Workflow?         @relation(fields: [workflowId], references: [id], onDelete: SetNull)
 
   @@unique([userId, tgUserId])
   @@index([userId])
+  @@index([workflowId])
 }
 
 /// One Telegram auth key = one device/session. An account can have several
@@ -101,35 +109,35 @@ model TelegramAccount {
 /// `engine = "tdlib"` rows hold no mtcute payload: the auth key lives in the
 /// TDLib database under `tdlibPath`, sealed with `tdlibKey*`.
 model TelegramSession {
-  id          String          @id @default(cuid())
-  accountId   String
-  account     TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  deviceId    String
-  label       String?
-  platform    String          @default("desktop")
-  profile     String          @default("TelegramDesktop")
+  id                String          @id @default(cuid())
+  accountId         String
+  account           TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  deviceId          String
+  label             String?
+  platform          String          @default("desktop")
+  profile           String          @default("TelegramDesktop")
   /// "mtcute" (string session) or "tdlib" (native TDLib database).
-  engine      String          @default("mtcute")
-  dcId        Int
-  apiId       Int
-  proxyId     String?
-  proxy       Proxy?          @relation(fields: [proxyId], references: [id], onDelete: SetNull)
-  keyVersion  Int             @default(1)
-  cipher      Bytes?
-  nonce       Bytes?
-  tag         Bytes?
-  dekWrapped  Bytes?
-  dekNonce    Bytes?
-  dekTag      Bytes?
+  engine            String          @default("mtcute")
+  dcId              Int
+  apiId             Int
+  proxyId           String?
+  proxy             Proxy?          @relation(fields: [proxyId], references: [id], onDelete: SetNull)
+  keyVersion        Int             @default(1)
+  cipher            Bytes?
+  nonce             Bytes?
+  tag               Bytes?
+  dekWrapped        Bytes?
+  dekNonce          Bytes?
+  dekTag            Bytes?
   /// Absolute directory of the TDLib `db`/`files` folders (engine = tdlib).
-  tdlibPath   String?
+  tdlibPath         String?
   /// Envelope of the TDLib `database_encryption_key`.
   tdlibKeyEncrypted Bytes?
   tdlibKeyNonce     Bytes?
   tdlibKeyTag       Bytes?
-  revokedAt   DateTime?
-  lastUsedAt  DateTime?
-  createdAt   DateTime        @default(now())
+  revokedAt         DateTime?
+  lastUsedAt        DateTime?
+  createdAt         DateTime        @default(now())
 
   @@unique([accountId, deviceId])
   @@index([accountId])
@@ -201,7 +209,6 @@ model LogEntry {
   @@index([requestId])
 }
 
-
 // ---------------------------------------------------------------------------
 // AI: souls, memory, skills, bots, automations, MCP settings
 // ---------------------------------------------------------------------------
@@ -247,18 +254,18 @@ model SoulSkill {
 /// Skills are attached to souls and account bots; an agent may author new
 /// skills when the policy allows it.
 model Skill {
-  id           String    @id @default(cuid())
-  slug         String    @unique
+  id           String      @id @default(cuid())
+  slug         String      @unique
   name         String
-  description  String    @default("")
+  description  String      @default("")
   instructions String
   /// JSON array of tool names. Empty = every tool the policy allows.
-  tools        String    @default("[]")
+  tools        String      @default("[]")
   /// system | user | agent
-  origin       String    @default("user")
-  enabled      Boolean   @default(true)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  origin       String      @default("user")
+  enabled      Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
   souls        SoulSkill[]
   bots         BotSkill[]
 }
@@ -280,14 +287,14 @@ model SoulTurn {
 
 /// Long-term rolling summary of one DM (what happened, who the peer is).
 model SoulSummary {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   accountId    String
   chatId       BigInt
-  summary      String   @default("")
+  summary      String    @default("")
   /// JSON array of facts already folded into `summary`.
-  facts        String   @default("[]")
+  facts        String    @default("[]")
   turnsThrough DateTime?
-  updatedAt    DateTime @updatedAt
+  updatedAt    DateTime  @updatedAt
 
   @@unique([accountId, chatId])
   @@index([accountId])
@@ -314,14 +321,14 @@ model SoulMemory {
 /// (`accountId = null`, `mode = "soul-creator"`) or one assistant bot per
 /// account (`mode = "assistant"`).
 model TelegramBot {
-  id             String          @id @default(cuid())
-  accountId      String?         @unique
-  account        TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  username       String?
-  title          String?
+  id              String           @id @default(cuid())
+  accountId       String?          @unique
+  account         TelegramAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  username        String?
+  title           String?
   /// soul-creator | assistant
-  mode           String          @default("assistant")
-  enabled        Boolean         @default(true)
+  mode            String           @default("assistant")
+  enabled         Boolean          @default(true)
   tokenEncrypted  Bytes?
   tokenNonce      Bytes?
   tokenTag        Bytes?
@@ -329,14 +336,14 @@ model TelegramBot {
   tokenDekNonce   Bytes?
   tokenDekTag     Bytes?
   /// JSON array of allowed Telegram user ids. Empty = any account owner.
-  allowedUserIds String          @default("[]")
-  lastUpdateId   BigInt          @default(0)
-  lastError      String?
-  lastPolledAt   DateTime?
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  skills         BotSkill[]
-  turns          BotTurn[]
+  allowedUserIds  String           @default("[]")
+  lastUpdateId    BigInt           @default(0)
+  lastError       String?
+  lastPolledAt    DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  skills          BotSkill[]
+  turns           BotTurn[]
 }
 
 model BotSkill {
@@ -418,6 +425,56 @@ model AutomationRun {
   @@index([automationId, startedAt])
 }
 
+// ---------------------------------------------------------------------------
+// Workflow engine (n8n): workflow pointer + durable outbox for the Action API
+// ---------------------------------------------------------------------------
+
+/// A workflow that lives in n8n. The app only stores the pointer and the
+/// assignment: one workflow can serve many accounts, an account has at most
+/// one. Deleting it unassigns accounts (AI turns off) instead of deleting them.
+model Workflow {
+  id              String            @id @default(cuid())
+  userId          String
+  name            String
+  description     String            @default("")
+  /// Id of the workflow inside n8n. Null until it is created/published there.
+  n8nWorkflowId   String?
+  /// Cached n8n display name, so the dashboard does not need a live fetch.
+  n8nWorkflowName String?
+  enabled         Boolean           @default(true)
+  /// Experiment / test workflow, not meant for production accounts.
+  isDraft         Boolean           @default(false)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  accounts        TelegramAccount[]
+
+  @@index([userId, createdAt])
+}
+
+/// Durable outbox of events the app hands to n8n (Action API). Rows are written
+/// in the same transaction as the state change and marked delivered afterwards.
+/// No FKs on purpose: an event must survive account deletion and is safe to
+/// replay. `payload` is a JSON document.
+model IntegrationEvent {
+  id          String    @id @default(cuid())
+  userId      String
+  /// message.new | message.edited | access.changed | block.changed |
+  /// automation.event
+  kind        String
+  accountId   String?
+  chatId      BigInt?
+  /// Forum topic / channel-comment thread id. `0` = whole chat (sentinel, see
+  /// `AiChatAccess.threadId`).
+  threadId    Int       @default(0)
+  /// JSON payload.
+  payload     String
+  createdAt   DateTime  @default(now())
+  deliveredAt DateTime?
+
+  @@index([userId, createdAt])
+  @@index([userId, deliveredAt])
+}
+
 /// Singleton AI provider + permission policy. Secrets use the standard
 /// envelope (`SessionCryptoService`); API keys are never returned in full.
 model AiSetting {
@@ -462,6 +519,10 @@ model AiSetting {
   mcpTokenDekWrapped Bytes?
   mcpTokenDekNonce   Bytes?
   mcpTokenDekTag     Bytes?
+  /// n8n address the workflow proxy talks to (`N8N_BASE_URL` overrides).
+  n8nBaseUrl         String   @default("http://127.0.0.1:5678")
+  /// n8n API key, sealed as `enc:v1:<base64 envelope>` (AAD `ai:n8n-key`).
+  n8nApiKey          String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -530,6 +591,39 @@ model AiChatSkill {
   skillSlugs String          @default("[]")
   createdAt  DateTime        @default(now())
   updatedAt  DateTime        @updatedAt
+
+  @@unique([accountId, chatId, threadId])
+  @@index([accountId, chatId])
+}
+
+/// Free-form tag of one chat (e.g. `vip`, `lead`). Tags are per account and
+/// chat, normalised to lower-case on write, and work across forum topics: a
+/// tag names the chat, not one thread.
+model AiChatTag {
+  id        String          @id @default(cuid())
+  accountId String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    BigInt
+  tag       String
+  createdAt DateTime        @default(now())
+
+  @@unique([accountId, chatId, tag])
+  @@index([accountId, chatId])
+}
+
+/// Per-chat AI overrides stored as JSON (`typing` mode, `maxParts`, ...).
+/// A row is keyed by chat + thread, so a forum topic can run its own settings;
+/// `threadId = 0` is the whole-chat default (sentinel, see `AiChatAccess`).
+model AiChatSetting {
+  id        String          @id @default(cuid())
+  accountId String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    BigInt
+  threadId  Int             @default(0)
+  /// JSON object of overrides, e.g. { "typing": "natural", "maxParts": 3 }.
+  settings  String          @default("{}")
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
 
   @@unique([accountId, chatId, threadId])
   @@index([accountId, chatId])

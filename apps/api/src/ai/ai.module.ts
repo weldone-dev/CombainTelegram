@@ -15,9 +15,14 @@ import { MemoryService } from './memory.service.js';
 import { SkillsService } from './skills.service.js';
 import { SoulsService } from './souls.service.js';
 import { DmAutopilotService } from './dm-autopilot.service.js';
+import { ChatStateService } from './chat-state.service.js';
 import { PresenceService } from './presence.service.js';
 import { SpeechModule } from './speech.module.js';
-import { AiController, SoulController } from './ai.controller.js';
+import {
+  AiController,
+  ChatStateController,
+  SoulController,
+} from './ai.controller.js';
 import { AutomationsService } from '../automations/automations.service.js';
 import { AutomationRunnerService } from '../automations/automation-runner.service.js';
 import { AutomationSchedulerService } from '../automations/automation-scheduler.service.js';
@@ -53,6 +58,7 @@ import { McpController } from '../mcp/mcp.controller.js';
   controllers: [
     AiController,
     SoulController,
+    ChatStateController,
     AutomationsController,
     BotsController,
     McpController,
@@ -68,6 +74,7 @@ import { McpController } from '../mcp/mcp.controller.js';
     AgentToolsService,
     AgentService,
     PresenceService,
+    ChatStateService,
     DmAutopilotService,
     AutomationsService,
     AutomationRunnerService,
@@ -82,6 +89,12 @@ import { McpController } from '../mcp/mcp.controller.js';
     SoulsService,
     MemoryService,
     SkillsService,
+    // Consumed by the n8n Action API (`/integrations/n8n`).
+    DmAutopilotService,
+    ChatStateService,
+    PresenceService,
+    AgentToolsService,
+    AutomationsService,
   ],
 })
 export class AiModule {}

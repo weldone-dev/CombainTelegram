@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { SoulModel, TelegramAccountModel } from '@repo/database';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { SkillsService } from './skills.service.js';
-import { clampTypingCpm } from './typing.js';
+import { parseTypingPolicy } from './typing.js';
 import {
   DEFAULT_SOUL_SETTINGS,
   type SoulSettings,
@@ -69,7 +69,7 @@ function mergeSoulSettings(
       5000,
     );
   }
-  if (typeof source.typing === 'boolean') next.typing = source.typing;
+  next.maxParts = clampInt(source.maxParts, current.maxParts, 1, 3);
   if (typeof source.peerProfile === 'boolean') {
     next.peerProfile = source.peerProfile;
   }
@@ -105,12 +105,22 @@ function mergeSoulSettings(
       120,
     );
   }
-  if (source.typingSpeed !== undefined) {
-    next.typingSpeed = clampTypingCpm(
-      source.typingSpeed,
-      current.typingSpeed,
-    );
-  }
+  const typing = parseTypingPolicy(source, {
+    typing: current.typing,
+    typingMode: current.typingMode,
+    typingSpeed: current.typingSpeed,
+    typingStartDelayMs: current.typingStartDelayMs,
+    typingMinMs: current.typingMinMs,
+    typingMaxMs: current.typingMaxMs,
+    typingHeartbeatMs: current.typingHeartbeatMs,
+  });
+  next.typing = typing.typing;
+  next.typingMode = typing.typingMode;
+  next.typingSpeed = typing.typingSpeed;
+  next.typingStartDelayMs = typing.typingStartDelayMs;
+  next.typingMinMs = typing.typingMinMs;
+  next.typingMaxMs = typing.typingMaxMs;
+  next.typingHeartbeatMs = typing.typingHeartbeatMs;
   return next;
 }
 
@@ -144,11 +154,13 @@ export function parseSoulSettings(raw: unknown): SoulSettings {
       0,
       5000,
     ),
-    typing: source.typing !== false,
-    typingSpeed: clampTypingCpm(
-      source.typingSpeed,
-      DEFAULT_SOUL_SETTINGS.typingSpeed,
+    maxParts: clampInt(
+      source.maxParts,
+      DEFAULT_SOUL_SETTINGS.maxParts,
+      1,
+      3,
     ),
+    ...parseTypingPolicy(source),
     peerProfile: source.peerProfile !== false,
     presenceIdleMinutes: clampInt(
       source.presenceIdleMinutes,

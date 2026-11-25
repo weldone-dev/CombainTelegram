@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { errorMessage } from "../../lib/api";
 import { chatAvatarUrl } from "../../lib/avatar";
 import { formatDay } from "../../lib/format";
@@ -79,6 +79,8 @@ export function ChatList({
   onResolveUsername: (username: string) => Promise<void>;
 }) {
   const [filter, setFilter] = useState("");
+  const filterRef = useRef<HTMLInputElement>(null);
+  const filterTouched = useRef(false);
   const [menuId, setMenuId] = useState<number | null>(null);
   const [aiMenu, setAiMenu] = useState<{
     chatId: number;
@@ -97,6 +99,7 @@ export function ChatList({
   // biome-ignore lint/correctness/useExhaustiveDependencies: resets on account switch
   useEffect(() => {
     setFilter("");
+    filterTouched.current = false;
     setMenuId(null);
     setAiMenu(null);
     setBusyId(null);
@@ -110,6 +113,26 @@ export function ChatList({
   useEffect(() => {
     if (selectedId === null) setInChatSearchOpen(false);
   }, [selectedId]);
+
+  // Chrome/Safari and password managers sometimes write a saved value into a
+  // plain text input without a keypress, and occasionally without React's
+  // `onChange`. The filter is never persisted, so any value that appears
+  // before the user touches the field is injected: drop it.
+  useEffect(() => {
+    const dropInjected = () => {
+      if (filterTouched.current) return;
+      const input = filterRef.current;
+      if (!input) return;
+      if (input.value !== "") input.value = "";
+      setFilter("");
+    };
+    const timers = [0, 300, 1200].map((ms) =>
+      window.setTimeout(dropInjected, ms),
+    );
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, []);
 
   const selectedChat = chats.find((chat) => chat.id === selectedId) ?? null;
 
@@ -284,12 +307,32 @@ export function ChatList({
         <div className="border-b border-zinc-800 px-3 py-2">
           <div className="relative">
             <input
+              ref={filterRef}
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
+              onPointerDown={() => {
+                filterTouched.current = true;
+              }}
+              onKeyDown={() => {
+                filterTouched.current = true;
+              }}
+              onPaste={() => {
+                filterTouched.current = true;
+              }}
+              type="search"
+              name="combain-chat-filter"
               placeholder={`Фильтр загруженных чатов (до ${MAX_CHAT_LIMIT})`}
               aria-label="Фильтр загруженных чатов по названию или @username"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 pr-7 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none"
+              className="w-full appearance-none rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 pr-7 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-sky-500 focus:outline-none [&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden"
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              enterKeyHint="search"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-bwignore="true"
+              data-form-type="other"
             />
             {filter && (
               <button

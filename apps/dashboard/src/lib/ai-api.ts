@@ -167,6 +167,16 @@ export interface SkillView {
   updatedAt: string;
 }
 
+/** When the account shows "typing…"; mirrors the API's `TypingMode`. */
+export type TypingMode = "off" | "on_think" | "on_compose" | "smart";
+
+export const TYPING_MODES: readonly TypingMode[] = [
+  "off",
+  "on_think",
+  "on_compose",
+  "smart",
+];
+
 export interface SoulSettings {
   allowAllChats: boolean;
   chatIds: number[];
@@ -174,8 +184,20 @@ export interface SoulSettings {
   replyDelayMs: number;
   maxPerHour: number;
   maxPerChatPerDay: number;
+  /** Reply bubbles per answer: 1 by default, at most 3. */
+  maxParts: number;
+  /** Legacy on/off switch; `false` always means `typingMode: 'off'`. */
   typing: boolean;
+  typingMode: TypingMode;
   typingSpeed: number;
+  /** Delay after the read receipt before `smart` starts typing, ms. */
+  typingStartDelayMs: number;
+  /** Lower bound of one compose simulation, ms. */
+  typingMinMs: number;
+  /** Upper bound of one compose simulation, ms. */
+  typingMaxMs: number;
+  /** How often the "typing…" action is refreshed, ms (2000–5000). */
+  typingHeartbeatMs: number;
   peerProfile: boolean;
   presenceIdleMinutes: number;
   presenceReadDelaySeconds: number;
@@ -214,6 +236,20 @@ export interface AccountAiSettingsView {
 }
 
 export type AiCapabilityPatch = Partial<Record<AiCapability, boolean | null>>;
+
+/**
+ * `GET/PATCH /accounts/:id/ai-variables`: free-form strings a workflow reads
+ * from the n8n event payload as `account.variables`.
+ */
+export interface AccountVariablesView {
+  accountId: string;
+  variables: Record<string, string>;
+}
+
+/** Mirrored API bounds, checked in the UI before the request. */
+export const VARIABLES_MAX_KEYS = 32;
+export const VARIABLES_MAX_VALUE_CHARS = 2_000;
+export const VARIABLES_MAX_BYTES = 16 * 1024;
 
 export interface FactView {
   id: string;
@@ -400,6 +436,7 @@ const AI_ERRORS: Record<string, string> = {
   BOT_TOKEN_REJECTED: "Telegram не принял токен бота",
   INVALID_BOT_TOKEN: "Токен должен выглядеть как 123456789:AA…",
   PROVIDER_NOT_FOUND: "Провайдер не найден — обновите список",
+  VALIDATION_ERROR: "Сервер отклонил значения: проверьте поля",
 };
 
 /**
@@ -634,6 +671,24 @@ export function patchAccountAiSettings(
   return apiFetch(`/accounts/${encodeURIComponent(accountId)}/ai-settings`, {
     method: "PATCH",
     body: { permissions },
+  });
+}
+
+/** Variables of one account; `{}` until the first save. */
+export function getAccountVariables(
+  accountId: string,
+): Promise<AccountVariablesView> {
+  return apiFetch(`/accounts/${encodeURIComponent(accountId)}/ai-variables`);
+}
+
+/** Replaces the whole variable object (the API does not merge it). */
+export function saveAccountVariables(
+  accountId: string,
+  variables: Record<string, string>,
+): Promise<AccountVariablesView> {
+  return apiFetch(`/accounts/${encodeURIComponent(accountId)}/ai-variables`, {
+    method: "PATCH",
+    body: { variables },
   });
 }
 

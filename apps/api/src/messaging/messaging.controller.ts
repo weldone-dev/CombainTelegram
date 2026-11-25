@@ -410,6 +410,35 @@ export class MessagingController {
     });
   }
 
+  @Get(':chatId/messages/:messageId/frames')
+  @Header('Content-Type', 'image/jpeg')
+  @Header('Cache-Control', 'private, max-age=600')
+  @Header('X-Content-Type-Options', 'nosniff')
+  @ApiOperation({
+    summary:
+      'A 3×3 frame collage (JPEG) of a sticker, animated emoji, GIF or video note',
+  })
+  async messageFrames(
+    @CurrentUser() user: UserModel,
+    @Param('accountId') accountId: string,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Query('sessionId') sessionId?: string,
+  ): Promise<StreamableFile> {
+    const frames: MediaDownloadView = await this.messaging.messageFrames(
+      user.id,
+      accountId,
+      chatId,
+      messageId,
+      sessionId,
+    );
+    return new StreamableFile(frames.data, {
+      type: frames.mimeType,
+      disposition: frames.disposition,
+      length: frames.length,
+    });
+  }
+
   @Post(':chatId/messages/:messageId/reaction')
   @ApiOperation({ summary: 'Send or remove a reaction on a message' })
   async sendReaction(

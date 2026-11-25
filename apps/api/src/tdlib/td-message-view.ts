@@ -9,9 +9,16 @@
  * `update.authorization_state`) and plain seconds for dates.
  */
 
-import type { chat, file, message, user } from 'tdlib-native/types';
+import type {
+  chat,
+  file,
+  message,
+  sticker,
+  user,
+} from 'tdlib-native/types';
 import {
   canSendMessages,
+  defaultMediaFileName,
   toChatView,
   toMessageView,
 } from '../messaging/message-view.js';
@@ -150,6 +157,52 @@ export interface TdMediaFileInfo {
   file: file | null;
   /** Best preview thumbnail, or `null` when Telegram has none. */
   thumb: file | null;
+  /** Sticker/animated-emoji emoji, when known. */
+  emoji?: string;
+  /** `.tgs`/`.webm` stickers and GIFs move; a still frame is not all of it. */
+  isAnimated?: boolean;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  /** Public sticker-set short name, when the installed TDLib exposes one. */
+  stickerSet?: string;
+}
+
+/**
+ * MIME type of a TDLib sticker format. `.tgs` is a gzipped Lottie animation,
+ * `.webm` is a video sticker; both used to be reported as `image/webp`.
+ */
+export function stickerFormatMime(format: string | undefined): string {
+  switch (format) {
+    case 'stickerFormatTgs':
+      return 'application/x-tgsticker';
+    case 'stickerFormatWebm':
+      return 'video/webm';
+    default:
+      return 'image/webp';
+  }
+}
+
+/** Whether a TDLib sticker format is animated. */
+function stickerFormatAnimated(format: string | undefined): boolean {
+  return format === 'stickerFormatTgs' || format === 'stickerFormatWebm';
+}
+
+/** Optional positive number, or `undefined` for absent/zero values. */
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
+}
+
+/** Sticker-set short name from a TDLib sticker (newer TDLib versions only). */
+function stickerSetOf(sticker: {
+  set_id?: unknown;
+  set_name?: unknown;
+}): string | undefined {
+  return typeof sticker.set_name === 'string' && sticker.set_name
+    ? sticker.set_name
+    : undefined;
 }
 
 /** Primary username, matching what the mtcute path reports. */
@@ -307,12 +360,16 @@ export function mediaFileInfo(
     case 'messageVideoNote': {
       const note = content.video_note;
       return {
-        type: 'video',
+        type: 'video_note',
         fileName: null,
         mimeType: 'video/mp4',
         size: note.video.size || null,
         file: note.video,
         thumb: note.thumbnail?.file ?? null,
+        width: positiveNumber(note.length),
+        height: positiveNumber(note.length),
+        durationSec: positiveNumber(note.duration),
+        isAnimated: true,
       };
     }
     case 'messageVoiceNote': {
@@ -350,24 +407,88 @@ export function mediaFileInfo(
     }
     case 'messageSticker': {
       const sticker = content.sticker;
+      const mimeType = stickerFormatMime(sticker.format?._);
       return {
         type: 'sticker',
-        fileName: null,
-        mimeType: 'image/webp',
+        fileName: defaultMediaFileName('sticker', mimeType),
+        mimeType,
         size: sticker.sticker.size || null,
         file: sticker.sticker,
         thumb: sticker.thumbnail?.file ?? null,
+        ...(sticker.emoji ? { emoji: sticker.emoji } : {}),
+        isAnimated: stickerFormatAnimated(sticker.format?._),
+        ...(positiveNumber(sticker.width)
+          ? { width: positiveNumber(sticker.width) }
+          : {}),
+        ...(positiveNumber(sticker.height)
+          ? { height: positiveNumber(sticker.height) }
+          : {}),
+        ...(stickerSetOf(sticker) ? { stickerSet: stickerSetOf(sticker) } : {}),
+      };
+    }
+    case 'messageAnimatedEmoji': {
+      // Newer TDLib wraps the sticker in `animated_emoji`; older builds put it
+      // directly on the content. Both carry the visible emoji separately.
+      const animated = (
+        content as unknown as {
+          animated_emoji?: {
+            sticker?: sticker | null;
+            sticker_width?: number;
+            sticker_height?: number;
+          } | null;
+        }
+      ).animated_emoji;
+      const sticker = animated?.sticker ?? (
+        content as unknown as { sticker?: sticker | null }
+      ).sticker ?? null;
+      const emoji = content.emoji || sticker?.emoji || '';
+      const mimeType = sticker ? stickerFormatMime(sticker.format?._) : null;
+      return {
+        type: 'sticker',
+        fileName: mimeType ? defaultMediaFileName('sticker', mimeType) : null,
+        mimeType,
+        size: sticker?.sticker.size || null,
+        file: sticker?.sticker ?? null,
+        thumb: sticker?.thumbnail?.file ?? null,
+        ...(emoji ? { emoji } : {}),
+        isAnimated: sticker
+          ? stickerFormatAnimated(sticker.format?._)
+          : animated != null,
+        ...(positiveNumber(sticker?.width ?? animated?.sticker_width)
+          ? { width: positiveNumber(sticker?.width ?? animated?.sticker_width) }
+          : {}),
+        ...(positiveNumber(sticker?.height ?? animated?.sticker_height)
+          ? {
+              height: positiveNumber(
+                sticker?.height ?? animated?.sticker_height,
+              ),
+            }
+          : {}),
+        ...(sticker && stickerSetOf(sticker)
+          ? { stickerSet: stickerSetOf(sticker) }
+          : {}),
       };
     }
     case 'messageAnimation': {
       const animation = content.animation;
+      const mimeType = animation.mime_type || 'video/mp4';
       return {
-        type: 'video',
-        fileName: animation.file_name || null,
-        mimeType: animation.mime_type || 'video/mp4',
+        type: 'animation',
+        fileName: animation.file_name || defaultMediaFileName('animation', mimeType),
+        mimeType,
         size: animation.animation.size || null,
         file: animation.animation,
         thumb: animation.thumbnail?.file ?? null,
+        isAnimated: true,
+        ...(positiveNumber(animation.width)
+          ? { width: positiveNumber(animation.width) }
+          : {}),
+        ...(positiveNumber(animation.height)
+          ? { height: positiveNumber(animation.height) }
+          : {}),
+        ...(positiveNumber(animation.duration)
+          ? { durationSec: positiveNumber(animation.duration) }
+          : {}),
       };
     }
     case 'messagePoll':
@@ -399,6 +520,12 @@ function contentText(entry: message): string {
     case 'messageDocument':
     case 'messageVoiceNote':
       return content.caption?.text ?? '';
+    case 'messageSticker':
+      return content.sticker.emoji || '';
+    case 'messageAnimatedEmoji':
+      // The emoji itself is the whole message: a pig sticker reads as `🐷`,
+      // never as `[Unsupported message]`.
+      return content.emoji || '';
     case 'messagePoll':
       return content.poll?.question?.text ?? '';
     case 'messageLocation':
@@ -484,6 +611,14 @@ function messageMedia(entry: message): MessageLike['media'] {
     fileName: info.fileName,
     mimeType: info.mimeType,
     fileSize: info.size ?? 0,
+    ...(info.emoji ? { emoji: info.emoji } : {}),
+    ...(info.isAnimated ? { isAnimated: true } : {}),
+    ...(info.width !== undefined ? { width: info.width } : {}),
+    ...(info.height !== undefined ? { height: info.height } : {}),
+    ...(info.durationSec !== undefined
+      ? { durationSec: info.durationSec }
+      : {}),
+    ...(info.stickerSet ? { stickerSet: info.stickerSet } : {}),
   };
 }
 

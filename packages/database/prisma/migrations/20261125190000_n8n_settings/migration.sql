@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "AiSetting" ADD COLUMN "n8nBaseUrl" TEXT NOT NULL DEFAULT 'http://127.0.0.1:5678';
+ALTER TABLE "AiSetting" ADD COLUMN "n8nApiKey" TEXT;

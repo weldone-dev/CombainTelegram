@@ -82,6 +82,7 @@ function harness(
             .filter((row) => row.chatId === where.chatId)
             .slice(0, take),
       ),
+      deleteMany: vi.fn(async () => ({ count: 1 })),
     },
     soulSummary: {
       findUnique: vi.fn(
@@ -92,13 +93,18 @@ function harness(
               : null
             : null,
       ),
+      deleteMany: vi.fn(async () => ({ count: 1 })),
     },
     soulMemory: {
       findMany: vi.fn(
         async ({ where, take }: { where: { chatId: bigint }; take: number }) =>
           facts.filter((row) => row.chatId === where.chatId).slice(0, take),
       ),
+      deleteMany: vi.fn(async () => ({ count: 1 })),
     },
+    $transaction: vi.fn(async (operations: Array<Promise<unknown>>) =>
+      Promise.all(operations),
+    ),
   };
   return { service: new AiChatMemoryService(prisma as never), prisma };
 }
@@ -170,8 +176,7 @@ describe('AiChatMemoryService', () => {
     expect(prisma.soulTurn.findMany).not.toHaveBeenCalled();
   });
 
-  it('scopes by account as well as chat', async () => {
-    const { service, prisma } = harness({
+  it('scopes by account as well as chat', async () => {    const { service, prisma } = harness({
       turns: [turn(), turn({ id: 'turn-2', accountId: OTHER_ACCOUNT })],
       facts: [fact()],
       summary: summary(),
@@ -187,5 +192,30 @@ describe('AiChatMemoryService', () => {
     expect(prisma.soulSummary.findUnique).toHaveBeenCalledWith({
       where: { accountId_chatId: { accountId: ACCOUNT_ID, chatId: BigInt(CHAT_ID) } },
     });
+  });
+
+  it('clears turns, summary and facts of one chat in one transaction', async () => {
+    const { service, prisma } = harness();
+
+    await expect(service.clear(USER_ID, ACCOUNT_ID, CHAT_ID)).resolves.toEqual({
+      cleared: true,
+      chatId: CHAT_ID,
+    });
+
+    const scope = { accountId: ACCOUNT_ID, chatId: BigInt(CHAT_ID) };
+    expect(prisma.soulTurn.deleteMany).toHaveBeenCalledWith({ where: scope });
+    expect(prisma.soulSummary.deleteMany).toHaveBeenCalledWith({ where: scope });
+    expect(prisma.soulMemory.deleteMany).toHaveBeenCalledWith({ where: scope });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not clear another user’s account', async () => {
+    const { service, prisma } = harness();
+
+    await expect(
+      service.clear(OTHER_USER, ACCOUNT_ID, CHAT_ID),
+    ).rejects.toMatchObject({ response: { code: 'ACCOUNT_NOT_FOUND' } });
+    expect(prisma.soulTurn.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });

@@ -18,6 +18,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/chats", label: "Чаты", icon: <ChatsIcon /> },
   { href: "/logs", label: "Логи", icon: <LogsIcon /> },
   { href: "/ai", label: "AI", icon: <AiIcon /> },
+  { href: "/workflows", label: "Workflow", icon: <WorkflowIcon /> },
   { href: "/settings", label: "Настройки", icon: <SettingsIcon /> },
 ];
 
@@ -27,8 +28,10 @@ const PAGE_TITLES: Record<string, string> = {
   "/chats": "Чаты",
   "/logs": "Логи",
   "/ai": "AI",
+  "/workflows": "Workflow",
   "/settings": "Настройки",
   "/settings/ai": "Настройки · AI",
+  "/settings/workflows": "Настройки · Workflow",
 };
 
 /** Exact title first, then the longest matching route prefix. */
@@ -255,6 +258,26 @@ function AiIcon() {
     >
       <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" />
       <circle cx="12" cy="12" r="3.2" />
+    </svg>
+  );
+}
+
+function WorkflowIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-5 w-5"
+    >
+      <rect x="3" y="3" width="6" height="5" rx="1.2" />
+      <rect x="15" y="16" width="6" height="5" rx="1.2" />
+      <rect x="9" y="9.5" width="6" height="5" rx="1.2" />
+      <path d="M6 8v2.5a2 2 0 0 0 2 2h1M15 14.5V12a2 2 0 0 0-2-2h-1" />
     </svg>
   );
 }

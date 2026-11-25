@@ -54,6 +54,23 @@ export interface MessageLike {
     fileName?: string | null;
     mimeType?: string | null;
     fileSize?: number;
+    /** Sticker/animated-emoji emoji, when Telegram knows one. */
+    emoji?: string | null;
+    /** Explicit animation flag (TDLib); mtcute derives it from `sourceType`. */
+    isAnimated?: boolean | null;
+    /** mtcute sticker getter: `static` | `animated` | `video`. */
+    sourceType?: string | null;
+    width?: number | null;
+    height?: number | null;
+    /** TDLib-style name; mtcute calls the same value `duration`. */
+    durationSec?: number | null;
+    duration?: number | null;
+    /** Public sticker-set short name (mtcute `inputStickerSet.shortName`). */
+    stickerSet?: string | null;
+    inputStickerSet?: unknown;
+    /** mtcute video note and legacy GIF flags. */
+    isRound?: boolean | null;
+    isAnimation?: boolean | null;
     id?: unknown;
     question?: unknown;
     answers?: unknown;
@@ -97,12 +114,36 @@ export interface MessageLike {
   };
 }
 
+/**
+ * Concrete media kind of a message. `video_note`/`animation` are split out of
+ * mtcute's single `video` type so the client can render them differently.
+ */
+export type MessageMediaKind =
+  | 'photo'
+  | 'document'
+  | 'voice'
+  | 'audio'
+  | 'video'
+  | 'video_note'
+  | 'sticker'
+  | 'animation'
+  | 'other';
+
 export interface MessageMediaView {
-  kind: 'photo' | 'document' | 'voice' | 'other';
+  kind: MessageMediaKind;
   mimeType: string | null;
   fileName: string | null;
   size: number | null;
   downloadable: boolean;
+  /** Unicode emoji of a sticker or an animated emoji. */
+  emoji?: string;
+  /** The media moves (`.tgs`, `.webm`, GIF): a still frame is not all of it. */
+  isAnimated?: boolean;
+  width?: number;
+  height?: number;
+  durationSec?: number;
+  /** Public sticker-set short name, when Telegram exposes it. */
+  stickerSet?: string;
 }
 
 export interface MessageReactionView {
@@ -241,33 +282,197 @@ function readMediaField<T>(
   }
 }
 
+/** Same defensive read for every other optional media field. */
+function readMediaOption<T>(
+  media: NonNullable<MessageLike['media']>,
+  key: string,
+): T | null {
+  try {
+    const value = (media as unknown as Record<string, unknown>)[key];
+    return (value ?? null) as T | null;
+  } catch {
+    return null;
+  }
+}
+
+/** Finite number, or `null` for absent/garbage values. */
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** Whether a MIME type is an animated sticker format rather than a still one. */
+function isAnimatedStickerMime(mimeType: string | null): boolean {
+  if (!mimeType) return false;
+  const value = mimeType.toLowerCase();
+  return value === 'application/x-tgsticker' || value === 'video/webm';
+}
+
+/** Kinds whose bytes the download endpoint can serve. */
+const DOWNLOADABLE_KINDS: ReadonlySet<MessageMediaKind> = new Set([
+  'photo',
+  'document',
+  'voice',
+  'video_note',
+  'sticker',
+  'animation',
+]);
+
 /**
- * Structured media descriptor. Photos, generic documents and voice notes are
- * downloadable; everything else keeps a kind of `other` so the client can
- * still show `mediaType` without pretending to support it.
+ * Fallback MIME type for media whose sender did not declare one. Stickers
+ * default to their most common static format; the TDLib mapper always knows
+ * the real one from the sticker format.
+ */
+export function defaultMediaMime(
+  type: string | null,
+  mimeType: string | null = null,
+): string | null {
+  if (mimeType) return mimeType;
+  switch (type) {
+    case 'photo':
+      return 'image/jpeg';
+    case 'voice':
+      return 'audio/ogg';
+    case 'video':
+    case 'video_note':
+    case 'animation':
+      return 'video/mp4';
+    case 'sticker':
+      return 'image/webp';
+    default:
+      return null;
+  }
+}
+
+/** Human-friendly download name for media without a `file_name`. */
+export function defaultMediaFileName(
+  type: string | null,
+  mimeType: string | null,
+): string {
+  const mime = (mimeType ?? '').toLowerCase();
+  switch (type) {
+    case 'photo':
+      return 'photo.jpg';
+    case 'voice':
+      return 'voice.ogg';
+    case 'video':
+      return 'video.mp4';
+    case 'video_note':
+      return 'video-note.mp4';
+    case 'animation':
+      return mime === 'image/gif' ? 'animation.gif' : 'animation.mp4';
+    case 'sticker':
+      if (mime === 'application/x-tgsticker') return 'sticker.tgs';
+      if (mime === 'video/webm') return 'sticker.webm';
+      return 'sticker.webp';
+    default:
+      return 'document';
+  }
+}
+
+/**
+ * Legacy `mediaType` value of a media type. `video_note`/`animation` are new
+ * kinds of the structured descriptor; older clients only know `video`.
+ */
+export function legacyMediaType(type: string | null): string | null {
+  if (type === 'video_note' || type === 'animation') return 'video';
+  return type;
+}
+
+/** Concrete kind of a media descriptor, including mtcute's video subtypes. */
+function mediaKindOf(
+  media: NonNullable<MessageLike['media']>,
+  type: string | null,
+): MessageMediaKind {
+  switch (type) {
+    case 'photo':
+      return 'photo';
+    case 'document':
+      return 'document';
+    case 'voice':
+      return 'voice';
+    case 'audio':
+      return 'audio';
+    case 'sticker':
+      return 'sticker';
+    case 'animation':
+      return 'animation';
+    case 'video_note':
+      return 'video_note';
+    case 'video':
+      // mtcute reports round video notes and GIFs as plain videos.
+      if (readMediaOption<boolean>(media, 'isRound') === true) return 'video_note';
+      if (readMediaOption<boolean>(media, 'isAnimation') === true) {
+        return 'animation';
+      }
+      return 'video';
+    default:
+      return 'other';
+  }
+}
+
+/** Sticker-set short name from either engine's shape. */
+function stickerSetName(
+  media: NonNullable<MessageLike['media']>,
+): string | null {
+  const direct = readMediaOption<string>(media, 'stickerSet');
+  if (typeof direct === 'string' && direct) return direct;
+  const input = readMediaOption<{ shortName?: unknown }>(
+    media,
+    'inputStickerSet',
+  );
+  const short = input && typeof input === 'object' ? input.shortName : null;
+  return typeof short === 'string' && short ? short : null;
+}
+
+/**
+ * Structured media descriptor. Photos, documents, voice notes, videos,
+ * stickers, animations and audio files are downloadable; everything else keeps
+ * a kind of `other` so the client can still show `mediaType` without
+ * pretending to support it.
  */
 export function toMessageMediaView(
   media: MessageLike['media'],
 ): MessageMediaView | null {
   if (!media) return null;
   const type = typeof media.type === 'string' ? media.type : null;
-  const kind: MessageMediaView['kind'] =
-    type === 'photo'
-      ? 'photo'
-      : type === 'document'
-        ? 'document'
-        : type === 'voice'
-          ? 'voice'
-          : 'other';
-  const mimeType = readMediaField<string>(media, 'mimeType');
-  return {
+  const kind = mediaKindOf(media, type);
+  const mimeType =
+    readMediaField<string>(media, 'mimeType') ??
+    // A sticker without a declared MIME is a still webp; other kinds keep the
+    // historical `null` when the sender did not declare one.
+    (kind === 'sticker' ? defaultMediaMime(type) : null);
+  const sourceType = readMediaOption<string>(media, 'sourceType');
+  const stickerLike = kind === 'sticker' || kind === 'animation';
+  const isAnimated =
+    kind === 'animation' ||
+    readMediaOption<boolean>(media, 'isAnimated') === true ||
+    sourceType === 'animated' ||
+    sourceType === 'video' ||
+    (stickerLike && isAnimatedStickerMime(mimeType));
+
+  const width = finiteNumber(readMediaOption<unknown>(media, 'width'));
+  const height = finiteNumber(readMediaOption<unknown>(media, 'height'));
+  const durationSec =
+    finiteNumber(readMediaOption<unknown>(media, 'durationSec')) ??
+    finiteNumber(readMediaOption<unknown>(media, 'duration'));
+  const emoji = readMediaOption<string>(media, 'emoji');
+  const stickerSet = stickerSetName(media);
+
+  const view: MessageMediaView = {
     kind,
     // Voice notes are always OGG/Opus; the getter is optional structurally.
     mimeType: mimeType ?? (kind === 'voice' ? 'audio/ogg' : null),
     fileName: readMediaField<string>(media, 'fileName'),
     size: readMediaField<number>(media, 'fileSize'),
-    downloadable: kind === 'photo' || kind === 'document' || kind === 'voice',
+    downloadable: DOWNLOADABLE_KINDS.has(kind),
   };
+  if (typeof emoji === 'string' && emoji) view.emoji = emoji;
+  if (isAnimated) view.isAnimated = true;
+  if (width !== null) view.width = width;
+  if (height !== null) view.height = height;
+  if (durationSec !== null) view.durationSec = durationSec;
+  if (stickerSet) view.stickerSet = stickerSet;
+  return view;
 }
 
 /** Decimal string for a `tl.Long`, or `null` when the value is unusable. */
@@ -445,7 +650,7 @@ export function toMessageView(message: MessageLike): MessageView {
     senderId: message.sender.id,
     senderName: message.sender.displayName,
     replyToId: message.replyToMessage?.id ?? null,
-    mediaType: message.media?.type ?? null,
+    mediaType: legacyMediaType(message.media?.type ?? null),
     media: toMessageMediaView(message.media),
     reactions: toMessageReactions(message),
     poll:

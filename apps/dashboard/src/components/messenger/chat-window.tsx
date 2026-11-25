@@ -19,6 +19,12 @@ import {
 } from "../../lib/drafts";
 import { formatFileSize, formatTime } from "../../lib/format";
 import {
+  hasMediaBody,
+  readAiFramesPreference,
+  resolveMediaKind,
+  writeAiFramesPreference,
+} from "../../lib/media-url";
+import {
   MAX_MEDIA_UPLOAD_BYTES,
   sendMessageReaction,
   sendPollVote,
@@ -48,6 +54,13 @@ import { CommentThreadDrawer } from "./comment-thread-drawer";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
 import { ReasoningBlock } from "./reasoning-block";
+import {
+  AnimationBubble,
+  AudioBubble,
+  StickerBubble,
+  VideoBubble,
+  VideoNoteBubble,
+} from "./sticker-bubble";
 import { ThinkingStrip } from "./thinking-strip";
 import { VoiceBubble } from "./voice-bubble";
 
@@ -198,6 +211,8 @@ export function ChatWindow({
   const [threadFor, setThreadFor] = useState<MessageView | null>(null);
   const [aiMenu, setAiMenu] = useState<{ x: number; y: number } | null>(null);
   const [showReasoning, setShowReasoning] = useState(true);
+  /** Debug-only AI frame collages, off/on per browser (default on). */
+  const [showAiFrames, setShowAiFrames] = useState(true);
   const [thinking, setThinking] = useState<{
     runId: string;
     text: string;
@@ -402,6 +417,20 @@ export function ChatWindow({
     },
     [accountId],
   );
+
+  // The frame-collage switch is a device preference shared by all accounts.
+  // It is read after mount so server and client markup stay identical.
+  useEffect(() => {
+    setShowAiFrames(readAiFramesPreference());
+  }, []);
+
+  const toggleAiFrames = useCallback(() => {
+    setShowAiFrames((current) => {
+      const next = !current;
+      writeAiFramesPreference(next);
+      return next;
+    });
+  }, []);
 
   const draftKey =
     accountId !== null && chatId !== null
@@ -1067,6 +1096,20 @@ export function ChatWindow({
             </span>
           )}
           <ChatAiChip chatId={chat.id} chatTitle={chat.title} />
+          <button
+            type="button"
+            onClick={toggleAiFrames}
+            title="Показывать кадры для ИИ под стикерами, GIF и видеосообщениями (только в дашборде)"
+            aria-pressed={showAiFrames}
+            aria-label="Кадры для ИИ"
+            className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${
+              showAiFrames
+                ? "border-violet-500/70 bg-violet-500/15 text-violet-200"
+                : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+            }`}
+          >
+            Кадры ИИ
+          </button>
           <label className="flex items-center gap-1 text-[11px] text-zinc-500">
             <span>Перевод</span>
             <select
@@ -1163,6 +1206,14 @@ export function ChatWindow({
           const reasoning = reasoningByMessage.get(message.id);
           const reactionBusy = reactionPending.has(message.id);
           const voteBusy = votingId === message.id;
+          // Telegram repeats the sticker emoji as the message text; the media
+          // bubble already shows it as a caption, so skip the duplicate line.
+          const stickerMedia = message.media;
+          const stickerEcho =
+            stickerMedia != null &&
+            stickerMedia.emoji != null &&
+            resolveMediaKind(stickerMedia, message.mediaType) === "sticker" &&
+            message.text.trim() === stickerMedia.emoji.trim();
           const menuActions: MessageMenuAction[] = [];
           if (canWrite) {
             menuActions.push({
@@ -1371,12 +1422,14 @@ export function ChatWindow({
                               message={message}
                               accountId={account.id}
                               selecting={selecting}
+                              showAiFrames={showAiFrames}
                               transcript={transcript}
                               transcribing={transcribing.has(message.id)}
                               onTranscribe={() => void transcribe(message.id)}
                             />
                           )}
                           {message.text.trim() &&
+                            !stickerEcho &&
                             (!poll ||
                               message.text.trim() !== poll.question.trim()) && (
                               <MessageText
@@ -1387,9 +1440,7 @@ export function ChatWindow({
                           {!poll &&
                             !message.text &&
                             message.mediaType &&
-                            message.media?.kind !== "photo" &&
-                            message.media?.kind !== "document" &&
-                            message.media?.kind !== "voice" && (
+                            !hasMediaBody(message.media, message.mediaType) && (
                               <p className="text-sm opacity-80">
                                 [{message.mediaType}]
                               </p>
@@ -1489,7 +1540,7 @@ export function ChatWindow({
                       )}
 
                       <div className="mt-1 flex items-center justify-end gap-2 text-[11px] opacity-80">
-                        {message.mediaType && message.text && (
+                        {message.mediaType && message.text && !stickerEcho && (
                           <span className="rounded bg-black/20 px-1.5 py-0.5 text-[10px]">
                             {message.mediaType}
                           </span>
@@ -1937,6 +1988,7 @@ function MessageMedia({
   message,
   accountId,
   selecting,
+  showAiFrames,
   transcript,
   transcribing,
   onTranscribe,
@@ -1944,16 +1996,21 @@ function MessageMedia({
   message: MessageView;
   accountId: string;
   selecting: boolean;
+  showAiFrames: boolean;
   transcript?: MessageTranscriptionView;
   transcribing: boolean;
   onTranscribe: () => void;
 }) {
   const media = message.media;
-  if (!media || !media.downloadable) return null;
+  if (!media) return null;
+  // Older API payloads still say `other`; fall back to mime/legacy mediaType
+  // so stickers and GIFs render instead of a bare `[sticker]` label.
+  const kind = resolveMediaKind(media, message.mediaType);
+  if (!media.downloadable && kind === "other") return null;
 
   const url = mediaUrl(accountId, message.chatId, message.id, media.fileName);
 
-  if (media.kind === "photo") {
+  if (kind === "photo") {
     // The thumbnail endpoint falls back to the full image server-side, so a
     // chat list stays cheap without ever showing a broken preview.
     const previewUrl = mediaUrl(
@@ -1985,7 +2042,62 @@ function MessageMedia({
     );
   }
 
-  if (media.kind === "voice") {
+  if (kind === "sticker") {
+    return (
+      <StickerBubble
+        message={message}
+        accountId={accountId}
+        selecting={selecting}
+        showAiFrames={showAiFrames}
+      />
+    );
+  }
+
+  if (kind === "animation") {
+    return (
+      <AnimationBubble
+        message={message}
+        accountId={accountId}
+        selecting={selecting}
+        showAiFrames={showAiFrames}
+      />
+    );
+  }
+
+  if (kind === "video_note") {
+    return (
+      <VideoNoteBubble
+        message={message}
+        accountId={accountId}
+        selecting={selecting}
+        showAiFrames={showAiFrames}
+      />
+    );
+  }
+
+  if (kind === "video") {
+    return (
+      <VideoBubble
+        message={message}
+        accountId={accountId}
+        selecting={selecting}
+        showAiFrames={showAiFrames}
+      />
+    );
+  }
+
+  if (kind === "audio") {
+    return (
+      <AudioBubble
+        message={message}
+        accountId={accountId}
+        selecting={selecting}
+        showAiFrames={showAiFrames}
+      />
+    );
+  }
+
+  if (kind === "voice") {
     return (
       <VoiceBubble
         src={url}
@@ -1998,7 +2110,7 @@ function MessageMedia({
     );
   }
 
-  if (media.kind === "document") {
+  if (kind === "document") {
     const fileName = media.fileName ?? "Документ";
     const mime = media.mimeType ?? "";
     const previewable = mime.startsWith("image/") || mime.startsWith("video/");

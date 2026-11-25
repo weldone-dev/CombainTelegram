@@ -161,6 +161,29 @@ export function parseFolderId(value: unknown): number | undefined {
   return id;
 }
 
+/** Explicit typing mode of one outgoing message. */
+export type TypingSendOption = 'auto' | 'off' | number;
+
+/**
+ * `typing` of a send: `auto` applies the soul's typing policy, `off` sends
+ * instantly, and a number is an explicit simulation in milliseconds. A missing
+ * value keeps the historical behaviour (no typing at all).
+ */
+export function parseTypingSendOption(
+  value: unknown,
+): TypingSendOption | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (value === 'auto' || value === 'off') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) invalid('typing must be auto, off or ms');
+    return Math.min(60_000, Math.max(0, Math.round(value)));
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    return Math.min(60_000, Number.parseInt(value.trim(), 10));
+  }
+  return invalid('typing must be auto, off or milliseconds');
+}
+
 /** Optional boolean from a query string or JSON body (`true`/`false`/`1`/`0`). */
 export function parseOptionalBoolean(
   value: unknown,

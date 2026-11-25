@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_REPLY_PART_CHARS, MAX_REPLY_PARTS, parseReply } from './dm-reply.js';
+import {
+  DEFAULT_MAX_PARTS,
+  MAX_REPLY_PART_CHARS,
+  MAX_REPLY_PARTS,
+  applyPartsPolicy,
+  parseReply,
+} from './dm-reply.js';
+
+const LONG_A =
+  'Первый вариант ответа получился достаточно длинным, чтобы жить отдельным сообщением в переписке, а не слипаться с остальными пузырями.';
+const LONG_B =
+  'Второй вариант тоже содержит отдельную мысль и потому заслуживает собственного пузыря в чате, даже если чат этого совсем не ждал.';
+const LONG_C =
+  'Третий вариант продолжает мысль и остаётся самостоятельным сообщением, потому что в нём есть новая деталь для собеседника.';
 
 describe('parseReply', () => {
   it('returns one part for plain text', () => {
@@ -146,5 +159,85 @@ describe('parseReply', () => {
     expect(parseReply('')).toEqual([]);
     expect(parseReply('   \n\n  ')).toEqual([]);
     expect(parseReply('```\n\n```')).toEqual([]);
+  });
+});
+
+describe('applyPartsPolicy', () => {
+  it('merges a split reply into one bubble by default', () => {
+    const result = applyPartsPolicy([
+      { text: LONG_A, messageIndex: 2, quote: 'цитата' },
+      { text: LONG_B },
+    ]);
+    expect(DEFAULT_MAX_PARTS).toBe(1);
+    expect(result.raw).toBe(2);
+    expect(result.merged).toBe(true);
+    expect(result.maxParts).toBe(1);
+    expect(result.parts).toHaveLength(1);
+    expect(result.parts[0]?.text).toBe(`${LONG_A}\n\n${LONG_B}`);
+    // The first part's reply metadata survives the merge.
+    expect(result.parts[0]?.messageIndex).toBe(2);
+    expect(result.parts[0]?.quote).toBe('цитата');
+  });
+
+  it('keeps up to maxParts bubbles when the soul allows them', () => {
+    const result = applyPartsPolicy(
+      [{ text: LONG_A }, { text: LONG_B }, { text: LONG_C }],
+      3,
+    );
+    expect(result.parts.map((part) => part.text)).toEqual([
+      LONG_A,
+      LONG_B,
+      LONG_C,
+    ]);
+    expect(result.merged).toBe(false);
+    expect(result.maxParts).toBe(3);
+  });
+
+  it('never exceeds three bubbles', () => {
+    const parts = Array.from({ length: 5 }, (_, index) => ({
+      text: `${LONG_A} ${index}`,
+    }));
+    const result = applyPartsPolicy(parts, 99);
+    expect(result.maxParts).toBe(3);
+    expect(result.parts).toHaveLength(3);
+  });
+
+  it('merges a short reply even when several bubbles are allowed', () => {
+    const result = applyPartsPolicy(
+      [{ text: 'Первый кусок, который не очень длинный' }, { text: 'второй' }],
+      3,
+    );
+    expect(result.merged).toBe(true);
+    expect(result.parts).toHaveLength(1);
+  });
+
+  it('merges when any single part is shorter than 40 characters', () => {
+    const result = applyPartsPolicy(
+      [{ text: LONG_A }, { text: 'ок' }],
+      3,
+    );
+    expect(result.merged).toBe(true);
+    expect(result.parts).toHaveLength(1);
+    expect(result.parts[0]?.text).toContain('ок');
+  });
+
+  it('leaves a single part untouched', () => {
+    const result = applyPartsPolicy([{ text: LONG_A, messageIndex: 1 }], 3);
+    expect(result.parts).toEqual([{ text: LONG_A, messageIndex: 1 }]);
+    expect(result.raw).toBe(1);
+    expect(result.merged).toBe(false);
+  });
+
+  it('normalises a junk cap to the default', () => {
+    const result = applyPartsPolicy([{ text: LONG_A }], Number.NaN);
+    expect(result.maxParts).toBe(1);
+  });
+
+  it('works on a parsed --- reply with the default cap', () => {
+    const parsed = parseReply(`${LONG_A}\n---\n${LONG_B}`);
+    const result = applyPartsPolicy(parsed);
+    expect(result.raw).toBe(2);
+    expect(result.parts).toHaveLength(1);
+    expect(result.parts[0]?.text).toContain('Второй вариант');
   });
 });
