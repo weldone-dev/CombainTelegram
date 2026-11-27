@@ -12,7 +12,6 @@ import type {
   RealtimeMessageEvent,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
-import { AiAccessSection } from "./ai-access-section";
 
 const COMMENT_LIMIT = 30;
 /** Mirrors the API validation; Telegram rejects longer texts. */
@@ -206,16 +205,6 @@ export function CommentThreadDrawer({
             ✕
           </button>
         </header>
-
-        <div className="max-h-[48vh] overflow-y-auto border-b border-zinc-800 px-4 py-3">
-          <AiAccessSection
-            accountId={accountId}
-            chatId={chatId}
-            threadId={messageId}
-            threadLabel={`пост #${messageId}`}
-            allowWholeChat
-          />
-        </div>
 
         <div
           ref={listRef}

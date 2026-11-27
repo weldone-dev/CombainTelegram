@@ -1,11 +1,11 @@
-import type { MessageReasoningView, MessageView } from "./types";
+import type { MessageView } from "./types";
 
 /** Two copies of the same bubble may differ by a few seconds after a refetch. */
 const SIGNATURE_TOLERANCE_MS = 5000;
 
 export interface MergeResult {
   messages: MessageView[];
-  /** Existing id -> canonical id, used to move reasoning to the surviving bubble. */
+  /** Existing id -> canonical id, for callers that track per-bubble state. */
   remapped: Map<number, number>;
   /** Canonical id of the last incoming message, or null when the list was empty. */
   canonicalId: number | null;
@@ -74,11 +74,8 @@ function newestFirst(a: MessageView, b: MessageView): number {
  *    serializer still matches the same number.
  * 2. Otherwise `isSameBubble` (outgoing + identical text + ±5 s + reply/media)
  *    recognises a temporary-id bubble and the real one that replaced it.
- * 3. When the ids differ, the non-temporary id survives. The existing bubble
- *    stays at its position (the list is re-sorted newest-first) and the caller
- *    moves local metadata (reasoning) from the old id to the canonical one.
- * 4. A message already carrying `reasoning` is never dropped: the merge result
- *    keeps one bubble per run, and `remapReasoning` moves its block.
+ * 3. When the ids differ, the non-temporary id survives and the old id is
+ *    reported in `remapped`, so a caller can move per-bubble state.
  *
  * `preferIncoming` keeps the fetched copy's fields (for `message.new`), while
  * the default keeps the current live fields when both copies share an id.
@@ -144,48 +141,4 @@ export function mergeMessages(
 
   next.sort(newestFirst);
   return { messages: next, remapped, canonicalId };
-}
-
-/**
- * Moves reasoning entries from temporary ids to the canonical bubble id.
- * If both ids already have an entry, the canonical one wins and the stale
- * duplicate is removed, so one run never decorates two bubbles.
- */
-export function remapReasoning(
-  current: Map<number, MessageReasoningView>,
-  remapped: Map<number, number>,
-): Map<number, MessageReasoningView> {
-  if (remapped.size === 0) return current;
-  const next = new Map(current);
-  for (const [from, rawTarget] of remapped) {
-    const entry = next.get(from);
-    if (!entry) continue;
-    // A page may contain several id hops (temp -> temp -> real); follow them.
-    let target = rawTarget;
-    const seen = new Set<number>([from]);
-    while (remapped.has(target) && !seen.has(target)) {
-      seen.add(target);
-      target = remapped.get(target) as number;
-    }
-    if (!next.has(target)) next.set(target, entry);
-    next.delete(from);
-  }
-  return next;
-}
-
-/**
- * Adds reasoning while enforcing one bubble per run: a duplicate `ai.reply`
- * with another temporary id moves the block instead of copying it.
- */
-export function putReasoning(
-  current: Map<number, MessageReasoningView>,
-  messageId: number,
-  entry: MessageReasoningView,
-): Map<number, MessageReasoningView> {
-  const next = new Map(current);
-  for (const [id, previous] of next) {
-    if (id !== messageId && previous.runId === entry.runId) next.delete(id);
-  }
-  next.set(messageId, entry);
-  return next;
 }

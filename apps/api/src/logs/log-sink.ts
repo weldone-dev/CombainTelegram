@@ -10,10 +10,7 @@ export type LogSource =
   | "proxy"
   | "telegram"
   | "realtime"
-  | "ai"
-  | "mcp"
-  | "bot"
-  | "automation";
+  | "ai";
 
 /** Everything a caller can attach to one log line. */
 export interface LogInput {

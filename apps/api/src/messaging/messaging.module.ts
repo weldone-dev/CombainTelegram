@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { AccountsModule } from '../accounts/accounts.module.js';
 import { RealtimeModule } from '../realtime/realtime.module.js';
 import { TelegramModule } from '../telegram/telegram.module.js';
-import { SpeechModule } from '../ai/speech.module.js';
+import { SpeechModule } from './speech.module.js';
 import { FramesService } from '../media/frames.service.js';
 import { TdFilesService } from '../tdlib/td-files.service.js';
 import { TdMessagingService } from '../tdlib/td-messaging.service.js';

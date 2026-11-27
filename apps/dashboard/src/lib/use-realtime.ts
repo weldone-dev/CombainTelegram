@@ -5,8 +5,6 @@ import { io, type Socket } from "socket.io-client";
 import { API_URL } from "./api";
 import { publishRealtimeEvent } from "./realtime-bus";
 import type {
-  AiReplyEvent,
-  AiThinkingEvent,
   LogEntryView,
   RealtimeAuthDoneEvent,
   RealtimeAuthFailedEvent,
@@ -74,9 +72,6 @@ export function useRealtime(handlers: RealtimeHandlers): void {
     listen<RealtimeTypingEvent>("chat.typing", (payload) => {
       handlersRef.current.onChatTyping?.(payload);
     });
-    // Reasoning of an autopilot reply: published on the local bus only.
-    listen<AiReplyEvent>("ai.reply", undefined);
-    listen<AiThinkingEvent>("ai.thinking", undefined);
     listen<RealtimeQrUpdatedEvent>("auth.qr.updated", (payload) => {
       handlersRef.current.onQrUpdated?.(payload);
     });

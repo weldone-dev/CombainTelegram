@@ -6,6 +6,7 @@
 - **MTProto lives in NestJS**, never in the browser: `@mtcute/node` (MIT) + `opentele2` (MIT) for tdata. Sessions encrypted at rest; auth attempts sticky to one node.
 - **Follow official clients, not Android mods.** Protocol flows were taken from tdesktop/64Gram sources (`intro/*`, `core/core_cloud_password.cpp`).
 - **ToS:** no ghost mode, no anti-delete, no local premium; own `api_id`/`api_hash`.
+- **Single LLM stack = Eve.** All model-driven behaviour lives in `apps/eve` (agent process) + `apps/api/src/eve` (Telegram-facing API). The old Soul/autopilot/provider/MCP/bot/automation layer and `n8n` are deleted; do not reintroduce them. Speech-to-text is env-only (`STT_*`) in the messaging layer.
 - Design docs: `docs/architecture.md` (modules, data model, API) and `docs/auth.md` (three flows, error map, security). Structured logs (HTTP actions, raw Telegram answers, errors) and their REST API for agents: `docs/logs.md` (`GET /logs`, `/logs/export`).
 
 ## Layout
@@ -17,7 +18,7 @@
 
 ## Commands (from repo root)
 - `bun install`
-- `bun run dev` — dashboard on **:4000** (`next dev -p 4000`, no auto-increment), api on **:4001**. If 4000 is taken by another project, dashboard fails loudly instead of falling back onto 4001 and killing the API.
+- `bun run dev` — dashboard on **:4000** (`next dev -p 4000`, no auto-increment), api on **:4001**, Eve agent on **:4020**. If 4000 is taken by another project, dashboard fails loudly instead of falling back onto 4001 and killing the API.
 - `bun run build` / `bun run test` / `bun run lint` / `bun run check-types`
 - Focus one app: `bunx turbo run <task> --filter=api`
 - Single test: `cd apps/api && bunx vitest run src/app.controller.spec.ts`
@@ -47,7 +48,13 @@
   deployment.
 - Messaging lives in `apps/api/src/messaging` on top of
   `AccountsService.resolveSession(userId, accountId, sessionId?)`, which checks
-  both ownership links (session→account→user) and opens the mtcute client.
+  both ownership links (session→account→user) and opens the client (TDLib or
+  mtcute).
+- Eve lives in `apps/api/src/eve` (personas, bindings, allowlist, context
+  snapshots, events, delayed turns, dry run) and `apps/eve` (the turn loop). It
+  never opens a Telegram client itself: outward actions go through
+  `MessagingService`. Speech-to-text is `SpeechService` in `messaging`, configured
+  only by `STT_*` env.
 - Realtime lives in `apps/api/src/realtime`: `UpdatesService` subscribes once per
   session (dedupe 10 s across PC/phone), `RealtimeService` is an in-process rxjs
   bus, and `EventsGateway` fans out to `user:<id>` rooms. No service imports the

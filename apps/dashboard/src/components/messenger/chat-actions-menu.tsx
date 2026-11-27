@@ -2,8 +2,6 @@
 
 import { useEffect, useRef } from "react";
 import type { ChatView } from "../../lib/types";
-import { AiAccessActionItems } from "./ai-access-menu";
-import { useAiAccess } from "./ai-access-store";
 
 export type ChatMenuAction =
   | "pin"
@@ -33,7 +31,6 @@ export function ChatActionsMenu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const { statusFor } = useAiAccess();
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -101,12 +98,6 @@ export function ChatActionsMenu({
         <span aria-hidden="true">●</span>
         Отметить непрочитанным
       </button>
-      <div className="my-1 border-t border-zinc-800" />
-      <AiAccessActionItems
-        chatId={chat.id}
-        state={statusFor(chat.id)}
-        onDone={onClose}
-      />
       <div className="my-1 border-t border-zinc-800" />
       <button
         type="button"

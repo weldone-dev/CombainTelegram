@@ -6,10 +6,10 @@ chats/messages REST, Socket.IO fan-out, Swagger, `.tar.gz` tdata). The app runs
 in **single-user mode**: there is no local registration or login — every request
 runs as `DEFAULT_USER_ID` (default `local`). The database is still SQLite (the
 Postgres move is deferred); Redis is not implemented yet — WS fan-out is
-in-process, so it assumes a single API node. The AI layer (providers, souls,
-memory, skills, automations, bots, per-chat access/skills/events, per-account
-capabilities, speech-to-text, MCP) sits on top of the same account/messaging
-services; it is described in §9 and `docs/ai.md`.
+in-process, so it assumes a single API node. LLM behaviour lives in a separate
+**Eve** engine (`apps/eve` + `apps/api/src/eve`); the old Soul/autopilot/
+provider/MCP/bot/automation stack is gone. Speech-to-text is a small
+environment-configured service in the messaging layer. See §9.
 
 ## 1. Product requirements (hard)
 
@@ -438,7 +438,7 @@ Bearer scheme because the API is single-user.
 
 Structured journal (HTTP actions, Telegram RPC answers, auth steps, client and
 proxy failures, unhandled exceptions) stored in `LogEntry` and exposed for both
-the dashboard page `/logs` and AI agents. Full field reference:
+the dashboard page `/logs` and external agents over REST. Full field reference:
 `docs/logs.md`.
 ```
 GET    /logs?domain=telegram|system&level=&source=&q=&accountId=&sessionId=&requestId=&chatId=&proxy=&since=&until=&before=&sort=&offset=&limit=
@@ -509,43 +509,35 @@ sessions, phone numbers or tokens.
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | – | Web Push keys from `bunx web-push generate-vapid-keys`; missing = `503 PUSH_DISABLED` |
 | `VAPID_SUBJECT` | `mailto:admin@localhost` | contact address sent with each push |
 | `PORT` | `3001` | HTTP port |
-| `AI_BASE_URL` / `AI_MODEL` / `AI_FAST_MODEL` | – | OpenAI-compatible LLM endpoint and models (§9) |
-| `AI_API_KEY` | – | LLM key; a value saved in the UI wins and is encrypted |
-| `AI_API_KEY_SOURCE` | – | `opencode` reads the live OAuth token from Orca's OpenCode database |
-| `AI_EXTRA_HEADERS` | – | JSON object of extra HTTP headers for every LLM request |
-| `STT_BASE_URL` / `STT_MODEL` | `http://192.168.31.108:5092` / `parakeet-tdt-0.6b-v3` | speech-to-text endpoint and model; the model is fixed to Parakeet (§9) |
-| `STT_ENGINE` | – (the stored `AiSetting.sttEngine` decides) | `remote` / `local` / `disabled` (wins over the row); legacy `auto`/`parakeet` are mapped, `whisper` is an internal env-only fallback |
-| `STT_REMOTE` | – | `off` removes the LAN engine entirely |
+| `AI_BASE_URL` / `AI_MODEL` / `AI_FAST_MODEL` | – | OpenAI-compatible endpoint and models for Eve (the only LLM stack) |
+| `AI_API_KEY` | – | Eve LLM key; env only, no dashboard override |
+| `AI_EXTRA_HEADERS` | – | JSON object of extra HTTP headers for every Eve LLM request |
+| `AI_EMBED_MODEL` | – | optional embedding model for Eve memory ranking |
+| `STT_ENGINE` | `auto` (`remote` when `STT_BASE_URL` is set, else `local`) | `remote` / `local` / `disabled`; legacy `auto`/`parakeet` are mapped, `whisper` is an internal env-only fallback |
+| `STT_BASE_URL` / `STT_MODEL` | – / `parakeet-tdt-0.6b-v3` | OpenAI-compatible speech endpoint and model; no URL = the remote engine is off |
+| `STT_API_KEY` / `STT_LANGUAGE` | – / auto | optional bearer key and BCP-47 language hint for the remote endpoint |
+| `STT_REMOTE` | – | `off` removes the remote engine entirely |
 | `STT_LOCAL_FALLBACK` | – | `on` re-enables the local chain after a remote failure (default: remote-only) |
-| `MCP_TOKEN` | generated | fixed MCP bearer token; when unset the app generates and stores one |
-| `TELEGRAM_BOT_API_BASE` | `https://api.telegram.org` | Bot API base used by bot long polling |
+| `EVE_TOKEN` | – | shared secret for `/internal/eve/*`; empty disables the Eve surface with `503` |
 
-`apps/api/.env.example` lists the Telegram and Web Push variables; the AI
-variables are documented in §9 and `docs/ai.md`. With `TELEGRAM_API_MODE=custom`
-and no credentials the app still boots; auth endpoints answer
-`503 NOT_CONFIGURED`.
+`apps/api/.env.example` lists every variable with a short comment. With
+`TELEGRAM_API_MODE=custom` and no credentials the app still boots; auth
+endpoints answer `503 NOT_CONFIGURED`.
 
 WS namespace `/events` needs no token; sockets join `user:<id>`. Events:
 ```
 auth.qr.updated | auth.qr.scanned | auth.password_required | auth.done | auth.failed
 message.new | message.edited | message.deleted | message.read | chat.typing
 log.new
-ai.draft | ai.reply | ai.thinking
 ```
 
 Payloads: `message.new` / `message.edited` = `{ accountId, sessionId, chatId,
 message }`; `message.deleted` = `{ accountId, sessionId, chatId, messageIds }`
 (`chatId` is the channel id or `null`, as the update only exposes that);
 `message.read` = `{ accountId, chatId, maxId, outbox, unread }`; `chat.typing` =
-`{ accountId, chatId, userId, status, chatType }`; `ai.draft` = `{ accountId,
-chatId, text, senderName, runId, reasoning }`, `ai.reply` adds `message` (the
-sent bubble); `ai.thinking` = `{ accountId, chatId, runId, phase?, delta?,
-reasoning? }` — `phase: "start"` with just the ids, then throttled `delta`
-chunks of the model's reasoning, then `phase: "done"` with the complete
-`reasoning`. `ai.thinking` exists only for the DM autopilot and only feeds the
-dashboard (it is never sent to Telegram); `log.new` carries one `LogEntryView`.
-UpdatesService subscribes once per session to `onNewMessage`, `onEditMessage`,
-`onDeleteMessage`, `onUserTyping`, `onHistoryRead`, starts
+`{ accountId, chatId, userId, status, chatType }`; `log.new` carries one
+`LogEntryView`. UpdatesService subscribes once per session to `onNewMessage`,
+`onEditMessage`, `onDeleteMessage`, `onUserTyping`, `onHistoryRead`, starts
 `startUpdatesLoop()`, and dedupes the same event seen through two sessions of
 one account for 10 s. Fan-out is in-process (rxjs Subject), so a multi-node
 deployment needs Redis pub/sub.
@@ -622,175 +614,40 @@ The same bridge backs both onboarding and migration, so no separate proof
 scripts are kept: `POST /accounts/:id/tdlib/migrate` is the diagnostic path and
 is covered by the auth tests.
 
-## 9. AI, souls and MCP layer
+## 9. LLM and speech
 
-The layer is split across sibling modules and one `@Global()` trio so the graph
-stays acyclic:
+There is exactly one LLM stack: **Eve**, a local girl-agent style persona
+engine.
 
-- `AiModule` (`apps/api/src/ai/ai.module.ts`) owns the agent, the single tool
-  registry, the global permission policy, souls/memory/skills and the speech
-  client, and hosts the automation, bot and MCP controllers. It imports
-  `AiChatModule` for `AiChatSkillsService` (the autopilot resolves the per-chat
-  skill override through it);
-- `AiProvidersModule` (`apps/api/src/ai-providers`) owns the LLM provider list
-  (presets, live model list, limits/usage) and the resolver `AiConfigService`
-  asks for (provider → `AiSetting` → env). `@Global()` so the config service can
-  inject the resolver without `AiModule` importing it back;
-- `AiAccessModule` (`apps/api/src/ai-access`) owns the per-chat/topic
-  allow-mute rows, the blacklist and the `AiChatEventsService` audit writer, and
-  is `@Global()` so the autopilot and the tool registry (bots, MCP, dashboard
-  agent) inject both without importing the module and creating a second graph
-  edge with `AiModule`;
-- `AiChatModule` (`apps/api/src/ai-chat`) owns the per-chat state on top of that:
-  the skill override (`AiChatSkillsService`), the read-only memory view and the
-  `ai-skills`/`memory`/`ai-events`/`ai-warnings` routes. It imports
-  `AiAccessModule` explicitly to reuse the same event writer;
-- `AiAccountModule` (`apps/api/src/ai-account`) owns the per-account capability
-  overrides (`AiAccountSetting`) and `AiAccountPolicyService`, the wrapper the
-  tool registry injects. It imports `AiModule` (global policy) and
-  `AiChatModule`, and is `@Global()` because `AiModule` needs the policy wrapper
-  but cannot import it back — the same one-way trick as `AiAccessModule`;
-- `SpeechModule` (`apps/api/src/ai/speech.module.ts`) provides one
-  `SpeechService` for both the autopilot and `MessagingModule`; importing
-  `AiModule` from messaging would close a cycle.
+- `apps/eve` is a separate Node process (Eve 1.5.0) on `:4020`. It owns the
+  persona prompt, the turn loop, memory/agenda/schedules and the model call; it
+  talks to any OpenAI-compatible endpoint through `AI_BASE_URL` / `AI_MODEL` /
+  `AI_FAST_MODEL` / `AI_API_KEY` / `AI_EXTRA_HEADERS` (`AI_EMBED_MODEL` for
+  memory ranking).
+- `apps/api/src/eve` is the Telegram-facing half: persona CRUD, account
+  bindings, chat allowlist, context snapshots, durable events, delayed turns,
+  dry run and the `/internal/eve/*` surface guarded by `EVE_TOKEN`. It calls a
+  model only for the small helper endpoints (persona generation, agenda, memory
+  lifecycle).
+- Nothing else in the API talks to an LLM. The old Soul personas, DM
+  autopilot, provider registry, skills, bots, automations, MCP endpoint, n8n
+  proxy and all their tables were removed; `Soul*`/`AiSetting`/`AiProvider`/
+  `Automation*`/`Bot*`/`AgentRun` are no longer in `schema.prisma`.
+- Eve actions reach Telegram only through `MessagingService` (TDLib or mtcute),
+  so account/session routing and the dry-run gate are unchanged.
 
-Nothing in the AI layer opens a Telegram client of its own: account reads and
-writes go through `MessagingService`, which routes to the account's active
-engine (TDLib or mtcute). Bots additionally talk to the Bot API directly (long
-polling, no account session); the remote speech engine is plain HTTP over the
-LAN.
+Speech: `SpeechService` in the messaging layer transcribes voice notes and
+`audio/*` documents with Parakeet TDT 0.6B v3. It is env-only (`STT_*`, see
+§7.1): `remote` (OpenAI-compatible endpoint, no automatic failover unless
+`STT_LOCAL_FALLBACK=on`), `local` (`sherpa-onnx-node`) or `disabled`;
+whisper.cpp is an internal last resort. `transcribe()` never throws and returns
+`null` when no engine is configured, so the transcribe endpoint answers
+"not configured" instead of failing. Private hosts bypass `HTTP(S)_PROXY`
+through an explicit `undici` Agent. `POST
+/accounts/:id/chats/:chatId/messages/:messageId/transcribe` falls back to this
+service when Telegram answers `PREMIUM_REQUIRED`.
 
-```
-browser (/ai, /settings/ai, /accounts) ──REST──▶ AiModule
-                          ├─ AgentService ──▶ LlmService ──▶ OpenAI-compatible LLM
-                          │       └──▶ AgentToolsService (one registry, 45 tools)
-                          ├─ McpController ──POST /mcp──▶ AgentToolsService
-                          ├─ BotRunnerService ──▶ AgentService
-                          ├─ DmAutopilotService ──message.new──▶ AgentService
-                          │       ├──▶ AiAccessService (block > row > soul)
-                          │       ├──▶ AiChatSkillsService (chat override > soul)
-                          │       └──▶ SpeechService (voice notes)
-                          └─ AutomationScheduler (15 s) ──▶ AutomationRunnerService
-                                                              ├──▶ AgentService
-                                                              └──▶ AiPolicyService
-
-AgentToolsService ──▶ AiAccountPolicyService ──▶ AiPolicyService ──▶ MessagingService ──▶ TDLib / mtcute ──▶ Telegram
-AiProvidersModule ──▶ AiProvidersService (resolve, models, limits) ──▶ LlmService
-AiChatModule ──▶ AiChatSkill │ SoulTurn/SoulSummary/SoulMemory (read-only view)
-AiAccessModule ──▶ AiChatEvent (audit trail written on every state change)
-AiAccountModule ──▶ AiAccountSetting (per-account capability deltas)
-SpeechService ──▶ LAN LXC (HTTP) │ sherpa-onnx Parakeet │ whisper.cpp (env-only)
-Secrets: SessionCryptoService AES-256-GCM envelopes (AI key, MCP token, bot tokens, provider keys)
-```
-
-- **One registry, one policy.** The UI agent, MCP `tools/call`, bots and
-  automations call `AgentToolsService.execute()`. It asks
-  `AiAccountPolicyService` for the verdict (global capabilities plus the
-  account's override), checks the tool's `sources` restriction, rejects another
-  account from a scoped surface, applies `dryRun` to Telegram writes, and audits
-  every call. There is no second code path that bypasses the policy; the
-  automation runner's direct send still calls the policy first.
-- **Agent loop.** `AgentService` builds the system prompt (base rules + soul
-  persona + summary/facts + skill instructions), filters tools by capability and
-  skill allowlists, then iterates LLM → tool calls until a text answer or the
-  step budget (default 6). Each run is persisted in `AgentRun` with source, trace
-  and token counts. When a listener is attached it uses `LlmService.chatStream()`
-  (SSE) for the reasoning only; the answer text is still assembled in one piece.
-- **Souls and autopilot.** `DmAutopilotService` subscribes to `message.new` at
-  boot, requires a private chat and a soul in `draft`/`auto`, checks the per-chat
-  gate and rate limits, and runs the agent without tools (`source = "dm"`).
-  `auto` sends the reply; `draft` only emits `ai.draft`. This path is explicitly
-  exempt from `dryRun`. It is also the only path that streams reasoning to the
-  dashboard (`ai.thinking`: `start`, throttled deltas, `done`) and the only one
-  that treats the per-chat skill override as authoritative.
-- **Per-chat access and audit.** `AiAccessService` decides per chat/forum topic:
-  block > `AiChatAccess` row > soul settings (`chatIds`/`allowAllChats`/
-  `excludeChatIds`) > deny. `threadId = 0` is the whole-chat sentinel; a topic
-  row falls back to it, a whole-chat block closes every topic. The autopilot
-  consults the decision before doing anything visible (no agent call, no
-  `typing…`, no read receipt for a blocked chat), caches it for 10 s, and seeds
-  the soul's `chatIds` into access rows once at boot. Warnings live in
-  `AiChatBlock` rows (`blockedBy = "warning"`) and become a real block at
-  `AI_BLOCK_AFTER_WARNINGS` (default 3); clearing warnings zeroes the counter
-  without lifting a block. Every state change appends an `AiChatEvent` through
-  `AiChatEventsService` (best-effort, never fails the block).
-- **Per-chat skills.** `AiChatSkillsService` resolves the skill set of one
-  conversation: a stored `AiChatSkill` row for `accountId + chatId + threadId`
-  wins (an empty array is a deliberate "no skills"), otherwise the soul's
-  `SoulSkill` rows. The autopilot passes the result with
-  `replaceSoulSkills: true`; the UI agent, bots and automations union their
-  `skillSlugs` with the soul's set, so the override does not narrow them.
-- **Per-account capabilities.** `AiAccountSetting.permissions` stores a delta per
-  account; `AiAccountPolicyService` merges it onto the global capabilities and
-  delegates unchanged when a key is not overridden. A denying override answers
-  `CAPABILITY_DISABLED`; a granting one still goes through the account/chat
-  allowlists and `dryRun`. The tool registry asks for the effective set, so the
-  LLM schema and MCP `tools/list` differ per account.
-- **Providers.** `AiProvidersService.resolve()` elects the default enabled
-  `AiProvider` with a URL and a model; `AiConfigService.resolved()` uses those
-  values and falls back to the legacy `AiSetting` row, then to `AI_*` env. Keys
-  are sealed with AAD `ai-provider:<id>` and exposed only as `hasKey`; an
-  `opencode-go` preset row stores no key and uses the local OpenCode token. The
-  legacy `AiSetting` provider is imported into the list once at boot. The same
-  service serves the model list (`<baseUrl>/models`, 5 min cache, `stored`
-  fallback), per-provider limits and the OpenCode Go usage meters; `models`,
-  `limits` and `test` share one key-candidate chain. The provider list module is
-  `@Global()` so the config service can inject the resolver without a module
-  cycle.
-- **Speech.** `SpeechService` transcribes voice notes and `audio/*` documents
-  with Parakeet TDT 0.6B v3: the selected engine is `remote` (LAN
-  OpenAI-compatible endpoint, no automatic failover unless
-  `STT_LOCAL_FALLBACK=on`), `local` (`sherpa-onnx-node`) or `disabled`; whisper.cpp
-  is an internal env-only last resort. `transcribe()` never throws. Private hosts
-  bypass the `HTTP(S)_PROXY` through an explicit `undici` `Agent`, because the
-  corporate proxy answers 503 for the LAN. The autopilot puts the transcript into
-  the DM prompt; the transcription endpoint falls back to the engine when
-  Telegram answers `PREMIUM_REQUIRED`.
-- **Memory.** `MemoryService` keeps `SoulTurn` (short-term), `SoulSummary`
-  (rolling) and `SoulMemory` (facts). At ≥30 turns it compacts the oldest ≤60
-  through the fast model and keeps the newest 12 of that batch; retrieval is
-  keyword + importance + recency, no embeddings.
-- **Bots.** `BotRunnerService` supervises one long-polling loop per enabled
-  `TelegramBot` (10 s supervisor, `getUpdates`, no webhooks) and runs the same
-  agent with `source = bot`/`soul-creator`. Bot tokens are encrypted with AAD
-  `bot:<id>`; users are limited to the bot allowlist or the app's account owners.
-- **Automations.** A 15 s in-process ticker picks due `nextRunAt` rows and skips
-  self-paused ones; `incoming_message` triggers are matched from the same
-  `message.new` bus. An automation may be bound to one chat/topic (`chatId` +
-  `threadId`) and carry an IANA `timezone` for `daily` schedules; `selfPausedAt`
-  is a soul-side pause that clears `nextRunAt`. Every run lands in
-  `AutomationRun`.
-- **MCP.** `McpController` is a stateless Streamable HTTP JSON-RPC endpoint at
-  `POST /mcp`, protected by a Bearer token (`AiSetting`, encrypted). It exposes
-  the same registry, prompts (skills) and resources; it has no session state and
-  no SSE stream.
-- **Secrets.** The `AiSetting` key, MCP token and bot tokens use the existing
-  `SessionCryptoService` envelope (AAD `ai:api-key`, `ai:mcp-token`, `bot:<id>`);
-  provider keys use `ai-provider:<id>` and are stored as `enc:v1:…`, the STT key
-  uses `ai:stt-key`. All are masked in responses and never written to logs.
-- **Tables.** `Soul`, `SoulSkill`, `Skill`, `SoulTurn`, `SoulSummary`,
-  `SoulMemory`, `TelegramBot`, `BotSkill`, `BotTurn`, `Automation`,
-  `AutomationRun`, `AiSetting`, `AiProvider`, `AiChatAccess`, `AiChatBlock`,
-  `AiChatSkill`, `AiChatEvent`, `AiAccountSetting`, `AgentRun` (migration
-  `20261124174416_ai_account_controls` is the last one; it adds the three new
-  tables and `AiProvider.preset`/`limits`).
-  `AgentRun` keeps `reasoning` and `messageIds`; reasoning is shown only in the
-  dashboard and never sent to Telegram. The chat-scoped rows (`AiChatAccess`,
-  `AiChatBlock`, `AiChatSkill`, `AiChatEvent`) share the `threadId = 0`
-  whole-chat sentinel and cascade with the account; `AiAccountSetting` keeps one
-  row per account.
-- **Client-side bubble merge.** The API can return a temporary TDLib message id
-  when the send confirmation misses `SEND_WAIT_TIMEOUT_MS`, and the same bubble
-  can arrive twice (`message.new` plus a refetch). The dashboard merges them in
-  `apps/dashboard/src/lib/message-merge.ts` by id, then by a ±5 s signature
-  (chat, direction, text, media kind, reply target), keeps the non-temporary id
-  and remaps the local reasoning through `remapReasoning`/`putReasoning` (one
-  block per `runId`). Any new field that distinguishes bubbles must be added to
-  `isSameBubble`, or temp/real duplicates come back.
-- **Single node.** Scheduler, bot polling and autopilot are in-process, and the
-  database is SQLite, so the AI layer assumes one API instance.
-
-Full behaviour, REST surface and limitations: `docs/ai.md`.
+Details: `docs/eve/README.md` and `docs/eve/PLAN.md`.
 
 ## 10. Phases
 

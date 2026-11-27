@@ -3,70 +3,55 @@ import { AccountsController } from './accounts.controller.js';
 
 function harness() {
   const accounts = {
-    list: vi.fn(),
-    activate: vi.fn(),
-    remove: vi.fn(),
+    list: vi.fn(async () => []),
+    activate: vi.fn(async (_userId: string, id: string) => ({ id })),
+    remove: vi.fn(async (_userId: string, id: string) => ({ id })),
     avatar: vi.fn(),
-    listTelegramSessions: vi.fn(),
+    listTelegramSessions: vi.fn(async () => []),
     detachSession: vi.fn(),
     updateSession: vi.fn(),
     activateSession: vi.fn(),
   };
-  const aiState = {
-    variables: vi.fn(async (_userId: string, accountId: string) => ({
-      accountId,
-      variables: { promo: 'spring' },
-    })),
-    setVariables: vi.fn(async (_userId: string, accountId: string) => ({
-      accountId,
-      variables: {},
-    })),
-    chatSettings: vi.fn(async () => ({ settings: {} })),
-    setChatSettings: vi.fn(async () => ({ settings: {} })),
-  };
   return {
-    controller: new AccountsController(accounts as never, aiState as never),
+    controller: new AccountsController(accounts as never),
     accounts,
-    aiState,
     user: { id: 'user-1' } as never,
   };
 }
 
-describe('AccountsController AI state routes', () => {
-  it('serves and replaces account variables for the current user', async () => {
+describe('AccountsController', () => {
+  it('lists accounts for the current user', async () => {
     const h = harness();
-    await expect(h.controller.aiVariables(h.user, 'acc-1')).resolves.toEqual({
-      accountId: 'acc-1',
-      variables: { promo: 'spring' },
-    });
-    expect(h.aiState.variables).toHaveBeenCalledWith('user-1', 'acc-1');
+    await expect(h.controller.list(h.user)).resolves.toEqual([]);
+    expect(h.accounts.list).toHaveBeenCalledWith('user-1');
+  });
 
-    const body = { variables: { promo: 'autumn' } };
-    await h.controller.setAiVariables(h.user, 'acc-1', body);
-    expect(h.aiState.setVariables).toHaveBeenCalledWith(
+  it('activates the account for the current user', async () => {
+    const h = harness();
+    await expect(h.controller.activate(h.user, 'acc-1')).resolves.toEqual({
+      id: 'acc-1',
+    });
+    expect(h.accounts.activate).toHaveBeenCalledWith('user-1', 'acc-1');
+  });
+
+  it('parses the session revoke flag on delete', async () => {
+    const h = harness();
+    await h.controller.detachSession(h.user, 'acc-1', 'ses-1', 'true');
+    expect(h.accounts.detachSession).toHaveBeenCalledWith(
       'user-1',
       'acc-1',
-      body,
+      'ses-1',
+      true,
     );
   });
 
-  it('serves and upserts per-chat settings with the thread id', async () => {
+  it('pins a session as the active transport', async () => {
     const h = harness();
-    await h.controller.aiChatSettings(h.user, 'acc-1', '42', '7');
-    expect(h.aiState.chatSettings).toHaveBeenCalledWith(
+    await h.controller.activateSession(h.user, 'acc-1', 'ses-1');
+    expect(h.accounts.activateSession).toHaveBeenCalledWith(
       'user-1',
       'acc-1',
-      '42',
-      '7',
-    );
-
-    const body = { threadId: 7, settings: { typing: 'natural' } };
-    await h.controller.setAiChatSettings(h.user, 'acc-1', '42', body);
-    expect(h.aiState.setChatSettings).toHaveBeenCalledWith(
-      'user-1',
-      'acc-1',
-      '42',
-      body,
+      'ses-1',
     );
   });
 });

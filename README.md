@@ -6,6 +6,7 @@ Monorepo (Bun workspaces + Turborepo):
 | --- | --- |
 | `apps/dashboard` | Next.js 16 messenger UI (App Router, Tailwind 4, Biome) |
 | `apps/api` | NestJS 12 API, ESM, Vitest — http://localhost:4001 |
+| `apps/eve` | Eve 1.5.0 agent process (personas, LLM turns, memory) — http://localhost:4020 |
 | `packages/database` | Prisma 7 + SQLite (`@repo/database`) |
 
 ## Getting started
@@ -20,8 +21,9 @@ bun run dev
 - Dashboard: http://localhost:4000 (fixed port — it will not auto-pick another one)
 - API: http://localhost:4001 (`GET /health` checks the database)
 - Swagger UI: http://localhost:4001/docs (OpenAPI JSON: `/docs-json`)
+- Eve: http://localhost:4020 (`GET /eve/v1/health`)
 
-`bun run dev` starts both apps. There is **no local registration or login**: the
+`bun run dev` starts all three processes. There is **no local registration or login**: the
 app is single-user, and every request runs as `DEFAULT_USER_ID` (default
 `local`). Telegram accounts are added from the sidebar with phone code, QR login
 or a tdata archive. See [`apps/dashboard/README.md`](apps/dashboard/README.md)
@@ -69,50 +71,37 @@ socket.on('auth.qr.updated', ...); socket.on('auth.done', ...);
 `DEFAULT_USER_ID` selects the local user row (default `local`); it is created on
 demand. See `apps/api/.env.example`.
 
-## AI, souls and MCP
+## Eve (the only LLM stack)
 
-The app has a local AI layer: an agent with 38 Telegram/app tools, one "soul"
-(persona + autopilot) per account, two-level memory, skills, automations, a
-shared soul-creator bot and one assistant bot per account, plus an MCP server for
-external clients. Everything shares one tool registry and one permission policy;
-`dryRun` is on by default, so writes are simulated.
+All model-driven behaviour belongs to **Eve**, a local girl-agent style persona
+engine: `apps/eve` runs the turn loop on `:4020`, and `apps/api/src/eve` is its
+Telegram-facing half (personas, account bindings, chat allowlist, context
+snapshots, durable events, dry run).
 
-Configure an OpenAI-compatible provider in `apps/api/.env` or in
-AI → Настройки (the UI value wins; the key is encrypted at rest):
+Configure any OpenAI-compatible endpoint in `apps/api/.env`:
 
 ```dotenv
 AI_BASE_URL=https://api.deepseek.com/v1
 AI_MODEL=deepseek-chat
 AI_FAST_MODEL=deepseek-chat
 AI_API_KEY=sk-...
-# optional: generated on first boot when empty
-MCP_TOKEN=
+# optional embedding model for memory ranking
+AI_EMBED_MODEL=
+# shared secret for /internal/eve/*
+EVE_TOKEN=
 ```
 
-Open <http://localhost:4000/ai>: Агент, Души, Скиллы, Автоматизации, Боты and
-Настройки. The Настройки tab has the provider test button, permission toggles,
-chat/account allowlists and the MCP endpoint + token (copy/rotate).
+Open <http://localhost:4000/eve> to create a persona, bind Telegram accounts and
+allow chats. `EVE_DRY_RUN=true` runs a full turn without any Telegram delivery.
+Details: [`docs/eve/README.md`](docs/eve/README.md).
 
-To connect an MCP client (Claude Desktop, Codex, Orca, a custom agent), use the
-Streamable HTTP URL and the Bearer token from AI → Настройки:
+Speech-to-text for voice notes is env-only (`STT_BASE_URL`, `STT_MODEL`,
+`STT_API_KEY`, `STT_ENGINE`, ...); with no engine configured the transcribe
+endpoint answers "not configured" instead of failing.
 
-```json
-{
-  "mcpServers": {
-    "combain-telegram": {
-      "type": "http",
-      "url": "http://127.0.0.1:4001/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
-    }
-  }
-}
-```
-
-Safety defaults: `dryRun` on, `sendUnknown`/`delete`/`admin`/`policy` off, soul
-autopilot `off` with an empty allowlist, bots answer only the app's account
-owners (set an owner id when no account is attached), and API keys/bot tokens are
-encrypted and masked. The API is single-user and has no auth (only `/mcp` checks
-the Bearer token) — keep it on loopback. Details: [`docs/ai.md`](docs/ai.md).
+The old Soul/autopilot/provider/MCP/bot/automation layer and the `n8n` proxy were
+removed. The API is single-user and has no auth (only `/internal/eve/*` checks
+`EVE_TOKEN`) — keep it on loopback.
 
 ## Scripts
 
@@ -138,11 +127,10 @@ upgrading both.
 ## Design
 
 - [`docs/architecture.md`](docs/architecture.md) — multi-account model, stack,
-  data model, API/WS surface, AI/MCP layer, phases.
+  data model, API/WS surface, Eve and speech, phases.
 - [`docs/auth.md`](docs/auth.md) — phone, QR and tdata login flows, error map,
   session security.
-- [`docs/ai.md`](docs/ai.md) — souls, memory, skills, automations, bots, the
-  agent, MCP and its permission policy.
+- [`docs/eve/`](docs/eve/README.md) — the Eve engine, its API and memory.
 - [`inspiration/README.md`](inspiration/README.md) — reference clients and the
   functional backlog.
 

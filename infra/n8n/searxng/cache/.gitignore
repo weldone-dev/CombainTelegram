@@ -1,4 +1,0 @@
-# Disposable SearXNG cache, bind-mounted at /var/cache/searxng.
-# Contents are re-created automatically; nothing here needs a backup.
-*
-!.gitignore

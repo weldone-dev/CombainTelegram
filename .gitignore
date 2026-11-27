@@ -56,9 +56,7 @@ yarn-error.log*
 # TypeScript incremental build info
 *.tsbuildinfo
 
-# Self-hosted n8n runtime state (see infra/n8n/README.md)
-infra/n8n/data/*
+# llm-proxy runtime traces (see infra/llm-proxy/README.md)
+infra/llm-proxy/data/llm-traces/*
 # keep the empty trace directory around; its contents are runtime data
-!infra/n8n/data/llm-traces/
-infra/n8n/data/llm-traces/*
-!infra/n8n/data/llm-traces/.gitkeep
+!infra/llm-proxy/data/llm-traces/.gitkeep

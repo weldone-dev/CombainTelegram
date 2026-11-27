@@ -10,7 +10,6 @@ import { Avatar } from "../avatar";
 import { EngineBadge } from "../engine-badge";
 import { SessionsModal } from "../messenger/sessions-modal";
 import { ProxyInfo } from "../proxy-info";
-import { AccountAiModal } from "./account-ai-modal";
 import { useAppData } from "./app-data";
 import { TdlibAccountPanel } from "./tdlib-account-panel";
 
@@ -31,7 +30,6 @@ export function AccountsPage() {
     null,
   );
   const [tdlibAccountId, setTdlibAccountId] = useState<string | null>(null);
-  const [aiAccount, setAiAccount] = useState<AccountView | null>(null);
   const [proxyList, setProxyList] = useState<ProxyView[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -236,13 +234,6 @@ export function AccountsPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setAiAccount(account)}
-                      className="rounded-md border border-sky-800/70 px-2.5 py-1.5 text-xs text-sky-300 transition-colors hover:border-sky-500 hover:text-sky-200"
-                    >
-                      Настройки ИИ
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => void removeAccount(account)}
                       disabled={deletingId === account.id}
                       className="rounded-md border border-red-900/60 px-2.5 py-1.5 text-xs text-red-300 transition-colors hover:border-red-600 disabled:opacity-40"
@@ -274,14 +265,6 @@ export function AccountsPage() {
           onUpdated={upsertAccount}
           onNotice={showNotice}
           onAccountRemoved={removeAccountLocally}
-        />
-      )}
-
-      {aiAccount && (
-        <AccountAiModal
-          account={aiAccount}
-          onClose={() => setAiAccount(null)}
-          onNotice={showNotice}
         />
       )}
     </div>

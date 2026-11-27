@@ -553,7 +553,7 @@ describe('EveEventsService recording', () => {
 
     subject.next({
       userId: 'local',
-      event: 'ai.thinking',
+      event: 'typing',
       payload: { accountId: ACCOUNT, chatId: CHAT },
     });
     subject.next({

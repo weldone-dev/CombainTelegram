@@ -165,7 +165,7 @@ export function parseFolderId(value: unknown): number | undefined {
 export type TypingSendOption = 'auto' | 'off' | number;
 
 /**
- * `typing` of a send: `auto` applies the soul's typing policy, `off` sends
+ * `typing` of a send: `auto` applies the persona's typing policy, `off` sends
  * instantly, and a number is an explicit simulation in milliseconds. A missing
  * value keeps the historical behaviour (no typing at all).
  */

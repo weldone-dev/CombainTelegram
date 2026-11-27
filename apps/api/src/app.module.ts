@@ -4,12 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AccountsModule } from './accounts/accounts.module.js';
-import { AiModule } from './ai/ai.module.js';
-import { AiAccountModule } from './ai-account/ai-account.module.js';
-import { AiProvidersModule } from './ai-providers/ai-providers.module.js';
-import { AiAccessModule } from './ai-access/ai-access.module.js';
 import { EveModule } from './eve/eve.module.js';
-import { N8nIntegrationsModule } from './integrations/n8n/n8n.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { LogsModule } from './logs/logs.module.js';
 import { LoggingInterceptor } from './logs/logging.interceptor.js';
@@ -22,7 +17,6 @@ import { RealtimeModule } from './realtime/realtime.module.js';
 import { TelegramModule } from './telegram/telegram.module.js';
 import { DefaultUserGuard } from './user-context/default-user.guard.js';
 import { UserContextModule } from './user-context/user-context.module.js';
-import { WorkflowsModule } from './workflows/workflows.module.js';
 
 @Module({
   imports: [
@@ -38,13 +32,7 @@ import { WorkflowsModule } from './workflows/workflows.module.js';
     AuthModule,
     ProxiesModule,
     PushModule,
-    AiProvidersModule,
-    AiModule,
-    AiAccountModule,
-    AiAccessModule,
     EveModule,
-    WorkflowsModule,
-    N8nIntegrationsModule,
   ],
   controllers: [AppController],
   providers: [

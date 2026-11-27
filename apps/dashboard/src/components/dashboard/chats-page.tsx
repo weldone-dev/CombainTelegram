@@ -1,14 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listChatRuns } from "../../lib/ai-api";
 import { ApiError, apiFetch, errorMessage } from "../../lib/api";
 import { accountName } from "../../lib/format";
-import {
-  mergeMessages,
-  putReasoning,
-  remapReasoning,
-} from "../../lib/message-merge";
+import { mergeMessages } from "../../lib/message-merge";
 import {
   deleteMessage as deleteMessageRequest,
   INITIAL_CHAT_LIMIT,
@@ -39,14 +34,12 @@ import {
 } from "../../lib/session-events";
 import { playChime, readSoundEnabled } from "../../lib/sound";
 import type {
-  AiReplyEvent,
   ChatFolderSelection,
   ChatPatch,
   ChatView,
   FolderView,
   ForwardResult,
   MessageHistoryView,
-  MessageReasoningView,
   MessageView,
   RealtimeDeletedEvent,
   RealtimeMessageEvent,
@@ -55,7 +48,6 @@ import type {
   TypingEntry,
 } from "../../lib/types";
 import { AccountsSidebar } from "../messenger/accounts-sidebar";
-import { AiAccessProvider } from "../messenger/ai-access-store";
 import { ChatList } from "../messenger/chat-list";
 import { ChatWindow } from "../messenger/chat-window";
 import { useAppData } from "./app-data";
@@ -114,11 +106,6 @@ export function ChatsPage() {
   chatsRef.current = chats;
   const messagesRef = useRef<MessageView[]>([]);
   messagesRef.current = messages;
-  const [reasoningByMessage, setReasoningByMessage] = useState<
-    Map<number, MessageReasoningView>
-  >(() => new Map());
-  const reasoningRef = useRef(reasoningByMessage);
-  reasoningRef.current = reasoningByMessage;
   /** `<accountId>:<chatId>` whose transcript is currently in `messagesRef`. */
   const messagesChatRef = useRef<string | null>(null);
   const selectedAccountIdRef = useRef<string | null>(null);
@@ -276,8 +263,8 @@ export function ChatsPage() {
   }, []);
 
   /**
-   * Merges live and fetched bubbles and keeps the local reasoning map in sync
-   * when a temporary id is replaced by the real Telegram id.
+   * Merges live and fetched bubbles, remapping a temporary Telegram id to the
+   * canonical one so a late reply is merged instead of duplicated.
    */
   const applyMessages = useCallback(
     (
@@ -287,24 +274,7 @@ export function ChatsPage() {
       const result = mergeMessages(messagesRef.current, incoming, options);
       messagesRef.current = result.messages;
       setMessages(result.messages);
-      if (result.remapped.size > 0) {
-        const nextReasoning = remapReasoning(
-          reasoningRef.current,
-          result.remapped,
-        );
-        reasoningRef.current = nextReasoning;
-        setReasoningByMessage(nextReasoning);
-      }
       return result;
-    },
-    [],
-  );
-
-  const rememberReasoning = useCallback(
-    (messageId: number, entry: MessageReasoningView) => {
-      const next = putReasoning(reasoningRef.current, messageId, entry);
-      reasoningRef.current = next;
-      setReasoningByMessage(next);
     },
     [],
   );
@@ -320,8 +290,6 @@ export function ChatsPage() {
         messagesChatRef.current = chatKey;
         messagesRef.current = [];
         setMessages([]);
-        reasoningRef.current = new Map();
-        setReasoningByMessage(new Map());
       }
       setNextOffsetId(null);
       setMessagesLoading(true);
@@ -896,87 +864,9 @@ export function ChatsPage() {
     void loadMessages(selectedAccountId, selectedChatId, newerThanId);
   }, [selectedAccountId, selectedChatId, loadMessages]);
 
-  // One request per opened chat decorates every bot bubble with its run.
-  useEffect(() => {
-    if (selectedAccountId === null || selectedChatId === null) {
-      reasoningRef.current = new Map();
-      setReasoningByMessage(new Map());
-      return;
-    }
-    let active = true;
-    reasoningRef.current = new Map();
-    setReasoningByMessage(new Map());
-    listChatRuns(selectedAccountId, selectedChatId)
-      .then(({ runs }) => {
-        if (!active) return;
-        const next = new Map<number, MessageReasoningView>();
-        for (const run of runs) {
-          const reasoning = run.reasoning?.trim();
-          if (!reasoning || run.messageIds.length === 0) continue;
-          const messageId = Number(run.messageIds[run.messageIds.length - 1]);
-          if (!Number.isFinite(messageId) || next.has(messageId)) continue;
-          // A run can send several bubbles; the block goes under the last one.
-          next.set(messageId, {
-            runId: run.id,
-            reasoning,
-            bubbles: run.messageIds.length,
-            createdAt: run.createdAt,
-          });
-        }
-        // Keep a reasoning that arrived live while the request was in flight,
-        // but never let one run decorate two bubbles: the loaded mapping wins.
-        const runIds = new Set([...next.values()].map((value) => value.runId));
-        for (const [messageId, value] of reasoningRef.current) {
-          if (next.has(messageId) || runIds.has(value.runId)) continue;
-          next.set(messageId, value);
-          runIds.add(value.runId);
-        }
-        reasoningRef.current = next;
-        setReasoningByMessage(next);
-      })
-      .catch(() => {
-        // Reasoning is decorative: a failed request renders no blocks.
-      });
-    return () => {
-      active = false;
-    };
-  }, [selectedAccountId, selectedChatId]);
-
   // Realtime events are published to the shared bus by the app-wide socket.
   useEffect(() => {
     return subscribeRealtime(({ event, payload }) => {
-      if (event === "ai.reply") {
-        const data = payload as AiReplyEvent;
-        if (data.accountId !== selectedAccountId) return;
-        const message = data.message;
-        // The autopilot emits ai.reply after sending the bubble. Telegram also
-        // reports it as message.new; a slow TDLib send may carry a temporary id
-        // in one of the two events, so the merge matches by id *and* by a
-        // signature and moves the reasoning to the surviving bubble.
-        if (data.chatId === selectedChatId && selectedAccountId !== null) {
-          messagesChatRef.current = `${selectedAccountId}:${data.chatId}`;
-          const merged = applyMessages(message, { preferIncoming: true });
-          const canonicalId = merged.canonicalId ?? Number(message.id);
-          const reasoning = data.reasoning?.trim();
-          if (reasoning && Number.isFinite(canonicalId)) {
-            rememberReasoning(canonicalId, {
-              runId: data.runId,
-              reasoning,
-              bubbles: 1,
-              createdAt: new Date().toISOString(),
-            });
-          }
-        }
-        setChats((previous) =>
-          previous.map((chat) =>
-            chat.id === data.chatId
-              ? { ...chat, lastMessage: message, unreadCount: 0 }
-              : chat,
-          ),
-        );
-        return;
-      }
-
       if (event === "message.new") {
         const data = payload as RealtimeMessageEvent;
         const message = data.message;
@@ -1060,10 +950,6 @@ export function ChatsPage() {
           );
           messagesRef.current = nextMessages;
           setMessages(nextMessages);
-          const nextReasoning = new Map(reasoningRef.current);
-          for (const id of deleted) nextReasoning.delete(id);
-          reasoningRef.current = nextReasoning;
-          setReasoningByMessage(nextReasoning);
         }
         return;
       }
@@ -1100,7 +986,7 @@ export function ChatsPage() {
         });
       }
     });
-  }, [selectedAccountId, selectedChatId, applyMessages, rememberReasoning]);
+  }, [selectedAccountId, selectedChatId, applyMessages]);
 
   // Drop expired "typing" indicators even if no cancel event arrives.
   useEffect(() => {
@@ -1192,67 +1078,62 @@ export function ChatsPage() {
           onRefresh={() => void reloadAccounts()}
         />
 
-        <AiAccessProvider accountId={selectedAccount?.id ?? null}>
-          <ChatList
-            hasAccount={Boolean(selectedAccount)}
-            chats={chats}
-            loading={chatsLoading}
-            error={chatsError}
-            selectedId={selectedChatId}
-            onSelect={handleSelectChat}
-            accountLabel={
-              selectedAccount
-                ? accountName(selectedAccount)
-                : "Аккаунт не выбран"
-            }
-            accountId={selectedAccount?.id ?? null}
-            onRefresh={refreshChats}
-            folders={folders}
-            foldersLoading={foldersLoading}
-            selectedFolder={folder}
-            onSelectFolder={handleSelectFolder}
-            canLoadMore={
-              nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
-            }
-            loadingMore={chatsLoading}
-            onLoadMore={loadMoreChats}
-            onUpdateChat={applyChatPatch}
-            onMarkRead={markChatRead}
-            onClearHistory={clearChatHistory}
-            onDeleteChat={deleteChatRow}
-            onReadAll={markAllChatsRead}
-            onOpenChat={openChat}
-            onOpenMessage={openMessage}
-            onResolveUsername={resolveAndOpen}
-          />
+        <ChatList
+          hasAccount={Boolean(selectedAccount)}
+          chats={chats}
+          loading={chatsLoading}
+          error={chatsError}
+          selectedId={selectedChatId}
+          onSelect={handleSelectChat}
+          accountLabel={
+            selectedAccount ? accountName(selectedAccount) : "Аккаунт не выбран"
+          }
+          accountId={selectedAccount?.id ?? null}
+          onRefresh={refreshChats}
+          folders={folders}
+          foldersLoading={foldersLoading}
+          selectedFolder={folder}
+          onSelectFolder={handleSelectFolder}
+          canLoadMore={
+            nextChatLimit(chatLimit) !== null && chats.length >= chatLimit
+          }
+          loadingMore={chatsLoading}
+          onLoadMore={loadMoreChats}
+          onUpdateChat={applyChatPatch}
+          onMarkRead={markChatRead}
+          onClearHistory={clearChatHistory}
+          onDeleteChat={deleteChatRow}
+          onReadAll={markAllChatsRead}
+          onOpenChat={openChat}
+          onOpenMessage={openMessage}
+          onResolveUsername={resolveAndOpen}
+        />
 
-          <ChatWindow
-            account={selectedAccount}
-            chat={selectedChat}
-            chats={chats}
-            messages={messages}
-            loading={messagesLoading}
-            error={messagesError}
-            nextOffsetId={nextOffsetId}
-            loadingMore={loadingMore}
-            reasoningByMessage={reasoningByMessage}
-            typing={chatTyping}
-            onLoadMore={() => void loadMore()}
-            onSend={(text, replyToId) => sendMessage(text, replyToId)}
-            onSendMedia={(file, caption, replyToId) =>
-              sendMedia(file, caption, replyToId)
-            }
-            onEdit={(messageId, text) => void editMessage(messageId, text)}
-            onMessageUpdated={replaceMessage}
-            onDelete={(messageId) => void deleteMessage(messageId)}
-            onDeleteMany={deleteMessages}
-            onForward={forwardMessages}
-            onTyping={() => void sendTyping()}
-            onRead={handleRead}
-            onOpenChat={handleSelectChat}
-            focusMessage={focusedMessage}
-          />
-        </AiAccessProvider>
+        <ChatWindow
+          account={selectedAccount}
+          chat={selectedChat}
+          chats={chats}
+          messages={messages}
+          loading={messagesLoading}
+          error={messagesError}
+          nextOffsetId={nextOffsetId}
+          loadingMore={loadingMore}
+          typing={chatTyping}
+          onLoadMore={() => void loadMore()}
+          onSend={(text, replyToId) => sendMessage(text, replyToId)}
+          onSendMedia={(file, caption, replyToId) =>
+            sendMedia(file, caption, replyToId)
+          }
+          onEdit={(messageId, text) => void editMessage(messageId, text)}
+          onMessageUpdated={replaceMessage}
+          onDelete={(messageId) => void deleteMessage(messageId)}
+          onDeleteMany={deleteMessages}
+          onForward={forwardMessages}
+          onTyping={() => void sendTyping()}
+          onRead={handleRead}
+          onOpenChat={handleSelectChat}
+          focusMessage={focusedMessage}
+        />
       </div>
     </div>
   );

@@ -1,0 +1,73 @@
+# Standalone llm-proxy: OpenAI-compatible shim in front of OpenCode Go.
+#
+# It exists because OpenCode Go rejects requests without a stable
+# `x-opencode-session` header, and most OpenAI-compatible clients (girl-agent,
+# n8n's former Assistant) cannot set custom headers. The proxy adds the header
+# (and the real key) and forwards everything else untouched.
+#
+#   cp .env.example .env   # optional: all values below have defaults
+#   docker compose up -d --build
+#   docker compose ps
+#   curl -s http://127.0.0.1:4100/healthz
+#
+# Published on all host interfaces: clients inside other containers reach it
+# as http://host.docker.internal:4100, browsers and curl as 127.0.0.1:4100.
+# Never expose this port to the internet: it forwards a live paid credential.
+#
+# State: only ./data/llm-traces (opt-in request/response traces, gitignored).
+
+name: llm-proxy
+
+services:
+  llm-proxy:
+    build: .
+    container_name: llm-proxy
+    restart: unless-stopped
+    ports:
+      - "4100:4000"
+    environment:
+      PORT: "4000"
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/inference/go/openai/v1}
+      # Fallback only - normally the token is read live from opencode.db below.
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      # Stable opaque id sent as x-opencode-session. OpenCode Go requires one
+      # per client; the default keeps the existing rate-limit/trace identity.
+      OPENCODE_SESSION: ${OPENCODE_SESSION:-combain-n8n}
+      OPENCODE_DB_PATH: /data/opencode/opencode.db
+      # Opt-in body tracing (see README). Set LLM_TRACE_DIR to an empty string
+      # in .env to switch tracing off completely.
+      LLM_TRACE_DIR: ${LLM_TRACE_DIR-/data/llm-traces}
+      LLM_TRACE_KEEP_DAYS: ${LLM_TRACE_KEEP_DAYS:-7}
+    volumes:
+      # Live OpenCode Go token: the opencode CLI refreshes this file and keeps
+      # its WAL open, so the whole directory is mounted read-only (SQLite needs
+      # the -shm/-wal siblings; a file-only ro mount fails with "attempt to
+      # write a readonly database"). Re-read every 60 s - no restart needed
+      # after a CLI re-login. OPTIONAL: without it the proxy falls back to
+      # OPENCODE_API_KEY from .env. On another machine point OPENCODE_DB_DIR at
+      # that user's ~/.local/share/opencode (or drop the volume entirely).
+      - ${OPENCODE_DB_DIR:-/home/roman/.local/share/opencode}:/data/opencode:ro
+      # Request/response traces, one file per UTC day. Gitignored and safe to
+      # delete at any time.
+      - ./data/llm-traces:/data/llm-traces
+    extra_hosts:
+      # Lets the proxy (and future peers) reach the host by name instead of a
+      # hardcoded LAN IP.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m

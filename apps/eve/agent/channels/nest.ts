@@ -546,7 +546,7 @@ interface MediaRef {
 
 const IMAGE_MEDIA = new Set(['photo', 'sticker']);
 const VIDEO_MEDIA = new Set(['video', 'video_note']);
-/** Same ceiling as the Nest autopilot: 5 MB per image. */
+/** Same ceiling as the Nest preview pipeline: 5 MB per image. */
 const MAX_MEDIA_BYTES = 5 * 1024 * 1024;
 
 function mediaRefOf(media: unknown, messageId: number): MediaRef | null {
@@ -560,7 +560,7 @@ function mediaRefOf(media: unknown, messageId: number): MediaRef | null {
   }
   if (!kind) return null;
   // Animated stickers and every video become a 3x3 frame collage, exactly like
-  // the dashboard autopilot does: the model sees the motion, not one frame.
+  // the dashboard preview does: the model sees the motion, not one frame.
   if (VIDEO_MEDIA.has(kind) || (kind === 'sticker' && info.isAnimated === true)) {
     return { messageId, mimeType: 'image/jpeg', frames: true };
   }
@@ -1657,7 +1657,7 @@ export default defineChannel<NestState, { state: NestState }>({
       );
       rememberImage(state, currentMedia);
       // A follow-up like "что на фото?" has no media of its own; attach the last
-      // image of this chat for a short window, like the Nest autopilot does.
+      // image of this chat for a short window, like the Nest media cache does.
       const attachedMedia = currentMedia ?? recentImage(state);
 
       const send = async () => {

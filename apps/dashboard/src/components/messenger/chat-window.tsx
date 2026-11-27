@@ -34,26 +34,19 @@ import {
 import { subscribeRealtime } from "../../lib/realtime-bus";
 import type {
   AccountView,
-  AiReplyEvent,
-  AiThinkingEvent,
   ChatView,
   MessagePollView,
   MessageReactionView,
-  MessageReasoningView,
   MessageTranscriptionView,
   MessageView,
   RealtimeMessageEvent,
   TypingEntry,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
-import { AiAccessMenu } from "./ai-access-menu";
-import { useAiAccess } from "./ai-access-store";
-import { ChatAiChip } from "./chat-ai-chip";
 import { ChatInfoPanel } from "./chat-info-panel";
 import { CommentThreadDrawer } from "./comment-thread-drawer";
 import { ForwardModal } from "./forward-modal";
 import { MessageText } from "./message-text";
-import { ReasoningBlock } from "./reasoning-block";
 import {
   AnimationBubble,
   AudioBubble,
@@ -61,7 +54,6 @@ import {
   VideoBubble,
   VideoNoteBubble,
 } from "./sticker-bubble";
-import { ThinkingStrip } from "./thinking-strip";
 import { VoiceBubble } from "./voice-bubble";
 
 /** Emoji offered by the inline reaction picker. */
@@ -137,7 +129,6 @@ export function ChatWindow({
   error,
   nextOffsetId,
   loadingMore,
-  reasoningByMessage,
   typing,
   onLoadMore,
   onSend,
@@ -161,8 +152,6 @@ export function ChatWindow({
   error: string | null;
   nextOffsetId: number | null;
   loadingMore: boolean;
-  /** Local-only run reasoning, already merged onto the canonical bubble ids. */
-  reasoningByMessage: Map<number, MessageReasoningView>;
   typing: TypingEntry[];
   onLoadMore: () => void;
   onSend: (text: string, replyToId?: number) => Promise<void>;
@@ -209,23 +198,8 @@ export function ChatWindow({
   const [sending, setSending] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [threadFor, setThreadFor] = useState<MessageView | null>(null);
-  const [aiMenu, setAiMenu] = useState<{ x: number; y: number } | null>(null);
-  const [showReasoning, setShowReasoning] = useState(true);
   /** Debug-only AI frame collages, off/on per browser (default on). */
   const [showAiFrames, setShowAiFrames] = useState(true);
-  const [thinking, setThinking] = useState<{
-    runId: string;
-    text: string;
-    phase: "streaming" | "waiting";
-  } | null>(null);
-  const thinkingDeadlineRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const thinkingRef = useRef(thinking);
-  thinkingRef.current = thinking;
-  const reasoningRef = useRef(reasoningByMessage);
-  reasoningRef.current = reasoningByMessage;
-  const { error: aiError, statusFor } = useAiAccess();
   const [threadCounts, setThreadCounts] = useState<Map<number, number>>(
     () => new Map(),
   );
@@ -274,150 +248,6 @@ export function ChatWindow({
   const accountId = account?.id ?? null;
   const chatId = chat?.id ?? null;
 
-  const clearThinking = useCallback(() => {
-    if (thinkingDeadlineRef.current) {
-      clearTimeout(thinkingDeadlineRef.current);
-      thinkingDeadlineRef.current = null;
-    }
-    thinkingRef.current = null;
-    setThinking(null);
-  }, []);
-
-  // `done` only means the reasoning is complete; the answer is still being
-  // generated (and may run more tool rounds). The safety deadline therefore
-  // covers the whole run up to the answer, not one reasoning event.
-  const armThinkingDeadline = useCallback(() => {
-    if (thinkingDeadlineRef.current) {
-      clearTimeout(thinkingDeadlineRef.current);
-    }
-    thinkingDeadlineRef.current = setTimeout(() => {
-      thinkingDeadlineRef.current = null;
-      setThinking(null);
-    }, 180_000);
-  }, []);
-
-  // Never show a stream from another chat or account.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: account/chat are the reset triggers
-  useEffect(() => {
-    clearThinking();
-  }, [accountId, chatId, clearThinking]);
-
-  useEffect(() => {
-    return () => {
-      if (thinkingDeadlineRef.current)
-        clearTimeout(thinkingDeadlineRef.current);
-    };
-  }, []);
-
-  // Local-only reasoning stream of the selected chat. Other accounts/chats and
-  // stale run ids are ignored; switching chat clears the buffer.
-  useEffect(() => {
-    if (!accountId || !chatId) return;
-    return subscribeRealtime(({ event, payload }) => {
-      // The answer is the only event that ends the strip: `done` means the
-      // reasoning finished, not that the model is ready.
-      if (event === "ai.reply") {
-        const data = payload as AiReplyEvent;
-        if (data.accountId !== accountId || data.chatId !== chatId) return;
-        if (thinkingRef.current?.runId === data.runId) clearThinking();
-        return;
-      }
-
-      if (event === "message.new") {
-        const data = payload as RealtimeMessageEvent;
-        if (data.accountId !== accountId || data.chatId !== chatId) return;
-        const active = thinkingRef.current;
-        if (!active || !data.message.outgoing) return;
-        const mappedRun = reasoningRef.current.get(
-          Number(data.message.id),
-        )?.runId;
-        // If the bubble is already known to belong to another run, keep the
-        // current strip; otherwise an outgoing bubble is the awaited answer.
-        if (mappedRun && mappedRun !== active.runId) return;
-        clearThinking();
-        return;
-      }
-
-      if (event !== "ai.thinking") return;
-      const data = payload as AiThinkingEvent;
-      if (data.accountId !== accountId || data.chatId !== chatId) return;
-
-      if (data.phase === "start") {
-        // A new tool round of the same run replaces the previous round's text
-        // (no separator) and returns the strip to «Агент думает…».
-        const next = {
-          runId: data.runId,
-          text: "",
-          phase: "streaming" as const,
-        };
-        thinkingRef.current = next;
-        setThinking(next);
-        armThinkingDeadline();
-        return;
-      }
-
-      if (data.phase === "done") {
-        const active = thinkingRef.current;
-        if (!active || active.runId !== data.runId) return;
-        const next = {
-          runId: data.runId,
-          text: data.reasoning?.trim() || active.text,
-          phase: "waiting" as const,
-        };
-        thinkingRef.current = next;
-        setThinking(next);
-        armThinkingDeadline();
-        return;
-      }
-
-      if (typeof data.delta !== "string") return;
-      // `delta` is a fragment accumulated since the previous emit; each event
-      // appends to the local buffer. The ref is the source of truth so React
-      // re-renders cannot append the same fragment twice.
-      const active = thinkingRef.current;
-      if (active && active.runId !== data.runId) return;
-      const next = {
-        runId: data.runId,
-        text: (active?.runId === data.runId ? active.text : "") + data.delta,
-        phase: "streaming" as const,
-      };
-      thinkingRef.current = next;
-      setThinking(next);
-      armThinkingDeadline();
-    });
-  }, [accountId, chatId, armThinkingDeadline, clearThinking]);
-
-  // The reasoning preference is per account and lives on this device only.
-  useEffect(() => {
-    if (!accountId) {
-      setShowReasoning(true);
-      return;
-    }
-    try {
-      setShowReasoning(
-        window.localStorage.getItem(`tg-show-reasoning:${accountId}`) !== "0",
-      );
-    } catch {
-      setShowReasoning(true);
-    }
-  }, [accountId]);
-
-  const toggleReasoning = useCallback(
-    (next: boolean) => {
-      setShowReasoning(next);
-      if (!accountId) return;
-      try {
-        window.localStorage.setItem(
-          `tg-show-reasoning:${accountId}`,
-          next ? "1" : "0",
-        );
-      } catch {
-        // Private mode or a blocked storage: the session still honours it.
-      }
-    },
-    [accountId],
-  );
-
   // The frame-collage switch is a device preference shared by all accounts.
   // It is read after mount so server and client markup stay identical.
   useEffect(() => {
@@ -450,9 +280,7 @@ export function ChatWindow({
     if (infoChatRef.current === id) return;
     infoChatRef.current = id;
     setInfoOpen(false);
-    setAiMenu(null);
-    clearThinking();
-  }, [chat, clearThinking]);
+  }, [chat]);
 
   const closeInfo = useCallback(() => setInfoOpen(false), []);
 
@@ -716,8 +544,6 @@ export function ChatWindow({
     // Enter and a click can land in the same tick: guard with a ref so the
     // same draft is never submitted twice.
     if (sendingRef.current) return;
-    // A user message cancels the live stream; the typed text is untouched.
-    clearThinking();
     sendingRef.current = true;
     setSending(true);
     const key = draftStorageKey(account.id, chat.id);
@@ -1095,7 +921,6 @@ export function ChatWindow({
                 : ` (${activeTyping[0]?.status})`}
             </span>
           )}
-          <ChatAiChip chatId={chat.id} chatTitle={chat.title} />
           <button
             type="button"
             onClick={toggleAiFrames}
@@ -1143,29 +968,10 @@ export function ChatWindow({
         </div>
       </div>
 
-      {aiError && (
-        <p
-          role="alert"
-          className="border-b border-red-900/60 bg-red-950/30 px-5 py-1 text-[11px] text-red-300"
-        >
-          {aiError}
-        </p>
-      )}
-
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: right-click only opens the AI menu; the same actions are in the keyboard-reachable header chip. */}
       <div
         ref={scrollRef}
         data-transcript-scroll
         onScroll={handleScroll}
-        onContextMenu={(event) => {
-          // Right-click on the empty transcript area: show the chat's AI actions.
-          if ((event.target as Element).closest("[data-message-id]")) return;
-          event.preventDefault();
-          setAiMenu({
-            x: Math.max(8, Math.min(event.clientX, window.innerWidth - 248)),
-            y: Math.max(8, Math.min(event.clientY, window.innerHeight - 240)),
-          });
-        }}
         className="flex-1 space-y-3 overflow-y-auto px-5 py-4"
       >
         {nextOffsetId !== null && (
@@ -1203,7 +1009,6 @@ export function ChatWindow({
           const poll = pollFor(message);
           const translation = translations.get(message.id);
           const transcript = transcripts.get(message.id);
-          const reasoning = reasoningByMessage.get(message.id);
           const reactionBusy = reactionPending.has(message.id);
           const voteBusy = votingId === message.id;
           // Telegram repeats the sticker emoji as the message text; the media
@@ -1453,13 +1258,6 @@ export function ChatWindow({
                               {translation.text}
                             </p>
                           )}
-                          {showReasoning && reasoning && (
-                            <ReasoningBlock
-                              reasoning={reasoning.reasoning}
-                              bubbles={reasoning.bubbles}
-                              createdAt={reasoning.createdAt}
-                            />
-                          )}
                         </>
                       )}
 
@@ -1663,14 +1461,6 @@ export function ChatWindow({
         </div>
       )}
 
-      {canWrite && thinking && (
-        <ThinkingStrip
-          key={thinking.runId}
-          text={thinking.text}
-          phase={thinking.phase}
-        />
-      )}
-
       {canWrite && (
         <form
           onSubmit={(event) => {
@@ -1796,16 +1586,6 @@ export function ChatWindow({
         />
       )}
 
-      {aiMenu && (
-        <AiAccessMenu
-          chatId={chat.id}
-          chatTitle={chat.title}
-          state={statusFor(chat.id)}
-          position={aiMenu}
-          onClose={() => setAiMenu(null)}
-        />
-      )}
-
       {infoOpen && (
         <ChatInfoPanel
           key={chat.id}
@@ -1814,8 +1594,6 @@ export function ChatWindow({
           chats={chats}
           onOpenChat={onOpenChat}
           onClose={closeInfo}
-          showReasoning={showReasoning}
-          onToggleReasoning={toggleReasoning}
           threadId={threadFor?.id ?? 0}
         />
       )}

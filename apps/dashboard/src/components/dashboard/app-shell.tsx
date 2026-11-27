@@ -17,12 +17,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/proxies", label: "Прокси", icon: <ProxyIcon /> },
   { href: "/chats", label: "Чаты", icon: <ChatsIcon /> },
   { href: "/logs", label: "Логи", icon: <LogsIcon /> },
-  { href: "/ai", label: "AI", icon: <AiIcon /> },
   { href: "/eve", label: "Eve", icon: <EveIcon /> },
   { href: "/eve/context", label: "Context", icon: <ContextIcon /> },
   { href: "/eve/schedules", label: "Schedules", icon: <SchedulesIcon /> },
-  { href: "/workflows", label: "Workflow", icon: <WorkflowIcon /> },
-  { href: "/settings", label: "Настройки", icon: <SettingsIcon /> },
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -30,14 +27,9 @@ const PAGE_TITLES: Record<string, string> = {
   "/proxies": "Прокси",
   "/chats": "Чаты",
   "/logs": "Логи",
-  "/ai": "AI",
   "/eve": "Eve",
   "/eve/context": "Eve · Context",
   "/eve/schedules": "Eve · Schedules",
-  "/workflows": "Workflow",
-  "/settings": "Настройки",
-  "/settings/ai": "Настройки · AI",
-  "/settings/workflows": "Настройки · Workflow",
 };
 
 /** Exact title first, then the longest matching route prefix. */
@@ -257,24 +249,6 @@ function ChatsIcon() {
   );
 }
 
-function AiIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="h-5 w-5"
-    >
-      <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" />
-      <circle cx="12" cy="12" r="3.2" />
-    </svg>
-  );
-}
-
 function EveIcon() {
   return (
     <svg
@@ -329,26 +303,6 @@ function SchedulesIcon() {
   );
 }
 
-function WorkflowIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="h-5 w-5"
-    >
-      <rect x="3" y="3" width="6" height="5" rx="1.2" />
-      <rect x="15" y="16" width="6" height="5" rx="1.2" />
-      <rect x="9" y="9.5" width="6" height="5" rx="1.2" />
-      <path d="M6 8v2.5a2 2 0 0 0 2 2h1M15 14.5V12a2 2 0 0 0-2-2h-1" />
-    </svg>
-  );
-}
-
 function LogsIcon() {
   return (
     <svg
@@ -363,24 +317,6 @@ function LogsIcon() {
     >
       <path d="M5 3.5h9l5 5V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" />
       <path d="M14 3.5V9h5M8 13h8M8 17h5" />
-    </svg>
-  );
-}
-
-function SettingsIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      className="h-5 w-5"
-    >
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.64 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.54h.01A1.7 1.7 0 0 0 10.04 3V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.43 9v.01A1.7 1.7 0 0 0 21 10.04h.01a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.56 1.03Z" />
     </svg>
   );
 }

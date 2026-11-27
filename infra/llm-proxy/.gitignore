@@ -1,0 +1,7 @@
+# Runtime traces: real conversation text, never commit.
+data/llm-traces/*
+# keep the empty trace directory around
+!data/llm-traces/.gitkeep
+
+# real environment overrides (may contain a token)
+.env

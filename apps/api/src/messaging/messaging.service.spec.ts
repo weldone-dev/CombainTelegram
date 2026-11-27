@@ -185,7 +185,6 @@ function createService(
   client: TelegramClient,
   speech?: { available(): boolean; transcribe: unknown } | null,
   frames?: { collage(input: { data: Buffer; mimeType: string }): Promise<Buffer | null> },
-  prisma?: { soul: { findUnique(args: unknown): Promise<unknown> } } | null,
 ): MessagingService {
   const accounts = {
     resolveSession: async () => ({ client }),
@@ -195,7 +194,6 @@ function createService(
     undefined,
     speech as never,
     frames as never,
-    prisma as never,
   );
 }
 
@@ -1100,23 +1098,9 @@ describe('sendMessage typing', () => {
     expect(typing).not.toHaveBeenCalled();
   });
 
-  it('applies the soul policy for typing: auto', async () => {
+  it('applies the default human-speed policy for typing: auto', async () => {
     const fake = createFakeClient();
-    const prisma = {
-      soul: {
-        findUnique: async () => ({
-          settings: JSON.stringify({
-            typingMode: 'on_compose',
-            typingSpeed: 300,
-            // A 1 ms window keeps the test fast; the clamp is unit-tested.
-            typingMinMs: 1,
-            typingMaxMs: 1,
-            typingHeartbeatMs: 4_000,
-          }),
-        }),
-      },
-    };
-    const service = createService(fake.client, null, undefined, prisma);
+    const service = createService(fake.client);
     const typing = vi
       .spyOn(service, 'sendTyping')
       .mockResolvedValue({ status: 'typing' });
@@ -1135,24 +1119,20 @@ describe('sendMessage typing', () => {
     expect(fake.sendText).toHaveBeenCalledTimes(1);
   });
 
-  it('honours an off policy with typing: auto', async () => {
+  it('treats an explicit 0 as no simulation', async () => {
     const fake = createFakeClient();
-    const prisma = {
-      soul: {
-        findUnique: async () => ({
-          settings: JSON.stringify({ typingMode: 'off' }),
-        }),
-      },
-    };
-    const service = createService(fake.client, null, undefined, prisma);
-    const typing = vi.spyOn(service, 'sendTyping');
+    const service = createService(fake.client);
+    const typing = vi
+      .spyOn(service, 'sendTyping')
+      .mockResolvedValue({ status: 'typing' });
 
     await service.sendMessage(USER_ID, ACCOUNT_ID, String(CHAT_ID), {
       text: 'привет',
-      typing: 'auto',
+      typing: 0,
     });
 
     expect(typing).not.toHaveBeenCalled();
+    expect(fake.sendText).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a junk typing value', async () => {

@@ -183,15 +183,6 @@ export interface MessageView {
   thread?: MessageThreadInfo | null;
 }
 
-/** Reasoning of one agent run attached to the bubble it produced. */
-export interface MessageReasoningView {
-  runId: string;
-  reasoning: string;
-  /** How many Telegram bubbles the run produced (the block sits under the last). */
-  bubbles: number;
-  createdAt: string;
-}
-
 export interface ChatView {
   id: number;
   type: string;
@@ -411,31 +402,6 @@ export interface RealtimeMessageEvent {
   sessionId: string;
   chatId: number;
   message: MessageView;
-}
-
-/** `ai.reply`: one bubble produced by the DM autopilot and its run metadata. */
-export interface AiReplyEvent {
-  accountId: string;
-  chatId: number;
-  text: string;
-  message: MessageView;
-  runId: string;
-  /** Local-only model reasoning; never sent to Telegram. */
-  reasoning: string | null;
-}
-
-/**
- * Live reasoning stream of the DM autopilot. `delta` is the fragment
- * accumulated since the previous emit (append it to the local buffer);
- * `done` repeats the final reasoning.
- */
-export interface AiThinkingEvent {
-  accountId: string;
-  chatId: number;
-  runId: string;
-  phase?: "start" | "done";
-  delta?: string;
-  reasoning?: string | null;
 }
 
 export interface RealtimeDeletedEvent {

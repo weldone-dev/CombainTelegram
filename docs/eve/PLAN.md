@@ -12,7 +12,8 @@
 - Каркас Nest-модуля `apps/api/src/eve` (guards, events, gateway, actions,
   memory/state endpoints).
 - Каркас `apps/eve` (agent, channel, memory provider).
-- `DmAutopilotService` пропускает аккаунты, привязанные к Eve.
+- Legacy AI/n8n (`Soul*`, autopilot, providers, MCP, bots, automations) удалены;
+  аккаунтам отвечает только Eve.
 - `apps/api` проходит `check-types`.
 
 Ещё не сделано: `bun install` для Eve, `eve build`, dashboard-страница,
@@ -59,6 +60,6 @@ Nest.
    чат в allowlist.
 3. Входящее в разрешённый чат попадает в Eve, ответ уходит через Nest и виден
    в веб-чате.
-4. `DmAutopilot` не отвечает для Eve-аккаунта.
+4. Отвечает только Eve; других AI-путей в API нет.
 5. Повторный вебхук не создаёт второй ответ.
 6. После рестарта Eve события восстанавливаются по cursor.

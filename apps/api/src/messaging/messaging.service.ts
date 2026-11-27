@@ -12,14 +12,8 @@ import {
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
 import { UpdatesService } from '../realtime/updates.service.js';
-import { SpeechService } from '../ai/speech.service.js';
-import type { TypingPolicy } from '../ai/typing.js';
-import {
-  DEFAULT_TYPING_POLICY,
-  parseTypingPolicyFromRaw,
-  typingPlan,
-} from '../ai/typing.js';
-import { PrismaService } from '../prisma/prisma.service.js';
+import { SpeechService } from './speech.service.js';
+import { DEFAULT_TYPING_POLICY, typingPlan } from './typing.js';
 import { raiseTelegramError, mapTelegramError } from '../auth/telegram-error.js';
 import { apiError, notFound } from '../common/api-error.js';
 import { emitLog } from '../logs/log-sink.js';
@@ -519,11 +513,6 @@ export class MessagingService {
     @Optional() private readonly td?: TdMessagingService,
     @Optional() private readonly speech?: SpeechService,
     @Optional() private readonly frames?: FramesService,
-    /**
-     * Only read for `typing: 'auto'` (the soul's typing policy). Optional so a
-     * unit test may build the service with a fake client only.
-     */
-    @Optional() private readonly prisma?: PrismaService,
     /**
      * Index of own outgoing messages. Optional so a unit test may build the
      * service with a fake client only; without it reactions on her messages
@@ -1319,8 +1308,8 @@ export class MessagingService {
   /**
    * Sends one text message.
    *
-   * `typing` is optional and off by default, so every non-AI caller keeps the
-   * old behaviour. `auto` applies the soul's explicit typing policy, a number
+   * `typing` is optional and off by default, so every caller keeps the old
+   * behaviour. `auto` applies the default human-speed typing policy, a number
    * is an explicit simulation in milliseconds, `off` sends immediately.
    */
   async sendMessage(
@@ -1344,7 +1333,7 @@ export class MessagingService {
     const quote = parseOptionalQuote(body.quote);
     const sessionId = parseOptionalSessionId(body.sessionId);
     const typing = parseTypingSendOption(body.typing);
-    const plan = await this.typingPlanFor(accountId, text, typing);
+    const plan = this.typingPlanFor(text, typing);
     if (plan.durationMs <= 0) {
       return this.sendMessageNow(userId, accountId, chatId, {
         text,
@@ -1378,31 +1367,16 @@ export class MessagingService {
     }
   }
 
-  /** Typing simulation of one send, from the explicit policy or the soul. */
-  private async typingPlanFor(
-    accountId: string,
+  /** Typing simulation of one send: the explicit policy or a sane default. */
+  private typingPlanFor(
     text: string,
     typing: ReturnType<typeof parseTypingSendOption>,
-  ): Promise<{ durationMs: number }> {
+  ): { durationMs: number } {
     if (typing === undefined || typing === 'off') return { durationMs: 0 };
     if (typeof typing === 'number') {
       return { durationMs: Math.min(60_000, Math.max(0, typing)) };
     }
-    return typingPlan(text, await this.soulTypingPolicy(accountId));
-  }
-
-  /** The soul's typing policy; the defaults when the account has none. */
-  private async soulTypingPolicy(accountId: string): Promise<TypingPolicy> {
-    if (!this.prisma) return DEFAULT_TYPING_POLICY;
-    try {
-      const soul = (await this.prisma.soul.findUnique({
-        where: { accountId },
-        select: { settings: true },
-      })) as { settings: string } | null;
-      return parseTypingPolicyFromRaw(soul?.settings);
-    } catch {
-      return DEFAULT_TYPING_POLICY;
-    }
+    return typingPlan(text, DEFAULT_TYPING_POLICY);
   }
 
   /** One send attempt on the active engine, no typing simulation. */

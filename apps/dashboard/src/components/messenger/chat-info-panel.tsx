@@ -33,12 +33,9 @@ import type {
 } from "../../lib/types";
 import { Avatar } from "../avatar";
 import { ChatAdminPanel } from "./chat-admin-panel";
-import { ChatAiTab } from "./chat-ai-tab";
-import { ChatAutomationsSection } from "./chat-automations-section";
+import { ChatEveMemoryTab } from "./chat-eve-memory-tab";
 import { ChatLogsTab } from "./chat-logs-tab";
-import { ChatMemoryTab } from "./chat-memory-tab";
 import { ChatRelationshipCard } from "./chat-relationship-card";
-import { ChatSkillsTab } from "./chat-skills-tab";
 
 /** Same storage key on purpose: one panel width per browser/device. */
 const INFO_PANEL_WIDTH_KEY = "tg-info-panel-width";
@@ -77,10 +74,7 @@ function currentViewportWidth(): number {
 
 type InfoTab =
   | "overview"
-  | "ai"
   | "memory"
-  | "skills"
-  | "automations"
   | ChatInfoMediaKind
   | "logs"
   | "similar"
@@ -150,8 +144,6 @@ export function ChatInfoPanel({
   chats,
   onOpenChat,
   onClose,
-  showReasoning,
-  onToggleReasoning,
   threadId = 0,
 }: {
   accountId: string;
@@ -160,9 +152,6 @@ export function ChatInfoPanel({
   chats: ChatView[];
   onOpenChat?: (chatId: number) => void;
   onClose: () => void;
-  /** Local-only reasoning preference, stored per account in localStorage. */
-  showReasoning?: boolean;
-  onToggleReasoning?: (next: boolean) => void;
   /** Forum topic or comment thread; `0` = the chat as a whole. */
   threadId?: number;
 }) {
@@ -436,10 +425,7 @@ export function ChatInfoPanel({
   const username = info?.username ?? chat.username;
   const tabs: Array<{ id: InfoTab; label: string }> = [
     { id: "overview", label: "Обзор" },
-    { id: "ai", label: "Доступ ИИ" },
     { id: "memory", label: "Память" },
-    { id: "skills", label: "Скиллы" },
-    { id: "automations", label: "Автоматизации" },
     { id: "media", label: "Медиа" },
     { id: "links", label: "Ссылки" },
     { id: "polls", label: "Опросы" },
@@ -605,56 +591,15 @@ export function ChatInfoPanel({
                     });
                 }}
               />
-              <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3 text-xs">
-                <input
-                  type="checkbox"
-                  checked={showReasoning ?? true}
-                  disabled={!onToggleReasoning}
-                  onChange={(event) =>
-                    onToggleReasoning?.(event.target.checked)
-                  }
-                  className="mt-0.5 h-3.5 w-3.5 accent-sky-500"
-                  autoComplete="off"
-                />
-                <span>
-                  <span className="block font-medium text-zinc-200">
-                    Показывать размышления в чате
-                  </span>
-                  <span className="mt-0.5 block text-[11px] text-zinc-500">
-                    Локальная настройка этого устройства. Собеседнику
-                    размышления не отправляются.
-                  </span>
-                </span>
-              </label>
             </div>
           )}
 
-          {tab === "ai" && (
-            <ChatAiTab
-              accountId={accountId}
-              chatId={chatId}
-              threadId={threadId}
-            />
-          )}
-
           {tab === "memory" && (
-            <ChatMemoryTab
+            <ChatEveMemoryTab
               accountId={accountId}
               chatId={chatId}
               threadId={threadId}
             />
-          )}
-
-          {tab === "skills" && (
-            <ChatSkillsTab
-              accountId={accountId}
-              chatId={chatId}
-              threadId={threadId}
-            />
-          )}
-
-          {tab === "automations" && (
-            <ChatAutomationsSection accountId={accountId} chatId={chatId} />
           )}
 
           {tab === "media" && (

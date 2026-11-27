@@ -4,6 +4,10 @@
 girl-agent-поведение. Telegram, SQLite, allowlist и фактическая отправка
 остаются в NestJS.
 
+Eve — единственный LLM-стек: старые Soul/autopilot, реестр провайдеров, скиллы,
+боты, автоматизации, MCP-эндпоинт и n8n удалены вместе с таблицами. Голос
+расшифровывает `SpeechService` в messaging-слое по env `STT_*`.
+
 ## Запуск
 
 ```bash

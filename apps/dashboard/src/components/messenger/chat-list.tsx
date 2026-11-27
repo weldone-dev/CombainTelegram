@@ -12,8 +12,6 @@ import type {
   FolderView,
 } from "../../lib/types";
 import { Avatar } from "../avatar";
-import { AiAccessMenu } from "./ai-access-menu";
-import { useAiAccess } from "./ai-access-store";
 import { ChatActionsMenu, type ChatMenuAction } from "./chat-actions-menu";
 import { ChatFolderTabs } from "./chat-folder-tabs";
 import { ChatSearchPanel } from "./chat-search-panel";
@@ -82,18 +80,12 @@ export function ChatList({
   const filterRef = useRef<HTMLInputElement>(null);
   const filterTouched = useRef(false);
   const [menuId, setMenuId] = useState<number | null>(null);
-  const [aiMenu, setAiMenu] = useState<{
-    chatId: number;
-    x: number;
-    y: number;
-  } | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [readAllBusy, setReadAllBusy] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [inChatSearchOpen, setInChatSearchOpen] = useState(false);
-  const { statusFor, error: aiError } = useAiAccess();
 
   // Folder state is per account; every account-scoped surface starts clean.
   // biome-ignore lint/correctness/useExhaustiveDependencies: resets on account switch
@@ -101,7 +93,6 @@ export function ChatList({
     setFilter("");
     filterTouched.current = false;
     setMenuId(null);
-    setAiMenu(null);
     setBusyId(null);
     setActionError(null);
     setInChatSearchOpen(false);
@@ -355,15 +346,6 @@ export function ChatList({
         </p>
       )}
 
-      {aiError && (
-        <p
-          role="alert"
-          className="border-b border-zinc-800 bg-red-950/40 px-4 py-2 text-[11px] text-red-300"
-        >
-          {aiError}
-        </p>
-      )}
-
       {hasAccount &&
         inChatSearchOpen &&
         selectedId !== null &&
@@ -412,33 +394,11 @@ export function ChatList({
         {visibleChats.map((chat) => {
           const active = chat.id === selectedId;
           const last = chat.lastMessage;
-          const ai = statusFor(chat.id);
-          const blocked = ai?.blocked ?? false;
           return (
-            // biome-ignore lint/a11y/noStaticElementInteractions: right-click opens the same AI menu that the row's ⋯ button and header chip expose.
             <div
               key={chat.id}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                setMenuId(null);
-                setAiMenu({
-                  chatId: chat.id,
-                  x: Math.max(
-                    8,
-                    Math.min(event.clientX, window.innerWidth - 248),
-                  ),
-                  y: Math.max(
-                    8,
-                    Math.min(event.clientY, window.innerHeight - 240),
-                  ),
-                });
-              }}
-              className={`flex items-stretch border-b border-zinc-800/60 border-l-2 transition-colors ${
-                blocked
-                  ? active
-                    ? "border-l-red-700/80 bg-red-950/45"
-                    : "border-l-red-700/80 bg-red-950/25 hover:bg-red-950/40"
-                  : `${active ? "border-l-transparent bg-sky-500/10" : "border-l-transparent hover:bg-zinc-800/60"}`
+              className={`flex items-stretch border-b border-zinc-800/60 border-l-2 border-l-transparent transition-colors ${
+                active ? "bg-sky-500/10" : "hover:bg-zinc-800/60"
               }`}
             >
               <button
@@ -464,31 +424,7 @@ export function ChatList({
                           📌
                         </span>
                       )}
-                      {blocked && (
-                        <span
-                          title={
-                            ai?.reason
-                              ? `ИИ заблокирован: ${ai.reason}`
-                              : "ИИ заблокирован"
-                          }
-                          className="shrink-0 text-red-400"
-                        >
-                          <AiBlockedIcon />
-                        </span>
-                      )}
-                      {!blocked && ai?.allowed && (
-                        <span
-                          title="ИИ разрешён"
-                          className="shrink-0 text-sky-400"
-                        >
-                          <AiSparkleIcon />
-                        </span>
-                      )}
-                      <span
-                        className={`truncate text-sm font-medium ${
-                          blocked ? "text-red-200" : "text-zinc-100"
-                        }`}
-                      >
+                      <span className="truncate text-sm font-medium text-zinc-100">
                         {chat.title}
                       </span>
                     </span>
@@ -497,11 +433,7 @@ export function ChatList({
                     </span>
                   </span>
                   <span className="mt-0.5 flex items-center justify-between gap-2">
-                    <span
-                      className={`truncate text-xs ${
-                        blocked ? "text-red-300/80" : "text-zinc-400"
-                      }`}
-                    >
+                    <span className="truncate text-xs text-zinc-400">
                       {last
                         ? last.text || `(${last.mediaType ?? "медиа"})`
                         : "Нет сообщений"}
@@ -576,18 +508,6 @@ export function ChatList({
         )}
       </div>
 
-      {aiMenu && (
-        <AiAccessMenu
-          chatId={aiMenu.chatId}
-          chatTitle={
-            chats.find((chat) => chat.id === aiMenu.chatId)?.title ?? "чат"
-          }
-          state={statusFor(aiMenu.chatId)}
-          position={{ x: aiMenu.x, y: aiMenu.y }}
-          onClose={() => setAiMenu(null)}
-        />
-      )}
-
       {newChatOpen && accountId && (
         <NewChatModal
           onResolve={onResolveUsername}
@@ -604,36 +524,5 @@ export function ChatList({
         />
       )}
     </section>
-  );
-}
-
-/** Small sparkle shown on a row where the AI is explicitly allowed. */
-function AiSparkleIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      className="h-3.5 w-3.5 fill-current"
-    >
-      <path d="M12 2.5 14 9l6.5 2-6.5 2-2 6.5-2-6.5L3.5 11 10 9z" />
-    </svg>
-  );
-}
-
-/** Red shield with a slash: unmistakable blacklist marker. */
-function AiBlockedIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      className="h-3.5 w-3.5 stroke-current"
-      fill="none"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M12 3 4.5 6v5.5c0 4.2 3 7.9 7.5 9.5 4.5-1.6 7.5-5.3 7.5-9.5V6z" />
-      <path d="m4 4 16 16" />
-    </svg>
   );
 }

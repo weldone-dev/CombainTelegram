@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { useState } from "react";
+import { getChatLogs } from "../../lib/chat-logs-api";
 import type { LogEntryView, LogLevel } from "../../lib/types";
-import { getChatLogs } from "./chat-ai-api";
 import {
   EmptyNote,
   formatStamp,

@@ -63,7 +63,7 @@ function messageFixture(
     topic_id: null,
     content: {
       _: 'messageText',
-      text: { _: 'formattedText', text: 'hello from the soul', entities: [] },
+      text: { _: 'formattedText', text: 'hello from Eve', entities: [] },
       link_preview: null,
       link_preview_options: null,
     },
