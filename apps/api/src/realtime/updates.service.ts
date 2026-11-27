@@ -1,12 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { OnModuleDestroy } from '@nestjs/common';
 import type { TelegramClient } from '@mtcute/node';
+import type { tl } from '@mtcute/node';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { ClientManagerService } from '../telegram/client-manager.service.js';
 import { resolveActiveSession } from '../accounts/active-session.js';
 import { toMessageView } from '../messaging/message-view.js';
 import { emitLog } from '../logs/log-sink.js';
 import { EventDeduplicator } from './dedupe.js';
+import {
+  markedPeerId,
+  reactionEventsFromRawUpdate,
+} from './reactions.js';
 import { RealtimeService } from './realtime.service.js';
 
 /** Minimal shape of mtcute's `Emitter<T>` (add/remove a listener). */
@@ -15,11 +20,43 @@ interface ListenerEmitter<T> {
   remove(listener: (value: T) => void): void;
 }
 
+interface RecentMessage {
+  outgoing: boolean;
+  /** Text/date for the deleted-message policy; absent when unknown. */
+  text?: string;
+  date?: string;
+}
+
 interface SessionState {
   accountId: string;
   sessionId: string;
   client: TelegramClient;
   disposers: Array<() => void>;
+  /** `${chatId}:${messageId}` → author facts for delete/reaction payloads. */
+  recent: Map<string, RecentMessage>;
+  /**
+   * Non-channel message id → chat id. Common (private/basic-group) message ids
+   * are unique for the account, while channel ids live in a per-channel space.
+   */
+  commonChats: Map<number, number>;
+}
+
+/** Upper bound of the in-memory message index per session. */
+const RECENT_MESSAGES_MAX = 2_000;
+/** How many old entries a trim drops at once. */
+const RECENT_MESSAGES_TRIM = 500;
+
+/**
+ * Keeps a Map bounded by insertion order: trims `batch` entries once `max` is
+ * exceeded. Both maps are caches, so dropping old entries is safe.
+ */
+function trimOldest<K, V>(map: Map<K, V>, max: number, batch: number): void {
+  if (map.size <= max) return;
+  let removed = 0;
+  for (const key of map.keys()) {
+    map.delete(key);
+    if (++removed >= batch) break;
+  }
 }
 
 /**
@@ -147,6 +184,8 @@ export class UpdatesService implements OnModuleDestroy {
             sessionId: session.id,
             client,
             disposers: [],
+            recent: new Map(),
+            commonChats: new Map(),
           };
           this.bind(state, userId);
           userSessions.set(session.id, state);
@@ -204,19 +243,41 @@ export class UpdatesService implements OnModuleDestroy {
 
     add(client.onNewMessage, (message) => {
       const chatId = message.chat.id;
-      if (!this.dedupe.shouldEmit(`${accountId}:${chatId}:${message.id}:new`)) {
-        return;
-      }
-      emit('message.new', {
-        accountId,
-        sessionId,
-        chatId,
-        message: toMessageView(message),
+      this.rememberMessage(state, chatId, message.id, message.isOutgoing, {
+        text: message.text,
+        date: message.date.toISOString(),
       });
+      // mtcute only exposes the quoted text for an explicit quote; a plain
+      // reply carries just the id. Fetch it before publishing, so Eve receives
+      // `replyToText` in the same event instead of a duplicate later.
+      void (async () => {
+        const view = toMessageView(message);
+        if (!view.replyToText && view.replyToId) {
+          try {
+            const [quoted] = await client.getMessages(chatId, [view.replyToId]);
+            if (quoted?.text) view.replyToText = quoted.text.slice(0, 300);
+          } catch {
+            // Deleted or inaccessible message: keep the id-only reply.
+          }
+        }
+        if (!this.dedupe.shouldEmit(`${accountId}:${chatId}:${message.id}:new`)) {
+          return;
+        }
+        emit('message.new', {
+          accountId,
+          sessionId,
+          chatId,
+          message: view,
+        });
+      })();
     });
 
     add(client.onEditMessage, (message) => {
       const chatId = message.chat.id;
+      this.rememberMessage(state, chatId, message.id, message.isOutgoing, {
+        text: message.text,
+        date: message.date.toISOString(),
+      });
       if (
         !this.dedupe.shouldEmit(`${accountId}:${chatId}:${message.id}:edited`)
       ) {
@@ -231,12 +292,39 @@ export class UpdatesService implements OnModuleDestroy {
     });
 
     add(client.onDeleteMessage, (update) => {
-      const chatId = update.channelId ?? null;
       const messageIds = update.messageIds;
-      const key = `${accountId}:${chatId ?? 'null'}:${messageIds.join('.')}:deleted`;
-      if (!this.dedupe.shouldEmit(key)) return;
-      emit('message.deleted', { accountId, sessionId, chatId, messageIds });
+      if (messageIds.length === 0) return;
+
+      const channelId = update.channelId ?? null;
+      if (channelId !== null) {
+        this.emitDeleted(state, emit, channelId, 0, messageIds);
+        return;
+      }
+
+      // A peer-less delete: resolve each id through the in-memory index and
+      // publish one event per chat, so a private-chat delete is usable by Eve.
+      // Ids not seen in this process keep the historical `chatId: null`.
+      const groups = new Map<number | null, number[]>();
+      for (const messageId of messageIds) {
+        const chatId = state.commonChats.get(messageId) ?? null;
+        const group = groups.get(chatId);
+        if (group) group.push(messageId);
+        else groups.set(chatId, [messageId]);
+      }
+      for (const [chatId, ids] of groups) {
+        this.emitDeleted(state, emit, chatId, 0, ids);
+      }
     });
+
+    // mtcute 0.32 exposes reactions only as a raw aggregate update. The pure
+    // mapper owns the payload shape; this listener adds the seen-message facts
+    // (`targetIsMine`) and the shared 10 s dedupe window.
+    if (client.onRawUpdate) {
+      add(client.onRawUpdate, (raw) => {
+        if (raw.update._ !== 'updateMessageReactions') return;
+        void this.publishReaction(state, raw.update, emit).catch(() => undefined);
+      });
+    }
 
     add(client.onHistoryRead, (update) => {
       const kind = update.isOutbox ? 'read_outbox' : 'read_inbox';
@@ -264,7 +352,140 @@ export class UpdatesService implements OnModuleDestroy {
     });
   }
 
+  /**
+   * Resolves the reacted-to message's author and publishes one reaction event
+   * per recent reactor. Own sends do not come back through `onNewMessage`
+   * (mtcute `noDispatch`), so the index is filled by {@link noteOutgoing} too.
+   * When the id is still unknown, fetch it once: dropping every reaction on a
+   * message sent before the process started made react-back dead on mtcute.
+   */
+  private async publishReaction(
+    state: SessionState,
+    update: tl.RawUpdateMessageReactions,
+    emit: (event: string, payload: unknown) => void,
+  ): Promise<void> {
+    const chatId = markedPeerId(update.peer);
+    if (chatId === null) return;
+    let target = state.recent.get(`${chatId}:${update.msgId}`);
+    if (!target && chatId > 0) {
+      try {
+        const [message] = await state.client.getMessages(chatId, [update.msgId]);
+        if (message) {
+          this.rememberMessage(state, chatId, message.id, message.isOutgoing, {
+            text: message.text,
+            date: message.date.toISOString(),
+          });
+          target = state.recent.get(`${chatId}:${update.msgId}`);
+        }
+      } catch {
+        // Deleted/inaccessible: publish without `targetIsMine`, Eve drops it.
+      }
+    }
+    const events = reactionEventsFromRawUpdate(update, {
+      accountId: state.accountId,
+      sessionId: state.sessionId,
+      ...(target ? { targetIsMine: target.outgoing } : {}),
+    });
+    for (const event of events) {
+      if (!this.dedupe.shouldEmit(event.dedupeKey)) continue;
+      emit('message.reaction', event.payload);
+    }
+  }
+
+  /**
+   * Records a message sent by this process, so a reaction on it resolves to
+   * `targetIsMine: true` even though mtcute does not dispatch own sends.
+   * Called for every Nest/Eve send (immediate, delayed, proactive, media).
+   */
+  noteOutgoing(
+    accountId: string,
+    chatId: number,
+    messageId: number,
+    text?: string,
+    date?: Date,
+  ): void {
+    if (!Number.isSafeInteger(messageId) || messageId <= 0) return;
+    for (const userSessions of this.sessions.values()) {
+      for (const state of userSessions.values()) {
+        if (state.accountId !== accountId) continue;
+        this.rememberMessage(state, chatId, messageId, true, {
+          ...(text ? { text } : {}),
+          date: (date ?? new Date()).toISOString(),
+        });
+      }
+    }
+  }
+
+  /** Drops the oldest entries so the reaction/delete index stays bounded. */
+  private rememberMessage(
+    state: SessionState,
+    chatId: number,
+    messageId: number,
+    outgoing: boolean,
+    extra?: { text?: string; date?: string },
+  ): void {
+    state.recent.set(`${chatId}:${messageId}`, {
+      outgoing,
+      ...(extra?.text ? { text: extra.text.slice(0, 1_000) } : {}),
+      ...(extra?.date ? { date: extra.date } : {}),
+    });
+    // Channel messages are per-channel; private and basic-group ids are
+    // unique for the account, so they can be resolved without the peer.
+    if (chatId > 0) state.commonChats.set(messageId, chatId);
+    trimOldest(state.recent, RECENT_MESSAGES_MAX, RECENT_MESSAGES_TRIM);
+    trimOldest(state.commonChats, RECENT_MESSAGES_MAX, RECENT_MESSAGES_TRIM);
+  }
+
+  /**
+   * Publishes one `message.deleted` event. `outgoing` is set only when every
+   * deleted id is known: a mixed delete (his + hers) leaves it undefined, so
+   * the persona layer cannot mistake it for "she deleted her own message".
+   */
+  private emitDeleted(
+    state: SessionState,
+    emit: (event: string, payload: unknown) => void,
+    chatId: number | null,
+    threadId: number,
+    messageIds: number[],
+  ): void {
+    const facts = messageIds.map((id) =>
+      state.recent.get(`${chatId}:${id}`),
+    );
+    const known = facts.filter(
+      (fact): fact is RecentMessage => fact !== undefined,
+    );
+    const outgoing =
+      known.length > 0 && known.length === messageIds.length
+        ? known.every((fact) => fact.outgoing)
+        : undefined;
+
+    const key = `${state.accountId}:${chatId ?? 'null'}:${messageIds.join('.')}:deleted`;
+    if (!this.dedupe.shouldEmit(key)) return;
+
+    emit('message.deleted', {
+      accountId: state.accountId,
+      sessionId: state.sessionId,
+      chatId,
+      threadId,
+      messageIds,
+      // The Eve deletion policy needs the text and the arrival time to tell
+      // "she read it" from "she missed it". Only ids we have seen are listed.
+      messages: messageIds.map((id) => {
+        const fact = state.recent.get(`${chatId}:${id}`);
+        return {
+          id,
+          ...(fact?.outgoing !== undefined ? { outgoing: fact.outgoing } : {}),
+          ...(fact?.text ? { text: fact.text } : {}),
+          ...(fact?.date ? { date: fact.date } : {}),
+        };
+      }),
+      ...(outgoing !== undefined ? { outgoing } : {}),
+    });
+  }
+
   private async dispose(state: SessionState): Promise<void> {
+    state.recent.clear();
+    state.commonChats.clear();
     for (const dispose of state.disposers) {
       try {
         dispose();

@@ -136,26 +136,26 @@ NDJSON (одна запись на строку), те же фильтры, до
 
 ```bash
 # Последние ошибки с ответом Telegram
-curl -s 'http://localhost:3001/logs?level=error&limit=50' | jq '.entries[] | {createdAt, action, message, telegramError}'
+curl -s 'http://localhost:4001/logs?level=error&limit=50' | jq '.entries[] | {createdAt, action, message, telegramError}'
 
 # Что происходило с конкретным аккаунтом
-curl -s 'http://localhost:3001/logs?accountId=<accountId>&limit=200' | jq -r '.entries[] | [.createdAt,.level,.action,.message] | @tsv'
+curl -s 'http://localhost:4001/logs?accountId=<accountId>&limit=200' | jq -r '.entries[] | [.createdAt,.level,.action,.message] | @tsv'
 
 # Разбор одного HTTP-запроса целиком (HTTP + RPC + фильтр)
-curl -s 'http://localhost:3001/logs?requestId=<requestId>' | jq
+curl -s 'http://localhost:4001/logs?requestId=<requestId>' | jq
 
 # Все отказы Telegram в журнале
-curl -s 'http://localhost:3001/logs?source=telegram&q=FLOOD' | jq -r '.entries[] | [.createdAt,.telegramError] | @tsv'
+curl -s 'http://localhost:4001/logs?source=telegram&q=FLOOD' | jq -r '.entries[] | [.createdAt,.telegramError] | @tsv'
 
 # Запросы через конкретный прокси (метку берите из /logs/stats → byProxy)
-curl -s 'http://localhost:3001/logs?proxy=Эстония/США · http://192.168.31.216:3128' | jq
+curl -s 'http://localhost:4001/logs?proxy=Эстония/США · http://192.168.31.216:3128' | jq
 
 # Самые медленные запросы и пагинация
-curl -s 'http://localhost:3001/logs?sort=slowest&limit=20' | jq -r '.entries[] | [.durationMs,.action,.message] | @tsv'
-curl -s 'http://localhost:3001/logs?sort=slowest&limit=20&offset=20' | jq
+curl -s 'http://localhost:4001/logs?sort=slowest&limit=20' | jq -r '.entries[] | [.durationMs,.action,.message] | @tsv'
+curl -s 'http://localhost:4001/logs?sort=slowest&limit=20&offset=20' | jq
 
 # Выгрузка NDJSON
-curl -s 'http://localhost:3001/logs/export?level=warn' -o logs.ndjson
+curl -s 'http://localhost:4001/logs/export?level=warn' -o logs.ndjson
 ```
 
 Поле `requestId` также возвращается в заголовке `x-request-id` каждого ответа
@@ -183,7 +183,7 @@ API, поэтому запись в журнале можно сопостави
 
 ```js
 import { io } from "socket.io-client";
-const socket = io("http://localhost:3001/events", {
+const socket = io("http://localhost:4001/events", {
   transports: ["websocket", "polling"],
 });
 socket.on("log.new", (entry) => {

@@ -13,6 +13,7 @@ import type {
   chat,
   file,
   message,
+  MessageOrigin,
   sticker,
   user,
 } from 'tdlib-native/types';
@@ -43,6 +44,10 @@ export interface TdMessageViewContext {
   chat?: chat | null;
   chatPeer?: PeerLike;
   resolveSender?: TdPeerResolver;
+  /** Display name of a user by TDLib user id (forward origin). */
+  userName?: (userId: number) => string | undefined;
+  /** Display name of a chat by TDLib chat id (forward origin). */
+  chatName?: (chatId: number) => string | undefined;
 }
 
 export interface TdChatViewOptions {
@@ -159,6 +164,11 @@ export interface TdMediaFileInfo {
   thumb: file | null;
   /** Sticker/animated-emoji emoji, when known. */
   emoji?: string;
+  /**
+   * TDLib remote file id (`remote.unique_id`) for stickers/documents, so the
+   * persona's sticker library can re-send a saved sticker through `getRemoteFile`.
+   */
+  remoteFileId?: string;
   /** `.tgs`/`.webm` stickers and GIFs move; a still frame is not all of it. */
   isAnimated?: boolean;
   width?: number;
@@ -415,6 +425,9 @@ export function mediaFileInfo(
         size: sticker.sticker.size || null,
         file: sticker.sticker,
         thumb: sticker.thumbnail?.file ?? null,
+        ...(sticker.sticker.remote?.unique_id
+          ? { remoteFileId: sticker.sticker.remote.unique_id }
+          : {}),
         ...(sticker.emoji ? { emoji: sticker.emoji } : {}),
         isAnimated: stickerFormatAnimated(sticker.format?._),
         ...(positiveNumber(sticker.width)
@@ -611,6 +624,7 @@ function messageMedia(entry: message): MessageLike['media'] {
     fileName: info.fileName,
     mimeType: info.mimeType,
     fileSize: info.size ?? 0,
+    ...(info.remoteFileId ? { fileId: info.remoteFileId } : {}),
     ...(info.emoji ? { emoji: info.emoji } : {}),
     ...(info.isAnimated ? { isAnimated: true } : {}),
     ...(info.width !== undefined ? { width: info.width } : {}),
@@ -652,6 +666,50 @@ function messageReplies(entry: message): MessageLike['replies'] {
   };
 }
 
+/**
+ * Display name of a TDLib forward origin. A user or channel id resolves through
+ * the caller's caches; unknown ids fall back to a short id, never to `null`
+ * when the update clearly carries a forward.
+ */
+export function forwardOriginName(
+  origin: MessageOrigin | null | undefined,
+  context: TdMessageViewContext = {},
+): string | undefined {
+  if (!origin || typeof origin !== 'object') return undefined;
+  switch (origin._) {
+    case 'messageOriginUser': {
+      const id = Number(origin.sender_user_id);
+      return context.userName?.(id) ?? (id > 0 ? `user ${id}` : undefined);
+    }
+    case 'messageOriginHiddenUser':
+      return typeof origin.sender_name === 'string' && origin.sender_name.trim()
+        ? origin.sender_name.trim()
+        : undefined;
+    case 'messageOriginChat': {
+      const id = Number(origin.sender_chat_id);
+      const name = context.chatName?.(id);
+      if (name) return name;
+      const signature =
+        typeof origin.author_signature === 'string'
+          ? origin.author_signature.trim()
+          : '';
+      return signature || (id !== 0 ? `chat ${id}` : undefined);
+    }
+    case 'messageOriginChannel': {
+      const id = Number(origin.chat_id);
+      const name = context.chatName?.(id);
+      const signature =
+        typeof origin.author_signature === 'string'
+          ? origin.author_signature.trim()
+          : '';
+      if (name && signature) return `${name} (${signature})`;
+      return name ?? signature ?? (id !== 0 ? `channel ${id}` : undefined);
+    }
+    default:
+      return undefined;
+  }
+}
+
 function messageLike(
   entry: message,
   context: TdMessageViewContext,
@@ -663,6 +721,10 @@ function messageLike(
   const reply = entry.reply_to;
   const text = contentText(entry);
   const service = !REGULAR_CONTENT.has(entry.content._);
+  const quoteText =
+    reply?._ === 'messageReplyToMessage' && reply.quote?.text?.text
+      ? reply.quote.text.text
+      : undefined;
   return {
     id: entry.id,
     text,
@@ -677,7 +739,14 @@ function messageLike(
     sender,
     chat: chatPeer,
     replyToMessage:
-      reply?._ === 'messageReplyToMessage' ? { id: reply.message_id } : null,
+      reply?._ === 'messageReplyToMessage'
+        ? { id: reply.message_id, ...(quoteText ? { quoteText } : {}) }
+        : null,
+    ...(entry.forward_info
+      ? {
+          forwardedFrom: forwardOriginName(entry.forward_info.origin, context),
+        }
+      : {}),
     media: messageMedia(entry),
     reactions: messageReactions(entry),
     replies: messageReplies(entry),

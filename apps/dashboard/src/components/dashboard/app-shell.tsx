@@ -18,6 +18,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/chats", label: "Чаты", icon: <ChatsIcon /> },
   { href: "/logs", label: "Логи", icon: <LogsIcon /> },
   { href: "/ai", label: "AI", icon: <AiIcon /> },
+  { href: "/eve", label: "Eve", icon: <EveIcon /> },
+  { href: "/eve/context", label: "Context", icon: <ContextIcon /> },
+  { href: "/eve/schedules", label: "Schedules", icon: <SchedulesIcon /> },
   { href: "/workflows", label: "Workflow", icon: <WorkflowIcon /> },
   { href: "/settings", label: "Настройки", icon: <SettingsIcon /> },
 ];
@@ -28,6 +31,9 @@ const PAGE_TITLES: Record<string, string> = {
   "/chats": "Чаты",
   "/logs": "Логи",
   "/ai": "AI",
+  "/eve": "Eve",
+  "/eve/context": "Eve · Context",
+  "/eve/schedules": "Eve · Schedules",
   "/workflows": "Workflow",
   "/settings": "Настройки",
   "/settings/ai": "Настройки · AI",
@@ -71,6 +77,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const pageTitle = pageTitleFor(pathname);
 
+  // Longest matching item wins, so `/eve/context` does not also highlight `/eve`.
+  const activeHref = NAV_ITEMS.reduce<string | null>((best, item) => {
+    const matches =
+      pathname === item.href || pathname.startsWith(`${item.href}/`);
+    if (!matches) return best;
+    return best && best.length >= item.href.length ? best : item.href;
+  }, null);
+
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-zinc-950 text-zinc-100">
       <aside
@@ -91,8 +105,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <nav className="flex-1 space-y-1 overflow-y-auto p-2">
           {NAV_ITEMS.map((item) => {
-            const active =
-              pathname === item.href || pathname.startsWith(`${item.href}/`);
+            const active = item.href === activeHref;
             return (
               <Link
                 key={item.href}
@@ -258,6 +271,60 @@ function AiIcon() {
     >
       <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" />
       <circle cx="12" cy="12" r="3.2" />
+    </svg>
+  );
+}
+
+function EveIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-5 w-5"
+    >
+      <path d="M12 20.5c-4.4-3-7-5.9-7-9.3A4.2 4.2 0 0 1 12 8a4.2 4.2 0 0 1 7 3.2c0 3.4-2.6 6.3-7 9.3Z" />
+      <path d="M9.5 11.5h.01M14.5 11.5h.01" />
+    </svg>
+  );
+}
+
+function ContextIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-5 w-5"
+    >
+      <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H18a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5.5A1.5 1.5 0 0 1 4 18.5Z" />
+      <path d="M8 8.5h8M8 12h8M8 15.5h5" />
+    </svg>
+  );
+}
+
+function SchedulesIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="h-5 w-5"
+    >
+      <circle cx="12" cy="13" r="7.5" />
+      <path d="M12 9v4l2.5 1.5M9 3h6" />
     </svg>
   );
 }

@@ -20,6 +20,10 @@ coverage
 
 # Local reference clones (see inspiration/README.md)
 inspiration/repos/
+# Source-available reference copy: read-only, must not be committed
+inspiration/girl-agent/
+# Generated reference reports (large, derived from third-party code)
+inspiration/reports/
 
 # Prisma
 packages/database/src/generated
@@ -36,6 +40,8 @@ packages/database/src/generated
 out/
 build
 dist
+.eve/
+.output/
 
 
 # Debug
@@ -51,4 +57,8 @@ yarn-error.log*
 *.tsbuildinfo
 
 # Self-hosted n8n runtime state (see infra/n8n/README.md)
-infra/n8n/data/
+infra/n8n/data/*
+# keep the empty trace directory around; its contents are runtime data
+!infra/n8n/data/llm-traces/
+infra/n8n/data/llm-traces/*
+!infra/n8n/data/llm-traces/.gitkeep

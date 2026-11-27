@@ -17,6 +17,7 @@ import type {
   updateDeleteMessages,
   updateMessageContent,
   updateMessageEdited,
+  updateMessageInteractionInfo,
   updateNewMessage,
 } from 'tdlib-native/types';
 import type { PeerLike } from '../messaging/message-view.js';
@@ -30,6 +31,7 @@ export type TdHandledUpdate =
   | updateMessageContent
   | updateMessageEdited
   | updateDeleteMessages
+  | updateMessageInteractionInfo
   | updateChatReadInbox
   | updateChatReadOutbox
   | updateChatAction;
@@ -47,6 +49,16 @@ export interface TdUpdateContext {
   chatType?: (chatId: number) => TdTypingChatType | undefined;
   /** Sender peer resolved from the session's user/chat caches. */
   resolveSender?: TdPeerResolver;
+  /** Display name of a user/chat, used for forward origins. */
+  userName?: (userId: number) => string | undefined;
+  chatName?: (chatId: number) => string | undefined;
+  /** Facts about a message seen earlier in this process (delete/reaction). */
+  recentMessage?: (
+    chatId: number,
+    messageId: number,
+  ) => { outgoing: boolean; text?: string; date?: string } | undefined;
+  /** This account's Telegram user id, so its own reactions are marked. */
+  selfUserId?: number;
 }
 
 export interface TdMappedEvent {
@@ -55,6 +67,7 @@ export interface TdMappedEvent {
     | 'message.new'
     | 'message.edited'
     | 'message.deleted'
+    | 'message.reaction'
     | 'message.read'
     | 'chat.typing';
   payload: Record<string, unknown>;
@@ -143,6 +156,8 @@ export function mapNewMessage(
         chat: context.chat?.(entry.chat_id) ?? null,
         chatPeer: peerOfCachedChat(context.chat?.(entry.chat_id)),
         resolveSender: context.resolveSender,
+        userName: context.userName,
+        chatName: context.chatName,
       }),
     },
     dedupeKey: `${context.accountId}:${chatId}:${entry.id}:new`,
@@ -166,10 +181,101 @@ export function mapEditedMessage(
         chat: context.chat?.(entry.chat_id) ?? null,
         chatPeer: peerOfCachedChat(context.chat?.(entry.chat_id)),
         resolveSender: context.resolveSender,
+        userName: context.userName,
+        chatName: context.chatName,
       }),
     },
     dedupeKey: `${context.accountId}:${chatId}:${entry.id}:edited`,
   };
+}
+
+/** Emoji of a TDLib reaction type; custom/paid reactions are not persona material. */
+function reactionEmoji(type: { _: string; emoji?: string }): string | null {
+  if (type?._ !== 'reactionTypeEmoji') return null;
+  const emoji = typeof type.emoji === 'string' ? type.emoji.trim() : '';
+  return emoji || null;
+}
+
+function senderIdOf(sender: {
+  _: string;
+  user_id?: number;
+  chat_id?: number;
+}): number | null {
+  if (sender?._ === 'messageSenderUser') {
+    return Number(sender.user_id) || null;
+  }
+  if (sender?._ === 'messageSenderChat') {
+    return peerIdOfChat(Number(sender.chat_id));
+  }
+  return null;
+}
+
+/**
+ * `message.reaction` events from `updateMessageInteractionInfo`.
+ *
+ * TDLib reports aggregate reactions, not the delta: each `messageReaction`
+ * carries at most three recent senders. We publish one event per seen sender
+ * (that is where the author lives), skip this account's own reaction, and mark
+ * whether the reacted-to message belongs to the persona via the recent index.
+ */
+export function reactionEventsFromInteraction(
+  update: updateMessageInteractionInfo,
+  context: TdUpdateContext,
+): TdMappedEvent[] {
+  const info = update.interaction_info;
+  const reactions = info?.reactions?.reactions;
+  if (!Array.isArray(reactions) || reactions.length === 0) return [];
+  const chatId = peerIdOfChat(update.chat_id);
+  const messageId = Number(update.message_id);
+  if (!Number.isSafeInteger(messageId) || messageId <= 0) return [];
+  const target = context.recentMessage?.(update.chat_id, messageId);
+  const events: TdMappedEvent[] = [];
+  const seen = new Set<string>();
+
+  for (const reaction of reactions) {
+    const emoji = reactionEmoji(reaction.type);
+    if (!emoji) continue;
+    const senders = Array.isArray(reaction.recent_sender_ids)
+      ? reaction.recent_sender_ids
+      : [];
+    // `recent_sender_ids` is empty outside private/basic/supergroup chats. An
+    // aggregate with no author still has to reach Eve, otherwise reactions in
+    // those chats disappear on TDLib accounts; mark it as an unknown author.
+    const ids = senders.length > 0 ? senders.map(senderIdOf) : [null];
+    for (const fromId of ids) {
+      const outgoing =
+        context.selfUserId !== undefined && fromId === context.selfUserId;
+      if (outgoing) continue;
+      const dedupeKey = [
+        'message.reaction',
+        context.accountId,
+        chatId,
+        messageId,
+        emoji,
+        fromId ?? '',
+      ].join(':');
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      events.push({
+        type: 'event',
+        event: 'message.reaction',
+        payload: {
+          accountId: context.accountId,
+          sessionId: context.sessionId,
+          chatId,
+          threadId: 0,
+          messageId,
+          emoji,
+          fromId,
+          outgoing: false,
+          ...(target ? { targetIsMine: target.outgoing } : {}),
+          date: 0,
+        },
+        dedupeKey,
+      });
+    }
+  }
+  return events;
 }
 
 /** Builds an event for a TDLib update that carries all of its data. */
@@ -194,7 +300,38 @@ export function mapTdUpdate(
     }
 
     case 'updateDeleteMessages': {
+      // TDLib emits this for its own local cache eviction (`from_cache`) and
+      // for messages that merely became inaccessible (`is_permanent: false`),
+      // not only for a user deleting a message. Those updates repeat with a
+      // growing id list and must not start a "he deleted it" turn.
+      if (update.from_cache === true || update.is_permanent !== true) {
+        return null;
+      }
       const chatId = peerIdOfChat(update.chat_id);
+      // The TDLib update only carries ids. The session's recent index supplies
+      // text/date/outgoing, so the deletion policy can tell "saw and read" from
+      // "missed" and quote what was deleted.
+      const messages: Array<{
+        id: number;
+        outgoing?: boolean;
+        text?: string;
+        date?: string;
+      }> = update.message_ids.map((id) => {
+        const fact = context.recentMessage?.(update.chat_id, id);
+        return {
+          id,
+          ...(fact?.outgoing !== undefined ? { outgoing: fact.outgoing } : {}),
+          ...(fact?.text ? { text: fact.text } : {}),
+          ...(fact?.date ? { date: fact.date } : {}),
+        };
+      });
+      const known = messages.filter(
+        (entry) => entry.outgoing !== undefined,
+      );
+      const outgoing =
+        known.length > 0 && known.length === messages.length
+          ? known.every((entry) => entry.outgoing === true)
+          : undefined;
       return {
         type: 'event',
         event: 'message.deleted',
@@ -203,9 +340,17 @@ export function mapTdUpdate(
           sessionId: context.sessionId,
           chatId,
           messageIds: update.message_ids,
+          messages,
+          ...(outgoing !== undefined ? { outgoing } : {}),
         },
         dedupeKey: `${context.accountId}:${chatId}:${update.message_ids.join('.')}:deleted`,
       };
+    }
+
+    case 'updateMessageInteractionInfo': {
+      // Handled separately by `reactionEventsFromInteraction` (several events
+      // per update), so the single-event switch has nothing to return.
+      return null;
     }
 
     case 'updateChatReadInbox': {

@@ -19,6 +19,7 @@ import {
   chatTypeFromTdChatType,
   mapEditedMessage,
   mapTdUpdate,
+  reactionEventsFromInteraction,
 } from './td-updates.mapping.js';
 import type {
   TdHandledUpdate,
@@ -33,8 +34,18 @@ interface TdSessionState {
   registry: TdChatRegistry;
   users: Map<number, user>;
   userRequests: Map<number, Promise<user | null>>;
+  /** `${tdChatId}:${messageId}` → author facts for delete/reaction payloads. */
+  recent: Map<string, { outgoing: boolean; text?: string; date?: string }>;
+  /** Reactions already published per message, so aggregates do not repeat. */
+  reactions: Map<string, Set<string>>;
+  /** This account's user id; absent until `getMe` resolves. */
+  selfUserId?: number;
   dispose: () => void;
 }
+
+/** Upper bound of the in-memory message/reaction indexes per session. */
+const RECENT_TD_MESSAGES_MAX = 2_000;
+const RECENT_TD_MESSAGES_TRIM = 500;
 
 type AccountWithSessions = TelegramAccountModel & {
   sessions: TelegramSessionModel[];
@@ -175,8 +186,25 @@ export class TdUpdatesService implements OnModuleDestroy {
       registry,
       users: new Map(),
       userRequests: new Map(),
+      recent: new Map(),
+      reactions: new Map(),
       dispose: () => undefined,
     };
+
+    // Own id separates "he reacted" from her own echo on `message.reaction`.
+    // A partial test client may not expose `getMe`; the bridge still works.
+    const api = client.api as unknown as {
+      getMe?: (parameters: Record<string, never>) => Promise<user>;
+    };
+    if (typeof api.getMe === 'function') {
+      void api
+        .getMe({})
+        .then((me) => {
+          state.selfUserId = me.id;
+          state.users.set(me.id, me);
+        })
+        .catch(() => undefined);
+    }
 
     const unsubscribeUsers = client.updates.subscribe((update) => {
       if (update._ === 'updateUser') state.users.set(update.user.id, update.user);
@@ -203,7 +231,114 @@ export class TdUpdatesService implements OnModuleDestroy {
         return entry ? chatTypeFromTdChatType(entry.type) : undefined;
       },
       resolveSender: (entry) => this.senderPeer(state, entry),
+      userName: (id) => {
+        const entry = state.users.get(id);
+        if (!entry) return undefined;
+        return `${entry.first_name ?? ''} ${entry.last_name ?? ''}`.trim() || undefined;
+      },
+      chatName: (id) => state.registry.get(id)?.title || undefined,
+      recentMessage: (chatId, messageId) =>
+        state.recent.get(`${chatId}:${messageId}`),
+      ...(state.selfUserId !== undefined
+        ? { selfUserId: state.selfUserId }
+        : {}),
     };
+  }
+
+  /** Stores the facts the delete/reaction payloads need later. */
+  private rememberMessage(
+    state: TdSessionState,
+    entry: message,
+  ): void {
+    const content = entry.content as {
+      _: string;
+      text?: { text?: string };
+    };
+    const text =
+      content?._ === 'messageText' && typeof content.text?.text === 'string'
+        ? content.text.text.slice(0, 1_000)
+        : undefined;
+    state.recent.set(`${entry.chat_id}:${entry.id}`, {
+      outgoing: entry.is_outgoing === true,
+      ...(text ? { text } : {}),
+      ...(entry.date ? { date: new Date(entry.date * 1000).toISOString() } : {}),
+    });
+    if (state.recent.size > RECENT_TD_MESSAGES_MAX) {
+      let removed = 0;
+      for (const key of state.recent.keys()) {
+        state.recent.delete(key);
+        if (++removed >= RECENT_TD_MESSAGES_TRIM) break;
+      }
+    }
+  }
+
+  /** Text of a TDLib message, used to enrich a reply with the quoted text. */
+  private messageText(entry: message): string | undefined {
+    const content = entry.content as {
+      _: string;
+      text?: { text?: string };
+    };
+    if (content?._ !== 'messageText') return undefined;
+    const text = typeof content.text?.text === 'string' ? content.text.text.trim() : '';
+    return text ? text.slice(0, 300) : undefined;
+  }
+
+  /**
+   * Fills `replyToText` for a reply when Telegram did not include the quote.
+   * Without it the persona layer only knows "he replied to something" and the
+   * in-character hint `«это ответ на …»` never appears.
+   */
+  private async enrichReplyText(
+    state: TdSessionState,
+    update: Extract<TdHandledUpdate, { _: 'updateNewMessage' }>,
+    mapped: TdMappedEvent,
+  ): Promise<void> {
+    const entry = update.message;
+    const reply = entry.reply_to;
+    if (!reply || reply._ !== 'messageReplyToMessage') return;
+    const view = mapped.payload.message;
+    if (!view || typeof view !== 'object') return;
+    const record = view as Record<string, unknown>;
+    if (typeof record.replyToText === 'string' && record.replyToText) return;
+    if (!reply.message_id || reply.message_id <= 0) return;
+    try {
+      const quoted = await state.client.api.getMessage({
+        chat_id: reply.chat_id || entry.chat_id,
+        message_id: reply.message_id,
+      });
+      const text = this.messageText(quoted);
+      if (text) record.replyToText = text;
+    } catch {
+      // Deleted or inaccessible message: keep the id-only reply.
+    }
+  }
+
+  /**
+   * Publishes reactions from an aggregate `updateMessageInteractionInfo`.
+   * The aggregate repeats on every interaction change, so only signatures not
+   * seen for this message are emitted.
+   */
+  private publishReactions(
+    userId: string,
+    state: TdSessionState,
+    update: Extract<TdHandledUpdate, { _: 'updateMessageInteractionInfo' }>,
+  ): void {
+    const events = reactionEventsFromInteraction(update, this.contextFor(state));
+    const key = `${update.chat_id}:${update.message_id}`;
+    const next = new Set(events.map((event) => event.dedupeKey));
+    const previous = state.reactions.get(key) ?? new Set<string>();
+    state.reactions.set(key, next);
+    if (state.reactions.size > RECENT_TD_MESSAGES_MAX) {
+      let removed = 0;
+      for (const existing of state.reactions.keys()) {
+        state.reactions.delete(existing);
+        if (++removed >= RECENT_TD_MESSAGES_TRIM) break;
+      }
+    }
+    for (const event of events) {
+      if (previous.has(event.dedupeKey)) continue;
+      this.publish(userId, event);
+    }
   }
 
   private senderPeer(state: TdSessionState, entry: message): PeerLike | undefined {
@@ -263,8 +398,17 @@ export class TdUpdatesService implements OnModuleDestroy {
     try {
       if (update._ === 'updateNewMessage') {
         await this.warmMessages(state, [update.message]);
+        this.rememberMessage(state, update.message);
         const mapped = mapTdUpdate(update, this.contextFor(state));
-        if (mapped?.type === 'event') this.publish(userId, mapped);
+        if (mapped?.type === 'event') {
+          await this.enrichReplyText(state, update, mapped);
+          this.publish(userId, mapped);
+        }
+        return;
+      }
+
+      if (update._ === 'updateMessageInteractionInfo') {
+        this.publishReactions(userId, state, update);
         return;
       }
 

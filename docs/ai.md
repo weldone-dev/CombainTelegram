@@ -899,7 +899,7 @@ authentication in single-user mode (`PUT /ai/policy`, `PUT /ai/settings`).
 
 ## 10. MCP
 
-- Endpoint: `POST http://127.0.0.1:3001/mcp` (Streamable HTTP, JSON responses,
+- Endpoint: `POST http://127.0.0.1:4001/mcp` (Streamable HTTP, JSON responses,
   stateless, no SSE stream). `GET` → `405`, `DELETE` → `204`.
 - Auth: `Authorization: Bearer <token>`; comparison is constant-time. A missing or
   wrong token returns HTTP 401 with JSON-RPC error `-32001` and `id: null`.
@@ -947,7 +947,7 @@ Client config (Claude Desktop-style; any Streamable HTTP client works):
   "mcpServers": {
     "combain-telegram": {
       "type": "http",
-      "url": "http://127.0.0.1:3001/mcp",
+      "url": "http://127.0.0.1:4001/mcp",
       "headers": { "Authorization": "Bearer <token>" }
     }
   }
@@ -961,8 +961,8 @@ snippet with the current endpoint.
 Smoke test without a client:
 
 ```bash
-TOKEN=$(curl -s http://127.0.0.1:3001/ai/settings | jq -r .mcp.token)
-curl -s http://127.0.0.1:3001/mcp \
+TOKEN=$(curl -s http://127.0.0.1:4001/ai/settings | jq -r .mcp.token)
+curl -s http://127.0.0.1:4001/mcp \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
        "params":{"name":"accounts_list","arguments":{}}}'

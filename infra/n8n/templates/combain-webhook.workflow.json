@@ -66,7 +66,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/soul-reply",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/soul-reply",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -101,7 +101,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/send-text",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/send-text",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -131,7 +131,7 @@
     },
     {
       "parameters": {
-        "content": "## Combain ⇄ n8n: webhook (настройка)\n\n1. **Credential.** Уже существует: *Header Auth* **`Combain Action API`**\n   (Header Name `x-combain-token`, значение = `N8N_ACTION_TOKEN`\n   из `apps/api/.env`). Обе HTTP-ноды ссылаются на него по имени.\n2. **URL вебхука.** Активировать workflow (Publish), затем\n   `http://127.0.0.1:5678/webhook/<path>`. Тестовый адрес `/webhook-test/<path>`\n   работает только пока нажата кнопка *Listen* — приложение должно звать\n   production-URL.\n3. **Сеть.** n8n в контейнере, приложение на хосте:\n   `host.docker.internal:3001` (алиас в `infra/n8n/docker-compose.yml`).\n   Проверка: `docker compose exec n8n wget -qO- http://host.docker.internal:3001/ai/settings`\n4. **Привязка к аккаунту.** `/workflows` → «Использовать» на этом workflow.\n   Без привязки аккаунт остаётся на старом автопилоте.\n5. **Токен в URL не нужен**: авторизация — заголовок `x-combain-token`,\n   его проверяет n8n до запуска workflow.\n\nПодробнее: `infra/n8n/README.md`, `docs/workflows.md`.",
+        "content": "## Combain ⇄ n8n: webhook (настройка)\n\n1. **Credential.** Уже существует: *Header Auth* **`Combain Action API`**\n   (Header Name `x-combain-token`, значение = `N8N_ACTION_TOKEN`\n   из `apps/api/.env`). Обе HTTP-ноды ссылаются на него по имени.\n2. **URL вебхука.** Активировать workflow (Publish), затем\n   `http://127.0.0.1:5678/webhook/<path>`. Тестовый адрес `/webhook-test/<path>`\n   работает только пока нажата кнопка *Listen* — приложение должно звать\n   production-URL.\n3. **Сеть.** n8n в контейнере, приложение на хосте:\n   `host.docker.internal:4001` (алиас в `infra/n8n/docker-compose.yml`).\n   Проверка: `docker compose exec n8n wget -qO- http://host.docker.internal:4001/ai/settings`\n4. **Привязка к аккаунту.** `/workflows` → «Использовать» на этом workflow.\n   Без привязки аккаунт остаётся на старом автопилоте.\n5. **Токен в URL не нужен**: авторизация — заголовок `x-combain-token`,\n   его проверяет n8n до запуска workflow.\n\nПодробнее: `infra/n8n/README.md`, `docs/workflows.md`.",
         "height": 560,
         "width": 520,
         "color": 4

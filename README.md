@@ -5,7 +5,7 @@ Monorepo (Bun workspaces + Turborepo):
 | Path | What |
 | --- | --- |
 | `apps/dashboard` | Next.js 16 messenger UI (App Router, Tailwind 4, Biome) |
-| `apps/api` | NestJS 12 API, ESM, Vitest — http://localhost:3001 |
+| `apps/api` | NestJS 12 API, ESM, Vitest — http://localhost:4001 |
 | `packages/database` | Prisma 7 + SQLite (`@repo/database`) |
 
 ## Getting started
@@ -17,9 +17,9 @@ bun run db:migrate
 bun run dev
 ```
 
-- Dashboard: http://localhost:3000 (fixed port — it will not auto-pick another one)
-- API: http://localhost:3001 (`GET /health` checks the database)
-- Swagger UI: http://localhost:3001/docs (OpenAPI JSON: `/docs-json`)
+- Dashboard: http://localhost:4000 (fixed port — it will not auto-pick another one)
+- API: http://localhost:4001 (`GET /health` checks the database)
+- Swagger UI: http://localhost:4001/docs (OpenAPI JSON: `/docs-json`)
 
 `bun run dev` starts both apps. There is **no local registration or login**: the
 app is single-user, and every request runs as `DEFAULT_USER_ID` (default
@@ -27,7 +27,7 @@ app is single-user, and every request runs as `DEFAULT_USER_ID` (default
 or a tdata archive. See [`apps/dashboard/README.md`](apps/dashboard/README.md)
 for the UI guide.
 
-Both ports are pinned. If :3000 is already in use by another project, dashboard
+Both ports are pinned. If :4000 is already in use by another project, dashboard
 fails with a clear error instead of silently taking the API's port.
 
 ## API and realtime
@@ -35,8 +35,8 @@ fails with a clear error instead of silently taking the API's port.
 The API has no tokens: all endpoints run as the single local user.
 
 ```bash
-curl -s http://localhost:3001/accounts          # []
-curl -s http://localhost:3001/health            # {"status":"ok","users":...}
+curl -s http://localhost:4001/accounts          # []
+curl -s http://localhost:4001/health            # {"status":"ok","users":...}
 ```
 
 Telegram accounts are attached with `POST /auth/phone/start`,
@@ -59,7 +59,7 @@ the account's sessions (PC vs phone); the default is the most recent session.
 Realtime: Socket.IO namespace `/events`, no token.
 
 ```js
-const socket = io('http://localhost:3001/events');
+const socket = io('http://localhost:4001/events');
 socket.on('message.new', (e) => console.log(e.accountId, e.chatId, e.message));
 socket.on('message.edited', ...); socket.on('message.deleted', ...);
 socket.on('message.read', ...);  socket.on('chat.typing', ...);
@@ -89,7 +89,7 @@ AI_API_KEY=sk-...
 MCP_TOKEN=
 ```
 
-Open <http://localhost:3000/ai>: Агент, Души, Скиллы, Автоматизации, Боты and
+Open <http://localhost:4000/ai>: Агент, Души, Скиллы, Автоматизации, Боты and
 Настройки. The Настройки tab has the provider test button, permission toggles,
 chat/account allowlists and the MCP endpoint + token (copy/rotate).
 
@@ -101,7 +101,7 @@ Streamable HTTP URL and the Bearer token from AI → Настройки:
   "mcpServers": {
     "combain-telegram": {
       "type": "http",
-      "url": "http://127.0.0.1:3001/mcp",
+      "url": "http://127.0.0.1:4001/mcp",
       "headers": { "Authorization": "Bearer <token>" }
     }
   }

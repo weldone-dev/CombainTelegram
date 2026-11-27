@@ -68,7 +68,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/read",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/read",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -105,7 +105,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/typing",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/typing",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -142,7 +142,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/generate",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/generate",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -209,7 +209,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/send-text",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/send-text",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -240,7 +240,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/typing",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/typing",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,

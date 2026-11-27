@@ -37,6 +37,7 @@ import { ChatAiTab } from "./chat-ai-tab";
 import { ChatAutomationsSection } from "./chat-automations-section";
 import { ChatLogsTab } from "./chat-logs-tab";
 import { ChatMemoryTab } from "./chat-memory-tab";
+import { ChatRelationshipCard } from "./chat-relationship-card";
 import { ChatSkillsTab } from "./chat-skills-tab";
 
 /** Same storage key on purpose: one panel width per browser/device. */
@@ -579,6 +580,11 @@ export function ChatInfoPanel({
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {tab === "overview" && (
             <div className="space-y-4">
+              <ChatRelationshipCard
+                accountId={accountId}
+                chatId={chatId}
+                threadId={threadId}
+              />
               <OverviewTab
                 info={info}
                 loading={infoLoading}

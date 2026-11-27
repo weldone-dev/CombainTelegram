@@ -15,6 +15,8 @@
         ".next/**",
         "!.next/cache/**",
         "!.next/dev/**",
+        ".eve/**",
+        ".output/**",
         "dist/**"
       ]
     },

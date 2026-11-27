@@ -213,7 +213,7 @@ Live checks:
       `dryRun: would send to 777: …`; the run row was written.
 - [x] «Настройки → AI» renders (`/settings/ai` answers 200; providers, model,
       permissions, MCP and tool list load); the MCP endpoint uses the API
-      origin, not :3000.
+      origin, not :4000.
 - [x] MCP capability gate: with `mcp=false` every method answers `-32001`;
       restored to true afterwards.
 - [x] Soul settings are merged: `PUT {settings:{maxPerHour:7}}` kept the

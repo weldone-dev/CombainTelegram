@@ -17,7 +17,7 @@
 
 ## Commands (from repo root)
 - `bun install`
-- `bun run dev` — dashboard on **:3000** (`next dev -p 3000`, no auto-increment), api on **:3001**. If 3000 is taken by another project, dashboard fails loudly instead of falling back onto 3001 and killing the API.
+- `bun run dev` — dashboard on **:4000** (`next dev -p 4000`, no auto-increment), api on **:4001**. If 4000 is taken by another project, dashboard fails loudly instead of falling back onto 4001 and killing the API.
 - `bun run build` / `bun run test` / `bun run lint` / `bun run check-types`
 - Focus one app: `bunx turbo run <task> --filter=api`
 - Single test: `cd apps/api && bunx vitest run src/app.controller.spec.ts`

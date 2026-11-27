@@ -5,6 +5,7 @@ import {
   chatTypeFromTdChatType,
   mapEditedMessage,
   mapTdUpdate,
+  reactionEventsFromInteraction,
 } from './td-updates.mapping.js';
 import type { TdUpdateContext } from './td-updates.mapping.js';
 
@@ -285,5 +286,170 @@ describe('dedupe keys', () => {
     expect(first?.dedupeKey).toBe(second?.dedupeKey);
     expect(dedupe.shouldEmit(first!.dedupeKey)).toBe(true);
     expect(dedupe.shouldEmit(second!.dedupeKey)).toBe(false);
+  });
+});
+
+describe('mapTdUpdate — TDLib reactions', () => {
+  const reactionUpdate = {
+    _: 'updateMessageInteractionInfo',
+    chat_id: 42,
+    message_id: 7,
+    interaction_info: {
+      _: 'messageInteractionInfo',
+      view_count: 0,
+      forward_count: 0,
+      reply_info: null,
+      reactions: {
+        _: 'messageReactions',
+        reactions: [
+          {
+            _: 'messageReaction',
+            type: { _: 'reactionTypeEmoji', emoji: '❤' },
+            total_count: 1,
+            is_chosen: false,
+            used_sender_id: null,
+            recent_sender_ids: [
+              { _: 'messageSenderUser', user_id: 42 },
+            ],
+          },
+        ],
+        are_tags: false,
+        paid_reactors: [],
+        can_get_added_reactions: false,
+      },
+    },
+  } as const;
+
+  it('maps an incoming reaction with the message author facts', () => {
+    const events = reactionEventsFromInteraction(
+      reactionUpdate as never,
+      {
+        ...context,
+        selfUserId: 99,
+        recentMessage: () => ({
+          outgoing: true,
+          text: 'её сообщение',
+          date: '2026-11-27T10:00:00.000Z',
+        }),
+      },
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'event',
+      event: 'message.reaction',
+      payload: {
+        accountId: 'acc-1',
+        chatId: 42,
+        messageId: 7,
+        emoji: '❤',
+        fromId: 42,
+        outgoing: false,
+        targetIsMine: true,
+      },
+    });
+  });
+
+  it('skips the account’s own reaction and non-emoji kinds', () => {
+    const own = reactionEventsFromInteraction(
+      reactionUpdate as never,
+      { ...context, selfUserId: 42, recentMessage: () => ({ outgoing: false }) },
+    );
+    expect(own).toHaveLength(0);
+
+    const custom = reactionEventsFromInteraction(
+      {
+        ...reactionUpdate,
+        interaction_info: {
+          ...reactionUpdate.interaction_info,
+          reactions: {
+            ...reactionUpdate.interaction_info.reactions,
+            reactions: [
+              {
+                ...reactionUpdate.interaction_info.reactions.reactions[0],
+                type: { _: 'reactionTypeCustomEmoji', custom_emoji_id: '1' },
+              },
+            ],
+          },
+        },
+      } as never,
+      { ...context, selfUserId: 99 },
+    );
+    expect(custom).toHaveLength(0);
+  });
+
+  it('enriches updateDeleteMessages from the recent index', () => {
+    const mapped = mapTdUpdate(
+      { _: 'updateDeleteMessages', chat_id: 42, message_ids: [7], is_permanent: true, from_cache: false },
+      {
+        ...context,
+        recentMessage: () => ({
+          outgoing: false,
+          text: 'секрет',
+          date: '2026-11-27T10:00:00.000Z',
+        }),
+      },
+    );
+
+    expect(mapped).toMatchObject({
+      event: 'message.deleted',
+      payload: {
+        chatId: 42,
+        messageIds: [7],
+        outgoing: false,
+        messages: [
+          {
+            id: 7,
+            outgoing: false,
+            text: 'секрет',
+            date: '2026-11-27T10:00:00.000Z',
+          },
+        ],
+      },
+    });
+  });
+
+  it('drops a cache-eviction delete (from_cache) instead of a turn', () => {
+    const mapped = mapTdUpdate(
+      {
+        _: 'updateDeleteMessages',
+        chat_id: 42,
+        message_ids: [7, 8, 9],
+        is_permanent: false,
+        from_cache: true,
+      },
+      context,
+    );
+
+    expect(mapped).toBeNull();
+  });
+
+  it('drops a delete that only made messages inaccessible', () => {
+    const mapped = mapTdUpdate(
+      {
+        _: 'updateDeleteMessages',
+        chat_id: 42,
+        message_ids: [7],
+        is_permanent: false,
+        from_cache: false,
+      },
+      context,
+    );
+
+    expect(mapped).toBeNull();
+  });
+
+  it('leaves outgoing unknown when a deleted id was never seen', () => {
+    const mapped = mapTdUpdate(
+      { _: 'updateDeleteMessages', chat_id: 42, message_ids: [7], is_permanent: true, from_cache: false },
+      context,
+    );
+    expect(mapped).toMatchObject({
+      event: 'message.deleted',
+      payload: { messages: [{ id: 7 }] },
+    });
+    expect(
+      (mapped as { payload: Record<string, unknown> }).payload.outgoing,
+    ).toBeUndefined();
   });
 });

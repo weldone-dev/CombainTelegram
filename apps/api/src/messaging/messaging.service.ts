@@ -11,6 +11,7 @@ import {
 } from '@mtcute/node';
 import { AccountsService } from '../accounts/accounts.service.js';
 import type { AvatarImage } from '../accounts/accounts.service.js';
+import { UpdatesService } from '../realtime/updates.service.js';
 import { SpeechService } from '../ai/speech.service.js';
 import type { TypingPolicy } from '../ai/typing.js';
 import {
@@ -24,6 +25,7 @@ import { apiError, notFound } from '../common/api-error.js';
 import { emitLog } from '../logs/log-sink.js';
 import { TdMessagingService } from '../tdlib/td-messaging.service.js';
 import type { TdMessenger } from '../tdlib/td-messaging.service.js';
+import { parseSpoilers } from './spoiler.js';
 import {
   MAX_MEDIA_BYTES,
   MAX_MEDIA_THUMB_BYTES,
@@ -165,6 +167,81 @@ export interface MediaDownloadView {
   fileName: string;
   disposition: string;
   length: number;
+}
+
+/**
+ * A voice note upload. `mimeType` decides the wire format: OGG/Opus goes out
+ * as a real voice note, any other `audio/*` type as an audio document (the
+ * same bytes, with a warning in the log — never silently as a photo).
+ */
+export interface VoiceUploadInput {
+  buffer: Buffer;
+  mimeType: string | null;
+  durationSec?: unknown;
+  caption?: unknown;
+  replyToId?: unknown;
+  sessionId?: unknown;
+}
+
+/** Result of blocking or unblocking one Telegram user. */
+export interface ContactBlockView {
+  userId: number;
+  blocked: boolean;
+}
+
+/** MIME types Telegram accepts as a real voice note (OGG container, Opus). */
+const VOICE_MIME_TYPES: ReadonlySet<string> = new Set([
+  'audio/ogg',
+  'audio/opus',
+  'audio/x-opus',
+]);
+
+/** Telegram caps a voice note at one hour; the metadata stays honest anyway. */
+const MAX_VOICE_DURATION_SEC = 24 * 60 * 60;
+
+/** Opaque sticker reference (Bot API/TDLib file id) validation. */
+function parseStickerFileId(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw apiError('VALIDATION_ERROR', 'fileId must be a string');
+  }
+  const fileId = value.trim();
+  if (!fileId) throw apiError('VALIDATION_ERROR', 'fileId is required');
+  if (fileId.length > 4096) {
+    throw apiError('VALIDATION_ERROR', 'fileId is too long');
+  }
+  return fileId;
+}
+
+/** Optional voice/audio duration in whole seconds, bounded to a sane range. */
+function parseVoiceDuration(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw apiError(
+      'VALIDATION_ERROR',
+      'durationSec must be a non-negative number',
+    );
+  }
+  return Math.min(Math.round(parsed), MAX_VOICE_DURATION_SEC);
+}
+
+/** File name used when a non-OGG audio payload is sent as an audio document. */
+function audioFileName(mimeType: string): string {
+  switch (mimeType) {
+    case 'audio/mpeg':
+      return 'voice.mp3';
+    case 'audio/mp4':
+    case 'audio/x-m4a':
+    case 'audio/aac':
+      return 'voice.m4a';
+    case 'audio/wav':
+    case 'audio/x-wav':
+      return 'voice.wav';
+    case 'audio/webm':
+      return 'voice.webm';
+    default:
+      return 'voice.bin';
+  }
 }
 
 export interface MessageTranslationView {
@@ -447,7 +524,23 @@ export class MessagingService {
      * unit test may build the service with a fake client only.
      */
     @Optional() private readonly prisma?: PrismaService,
+    /**
+     * Index of own outgoing messages. Optional so a unit test may build the
+     * service with a fake client only; without it reactions on her messages
+     * on mtcute accounts would resolve as unknown and be dropped.
+     */
+    @Optional() private readonly updates?: UpdatesService,
   ) {}
+
+  /**
+   * Records our own send for `targetIsMine` on incoming reactions. mtcute does
+   * not dispatch own messages by default (`noDispatch`), so the index cannot be
+   * filled from `onNewMessage` alone.
+   */
+  private indexOutgoing(accountId: string, view: MessageView): MessageView {
+    this.updates?.noteOutgoing(accountId, view.chatId, view.id, view.text);
+    return view;
+  }
 
   /** Collage renderer: injected in the app, created on demand in unit tests. */
   private collageService(): FramesService {
@@ -1243,7 +1336,10 @@ export class MessagingService {
     } = {},
   ): Promise<MessageView> {
     const chatId = parseChatId(rawChatId);
-    const text = parseMessageText(body.text);
+    const rawText = parseMessageText(body.text);
+    const spoilers = parseSpoilers(rawText);
+    const text = spoilers.text;
+    const entities = spoilers.spans;
     const replyToId = parseOptionalMessageId(body.replyToId);
     const quote = parseOptionalQuote(body.quote);
     const sessionId = parseOptionalSessionId(body.sessionId);
@@ -1252,6 +1348,7 @@ export class MessagingService {
     if (plan.durationMs <= 0) {
       return this.sendMessageNow(userId, accountId, chatId, {
         text,
+        entities,
         replyToId,
         quote,
         sessionId,
@@ -1266,6 +1363,7 @@ export class MessagingService {
       await sleep(Math.min(plan.durationMs, 60_000));
       return await this.sendMessageNow(userId, accountId, chatId, {
         text,
+        entities,
         replyToId,
         quote,
         sessionId,
@@ -1314,16 +1412,25 @@ export class MessagingService {
     chatId: number,
     input: {
       text: string;
+      entities?: Array<{ offset: number; length: number }>;
       replyToId?: number;
       quote?: string;
       sessionId?: string;
     },
   ): Promise<MessageView> {
-    const { text, replyToId, quote, sessionId } = input;
+    const { text, entities, replyToId, quote, sessionId } = input;
     const td = await this.tdFor(userId, accountId, sessionId, 'sendMessage');
     if (td) {
       try {
-        return await td.sendMessage(chatId, { text, replyToId, quote });
+        return this.indexOutgoing(
+          accountId,
+          await td.sendMessage(chatId, {
+            text,
+            replyToId,
+            quote,
+            ...(entities && entities.length > 0 ? { entities } : {}),
+          }),
+        );
       } catch (error) {
         this.logTdFailure(
           'sendMessage',
@@ -1341,12 +1448,23 @@ export class MessagingService {
     // mtcute has no partial-quote payload; the reply still points at the
     // message, only the highlighted excerpt is dropped.
     try {
+      const formatted =
+        entities && entities.length > 0
+          ? {
+              text,
+              entities: entities.map((span) => ({
+                _: 'messageEntitySpoiler' as const,
+                offset: span.offset,
+                length: span.length,
+              })),
+            }
+          : text;
       const message: Message = await client.sendText(
         chatId,
-        text,
+        formatted,
         replyToId !== undefined ? { replyTo: replyToId } : {},
       );
-      return toMessageView(message);
+      return this.indexOutgoing(accountId, toMessageView(message));
     } catch (error) {
       raiseTelegramError(error);
     }
@@ -1383,14 +1501,17 @@ export class MessagingService {
     const td = await this.tdFor(userId, accountId, sessionId, 'sendMedia');
     if (td) {
       try {
-        return await td.sendMedia(chatId, {
-          buffer: input.buffer,
-          fileName,
-          mimeType,
-          size,
-          caption,
-          replyToId,
-        });
+        return this.indexOutgoing(
+          accountId,
+          await td.sendMedia(chatId, {
+            buffer: input.buffer,
+            fileName,
+            mimeType,
+            size,
+            caption,
+            replyToId,
+          }),
+        );
       } catch (error) {
         this.logTdFailure(
           'sendMedia',
@@ -1428,7 +1549,7 @@ export class MessagingService {
         media,
         sendOptions,
       );
-      return toMessageView(message);
+      return this.indexOutgoing(accountId, toMessageView(message));
     } catch (error) {
       // Telegram's photo pipeline rejects some valid images (e.g. tiny PNGs)
       // with IMAGE_PROCESS_FAILED. Sending the same bytes as a document is
@@ -1448,13 +1569,240 @@ export class MessagingService {
           fallback,
           sendOptions,
         );
-        return toMessageView(message);
+        return this.indexOutgoing(accountId, toMessageView(message));
       } catch (retryError) {
         // The retry failed too; map that error (IMAGE_PROCESS_FAILED → 400
         // MEDIA_PROCESS_FAILED) so the UI gets a clear reason.
         raiseTelegramError(retryError);
       }
     }
+  }
+
+  /**
+   * Send one sticker by an opaque file reference (Bot API/TDLib file id).
+   *
+   * mtcute 0.32 has no `sendSticker`: existing documents are sent through
+   * `sendMedia`, and Telegram renders them as stickers because the document
+   * still carries `documentAttributeSticker`. A TDLib failure (a foreign file
+   * id, an offline lookup miss) falls back to mtcute like every other
+   * chat-scoped send.
+   */
+  async sendSticker(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    rawFileId: unknown,
+    sessionIdParam?: unknown,
+  ): Promise<MessageView> {
+    const chatId = parseChatId(rawChatId);
+    const fileId = parseStickerFileId(rawFileId);
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendSticker');
+    if (td) {
+      try {
+        return this.indexOutgoing(
+          accountId,
+          await td.sendSticker(chatId, { fileId }),
+        );
+      } catch (error) {
+        this.logTdFailure(
+          'sendSticker',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
+
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      const message: Message = await client.sendMedia(
+        chatId,
+        InputMedia.sticker(fileId),
+        {},
+      );
+      return this.indexOutgoing(accountId, toMessageView(message));
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Send a recorded voice message. OGG/Opus is sent as a real voice note on
+   * both engines; any other audio type is sent as an audio document with a
+   * warning, because Telegram refuses non-Opus bytes on the voice-note path.
+   * Non-audio MIME types are rejected instead of being sent as a photo.
+   *
+   * The same 50 MB upload ceiling as {@link sendMedia} applies.
+   */
+  async sendVoice(
+    userId: string,
+    accountId: string,
+    rawChatId: string,
+    input: VoiceUploadInput,
+  ): Promise<MessageView> {
+    const chatId = parseChatId(rawChatId);
+    const caption = parseOptionalCaption(input.caption);
+    const replyToId = parseOptionalMessageId(input.replyToId);
+    const sessionId = parseOptionalSessionId(input.sessionId);
+    const durationSec = parseVoiceDuration(input.durationSec);
+    const size = input.buffer.byteLength;
+    assertMediaUpload(size);
+
+    const mimeType = normalizeMimeType(input.mimeType, 'audio/ogg');
+    if (!mimeType.startsWith('audio/')) {
+      throw apiError(
+        'VALIDATION_ERROR',
+        'mimeType must be an audio type for a voice message',
+        400,
+        { details: { mimeType } },
+      );
+    }
+
+    const asVoiceNote = VOICE_MIME_TYPES.has(mimeType);
+    if (!asVoiceNote) {
+      emitLog({
+        level: 'warn',
+        source: 'messaging',
+        action: 'messaging.sendVoice.audio-document',
+        message: `Voice payload is ${mimeType}, not OGG/Opus: sending it as an audio document`,
+        status: 'ok',
+        userId,
+        accountId,
+        sessionId,
+        chatId,
+        details: { mimeType, durationSec: durationSec ?? null, size },
+      });
+    }
+
+    const fileName = asVoiceNote ? 'voice.ogg' : audioFileName(mimeType);
+
+    const td = await this.tdFor(userId, accountId, sessionId, 'sendVoice');
+    if (td) {
+      try {
+        return this.indexOutgoing(
+          accountId,
+          await td.sendVoice(chatId, {
+            buffer: input.buffer,
+            fileName,
+            mimeType,
+            size,
+            durationSec: durationSec ?? 0,
+            voiceNote: asVoiceNote,
+            caption,
+            replyToId,
+          }),
+        );
+      } catch (error) {
+        this.logTdFailure(
+          'sendVoice',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
+
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    const media = asVoiceNote
+      ? InputMedia.voice(input.buffer, {
+          fileName,
+          fileMime: mimeType,
+          fileSize: size,
+          ...(durationSec !== undefined ? { duration: durationSec } : {}),
+          ...(caption !== undefined ? { caption } : {}),
+        })
+      : InputMedia.audio(input.buffer, {
+          fileName,
+          fileMime: mimeType,
+          fileSize: size,
+          ...(durationSec !== undefined ? { duration: durationSec } : {}),
+          ...(caption !== undefined ? { caption } : {}),
+        });
+
+    try {
+      const message: Message = await client.sendMedia(
+        chatId,
+        media,
+        replyToId !== undefined ? { replyTo: replyToId } : {},
+      );
+      return this.indexOutgoing(accountId, toMessageView(message));
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /**
+   * Block or unblock one Telegram user. Both engines support it, so this is a
+   * plain transport call: TDLib first, mtcute as the fallback.
+   */
+  async blockContact(
+    userId: string,
+    accountId: string,
+    rawUserId: string,
+    block: boolean,
+    sessionIdParam?: unknown,
+  ): Promise<ContactBlockView> {
+    const contactId = parseChatId(rawUserId, 'userId');
+    if (contactId <= 0) {
+      throw apiError('VALIDATION_ERROR', 'userId must be a positive integer');
+    }
+    const sessionId = parseOptionalSessionId(sessionIdParam);
+
+    const td = await this.tdFor(userId, accountId, sessionId, 'blockContact');
+    if (td) {
+      try {
+        return await td.setContactBlocked(contactId, block);
+      } catch (error) {
+        this.logTdFailure(
+          'blockContact',
+          { userId, accountId, sessionId, chatId: contactId },
+          error,
+        );
+      }
+    }
+
+    const { client } = await this.accounts.resolveSession(
+      userId,
+      accountId,
+      sessionId,
+    );
+
+    try {
+      // Resolve first so a numeric id without a cached access hash works;
+      // mtcute only takes an InputPeerLike here.
+      const peer = await client.resolvePeer(contactId, true);
+      if (block) await client.blockUser(peer);
+      else await client.unblockUser(peer);
+      return { userId: contactId, blocked: block };
+    } catch (error) {
+      raiseTelegramError(error);
+    }
+  }
+
+  /** Inverse of {@link blockContact}; same engine/fallback chain. */
+  async unblockContact(
+    userId: string,
+    accountId: string,
+    rawUserId: string,
+    sessionIdParam?: unknown,
+  ): Promise<ContactBlockView> {
+    return this.blockContact(
+      userId,
+      accountId,
+      rawUserId,
+      false,
+      sessionIdParam,
+    );
   }
 
   /** Live cache entry, refreshed to LRU position; `undefined` when stale. */
@@ -2557,6 +2905,28 @@ export class MessagingService {
     const chatId = parseChatId(rawChatId);
     const { revoke, clearHistory } = parseDeleteOptions(query);
     const sessionId = parseOptionalSessionId(query.sessionId);
+
+    // "Clear history" means the same in every official client: the messages
+    // disappear for both sides and the dialog stays in the list. TDLib exposes
+    // that as `deleteChatHistory(revoke: true, remove_from_chat_list: false)`;
+    // mtcute only offers one of revoke/clear, so it needs the raw request.
+    const td = await this.tdFor(userId, accountId, sessionId, 'deleteChat');
+    if (td) {
+      try {
+        await td.deleteChatHistory(chatId, {
+          revoke: clearHistory ? true : revoke,
+          removeFromChatList: !clearHistory,
+        });
+        return { removed: !clearHistory };
+      } catch (error) {
+        this.rethrowTdFailure(
+          'deleteChat',
+          { userId, accountId, sessionId, chatId },
+          error,
+        );
+      }
+    }
+
     const { client } = await this.accounts.resolveSession(
       userId,
       accountId,
@@ -2565,9 +2935,23 @@ export class MessagingService {
 
     try {
       if (clearHistory) {
-        // mtcute's `deleteHistory` resolves `void` (no affected-message count),
-        // so there is nothing meaningful to report besides `removed: false`.
-        await client.deleteHistory(chatId, { mode: 'clear' });
+        const peer = await this.resolvePeerForChat(client, chatId);
+        if (
+          isPrivatePeer(peer) ||
+          (peer.type === 'chat' && peer.chatType === 'group')
+        ) {
+          const inputPeer = await client.resolvePeer(chatId);
+          await client.call({
+            _: 'messages.deleteHistory',
+            justClear: true,
+            revoke: true,
+            peer: inputPeer,
+            maxId: 0,
+          });
+        } else {
+          // Channels cannot clear for everyone without leaving.
+          await client.deleteHistory(chatId, { mode: 'clear' });
+        }
         return { removed: false };
       }
 

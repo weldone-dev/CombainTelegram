@@ -202,6 +202,66 @@ describe('td-message-view', () => {
     expect(view.date).toBe(new Date(1_700_000_000_000).toISOString());
   });
 
+  it('maps the quote text of a replied message', () => {
+    const view = toMessageViewFromTd(
+      message(text('hello'), {
+        reply_to: {
+          _: 'messageReplyToMessage',
+          chat_id: USER_ID,
+          message_id: 7,
+          quote: { _: 'textQuote', text: text('ты где был'), position: 0, is_manual: true },
+          checklist_task_id: 0,
+          poll_option_id: '',
+          origin: null,
+          origin_send_date: 0,
+          content: null,
+        },
+      }),
+      ctx,
+    );
+    expect(view.replyToId).toBe(7);
+    expect(view.replyToText).toBe('ты где был');
+  });
+
+  it('maps a TDLib forward origin to forwardedFrom', () => {
+    const fromChannel = toMessageViewFromTd(
+      message(text('мем'), {
+        forward_info: {
+          _: 'messageForwardInfo',
+          origin: {
+            _: 'messageOriginChannel',
+            chat_id: -1_000_000_000_777,
+            message_id: 5,
+            author_signature: 'редакция',
+          },
+          date: 1_700_000_000,
+          source: null,
+          public_service_announcement_type: '',
+        },
+      }),
+      {
+        ...ctx,
+        chatName: (id: number) =>
+          id === -1_000_000_000_777 ? 'Мемный канал' : undefined,
+      },
+    );
+    expect(fromChannel.forwardedFrom).toBe('Мемный канал (редакция)');
+
+    const fromHiddenUser = toMessageViewFromTd(
+      message(text('привет'), {
+        forward_info: {
+          _: 'messageForwardInfo',
+          origin: { _: 'messageOriginHiddenUser', sender_name: 'Аноним' },
+          date: 1_700_000_000,
+          source: null,
+          public_service_announcement_type: '',
+        },
+      }),
+      ctx,
+    );
+    expect(fromHiddenUser.forwardedFrom).toBe('Аноним');
+  });
+
   it('maps a photo with caption and a downloadable descriptor', () => {
     const view = toMessageViewFromTd(
       message({
@@ -425,6 +485,8 @@ describe('td-message-view', () => {
       fileName: 'sticker.webp',
       size: 30_000,
       downloadable: true,
+      // TDLib remote id: the sticker library can re-send it via getRemoteFile.
+      fileId: 'unique-16',
       emoji: '🐷',
       width: 512,
       height: 512,

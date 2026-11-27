@@ -8,6 +8,7 @@ import { AiModule } from './ai/ai.module.js';
 import { AiAccountModule } from './ai-account/ai-account.module.js';
 import { AiProvidersModule } from './ai-providers/ai-providers.module.js';
 import { AiAccessModule } from './ai-access/ai-access.module.js';
+import { EveModule } from './eve/eve.module.js';
 import { N8nIntegrationsModule } from './integrations/n8n/n8n.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { LogsModule } from './logs/logs.module.js';
@@ -41,6 +42,7 @@ import { WorkflowsModule } from './workflows/workflows.module.js';
     AiModule,
     AiAccountModule,
     AiAccessModule,
+    EveModule,
     WorkflowsModule,
     N8nIntegrationsModule,
   ],

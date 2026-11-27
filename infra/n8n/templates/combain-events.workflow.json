@@ -72,7 +72,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "=http://host.docker.internal:3001/integrations/n8n/events?limit=25&wait=25&cursor={{ $getWorkflowStaticData('global').cursor || '' }}",
+        "url": "=http://host.docker.internal:4001/integrations/n8n/events?limit=25&wait=25&cursor={{ $getWorkflowStaticData('global').cursor || '' }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -167,7 +167,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/soul-reply",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/soul-reply",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -201,7 +201,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:3001/integrations/n8n/actions/send-text",
+        "url": "http://host.docker.internal:4001/integrations/n8n/actions/send-text",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -231,7 +231,7 @@
     },
     {
       "parameters": {
-        "content": "## Combain ⇄ n8n — чек-лист\n\n1. **Credential.** n8n → Credentials → **Create credential** → *Header Auth*\n   - Name: `Combain Action API`\n   - Header Name: `x-combain-token`\n   - Header Value: значение `N8N_ACTION_TOKEN` из `apps/api/.env`\n     (после правки `.env` API надо перезапустить)\n2. **Импорт.** Этот шаблон: Workflows → **Import from File**\n   (`infra/n8n/templates/combain-events.workflow.json`).\n3. **Обе HTTP-ноды** → поле Credential → выбрать `Combain Action API`\n   (после импорта она может подсветиться красным — это нормально).\n4. **Проверка адреса.** n8n живёт в контейнере, приложение — на хосте:\n   `host.docker.internal:3001` (проброс задан в `infra/n8n/docker-compose.yml`).\n   Проверка: `docker compose exec n8n wget -qO- http://host.docker.internal:3001/ai/settings`\n5. **Активация.** Кнопка **Active** (Publish). Без неё workflow не работает по\n   расписанию.\n6. **Привязка к аккаунту.** Приложение → `/workflows` → «Использовать» на этом\n   workflow → затем повесить его на аккаунт. Пока workflow не привязан,\n   `/integrations/n8n/events` отдаёт пустой список.\n7. **Тест.** Напишите себе в Telegram с другого аккаунта (чат должен быть в\n   allowlist души) → Executions → последний запуск → событие в\n   «Разобрать события» → ответ в Telegram.\n\nПодробный разбор: `docs/workflows.md`.",
+        "content": "## Combain ⇄ n8n — чек-лист\n\n1. **Credential.** n8n → Credentials → **Create credential** → *Header Auth*\n   - Name: `Combain Action API`\n   - Header Name: `x-combain-token`\n   - Header Value: значение `N8N_ACTION_TOKEN` из `apps/api/.env`\n     (после правки `.env` API надо перезапустить)\n2. **Импорт.** Этот шаблон: Workflows → **Import from File**\n   (`infra/n8n/templates/combain-events.workflow.json`).\n3. **Обе HTTP-ноды** → поле Credential → выбрать `Combain Action API`\n   (после импорта она может подсветиться красным — это нормально).\n4. **Проверка адреса.** n8n живёт в контейнере, приложение — на хосте:\n   `host.docker.internal:4001` (проброс задан в `infra/n8n/docker-compose.yml`).\n   Проверка: `docker compose exec n8n wget -qO- http://host.docker.internal:4001/ai/settings`\n5. **Активация.** Кнопка **Active** (Publish). Без неё workflow не работает по\n   расписанию.\n6. **Привязка к аккаунту.** Приложение → `/workflows` → «Использовать» на этом\n   workflow → затем повесить его на аккаунт. Пока workflow не привязан,\n   `/integrations/n8n/events` отдаёт пустой список.\n7. **Тест.** Напишите себе в Telegram с другого аккаунта (чат должен быть в\n   allowlist души) → Executions → последний запуск → событие в\n   «Разобрать события» → ответ в Telegram.\n\nПодробный разбор: `docs/workflows.md`.",
         "height": 620,
         "width": 520,
         "color": 4
@@ -247,7 +247,7 @@
     },
     {
       "parameters": {
-        "content": "## Другие действия Action API (ветка выключена)\n\nБазовый шаблон только отвечает. Любое из этих действий — отдельная HTTP-нода\n(`POST http://host.docker.internal:3001/integrations/n8n/actions/...`,\ncredential `Combain Action API`, body = JSON). Скопируйте ноду «soul-reply»,\nпоменяйте URL и тело.\n\n| Действие | URL | Тело |\n| --- | --- | --- |\n| Отправить текст | `actions/send-text` | `{ accountId, chatId, threadId, text }` (части через `---`) |\n| Запомнить факт | `actions/memory/add` | `{ accountId, chatId, content, kind?, importance? }` |\n| Теги | `actions/tags/set` | `{ accountId, chatId, tag }` |\n| Предупреждение | `actions/warn` | `{ accountId, chatId, threadId?, reason }` |\n| Блокировка | `actions/block` | `{ accountId, chatId, threadId?, reason }` (3+ символа) |\n| Пауза автоматизаций | `actions/automations/pause` | `{ accountId, chatId, threadId? }` |\n| Инструмент агента | `actions/tool/<name>` | `{ accountId, chatId, args: { ... } }` |\n\nИнструменты (`tool/<name>`): `messages_send`, `messages_history`,\n`messages_search`, `messages_react`, `messages_read`, `chats_list`,\n`chats_get`, `chats_search`, `memory_add`, `memory_view`,\n`memory_summarize`, `souls_list`, `soul_get`, `automation_create`,\n`automation_pause_chat`, `automation_resume_chat`, `chat_warn`,\n`chat_block`, `chat_unblock`, `ai_access_get`, `ai_access_set`,\n`logs_search`, `policy_get`, `accounts_list`.\n\nПример с телом:\n\n```json\n{\n  \"accountId\": \"{{ $json.accountId }}\",\n  \"chatId\": {{ $json.chatId }},\n  \"tag\": \"vip\"\n}\n```\n\nПолитика аккаунта применяется как обычно: выключенная capability или\nзаблокированный чат возвращают 403, и это видно в Executions.",
+        "content": "## Другие действия Action API (ветка выключена)\n\nБазовый шаблон только отвечает. Любое из этих действий — отдельная HTTP-нода\n(`POST http://host.docker.internal:4001/integrations/n8n/actions/...`,\ncredential `Combain Action API`, body = JSON). Скопируйте ноду «soul-reply»,\nпоменяйте URL и тело.\n\n| Действие | URL | Тело |\n| --- | --- | --- |\n| Отправить текст | `actions/send-text` | `{ accountId, chatId, threadId, text }` (части через `---`) |\n| Запомнить факт | `actions/memory/add` | `{ accountId, chatId, content, kind?, importance? }` |\n| Теги | `actions/tags/set` | `{ accountId, chatId, tag }` |\n| Предупреждение | `actions/warn` | `{ accountId, chatId, threadId?, reason }` |\n| Блокировка | `actions/block` | `{ accountId, chatId, threadId?, reason }` (3+ символа) |\n| Пауза автоматизаций | `actions/automations/pause` | `{ accountId, chatId, threadId? }` |\n| Инструмент агента | `actions/tool/<name>` | `{ accountId, chatId, args: { ... } }` |\n\nИнструменты (`tool/<name>`): `messages_send`, `messages_history`,\n`messages_search`, `messages_react`, `messages_read`, `chats_list`,\n`chats_get`, `chats_search`, `memory_add`, `memory_view`,\n`memory_summarize`, `souls_list`, `soul_get`, `automation_create`,\n`automation_pause_chat`, `automation_resume_chat`, `chat_warn`,\n`chat_block`, `chat_unblock`, `ai_access_get`, `ai_access_set`,\n`logs_search`, `policy_get`, `accounts_list`.\n\nПример с телом:\n\n```json\n{\n  \"accountId\": \"{{ $json.accountId }}\",\n  \"chatId\": {{ $json.chatId }},\n  \"tag\": \"vip\"\n}\n```\n\nПолитика аккаунта применяется как обычно: выключенная capability или\nзаблокированный чат возвращают 403, и это видно в Executions.",
         "height": 700,
         "width": 700,
         "color": 7

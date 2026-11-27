@@ -109,7 +109,7 @@ curl -s http://127.0.0.1:8081/healthz   # OK
 | браузер в LAN | `http://192.168.1.88:5678` (поставьте реальный IP/имя хоста в `N8N_HOST` и `WEBHOOK_URL`) |
 | само приложение (API на этом же хосте) | `http://127.0.0.1:5678` |
 | приложение, если n8n на другом хосте | `http://<ip-n8n-хоста>:5678` |
-| n8n (из контейнера) → API приложения на хосте | `http://host.docker.internal:3001` |
+| n8n (из контейнера) → API приложения на хосте | `http://host.docker.internal:4001` |
 
 Важно про прокси: приложение ходит в LAN-сервисы **напрямую, минуя** прокси
 `192.168.31.216:3128`. Для интеграции с n8n прокси не нужен — в HTTP-клиенте
@@ -128,12 +128,12 @@ extra_hosts:
   - "host.docker.internal:host-gateway"
 ```
 
-поэтому workflows обращаются к API как `http://host.docker.internal:3001`.
+поэтому workflows обращаются к API как `http://host.docker.internal:4001`.
 Внутри контейнера `127.0.0.1` — это сам контейнер, и `192.168.1.88` может быть
 недоступен из bridge-сети, так что этот алиас обязателен. Проверка:
 
 ```bash
-docker compose exec n8n wget -qO- http://host.docker.internal:3001/ai/settings
+docker compose exec n8n wget -qO- http://host.docker.internal:4001/ai/settings
 ```
 
 Как собрать «входящее сообщение → ответ души» в n8n (credential, шаблон,
@@ -313,7 +313,7 @@ curl -s -X POST \
 
 ```bash
 # переназначить строку workflow на другой n8n-workflow
-curl -s -X PATCH http://127.0.0.1:3001/workflows/<workflowId> \
+curl -s -X PATCH http://127.0.0.1:4001/workflows/<workflowId> \
   -H 'content-type: application/json' \
   -d '{"n8nWorkflowId":"dayYJBs5WlG22pDR","n8nWorkflowName":"Combain: ответ на сообщение (v2: generate → send)"}'
 ```
@@ -431,6 +431,58 @@ docker compose exec n8n wget -qO- --header='Content-Type: application/json' \
 на `/v1`, префикс `/v1` из запроса отбрасывается. Логи — только
 `метод / путь -> статус, мс` и источник токена (`opencode.db` / `env`); ни тел,
 ни ключей, ни значения сессии в них нет (`docker compose logs llm-proxy`).
+
+### Трассы: какой контекст реально уходит в модель
+
+По умолчанию тела **не** пишутся. Включено в `docker-compose.yml` парой env:
+
+```yaml
+LLM_TRACE_DIR: /data/llm-traces        # пустая строка = трассировка выключена
+LLM_TRACE_KEEP_DAYS: ${LLM_TRACE_KEEP_DAYS:-7}
+```
+
+и volume `./data/llm-traces:/data/llm-traces`. Файлы появляются на хосте:
+`infra/n8n/data/llm-traces/YYYY-MM-DD.jsonl` (дата — UTC), **одна строка JSON на
+каждый POST с телом**. Каждая строка — это реальный запрос вместе с ответом:
+
+| Поле | Что внутри |
+| --- | --- |
+| `ts`, `id`, `durationMs` | время, UUID запроса, длительность |
+| `method`, `path`, `upstreamPath` | путь у прокси и путь у OpenCode Go |
+| `model`, `stream`, `messageCount` | параметры запроса |
+| `messages` | **весь контекст как есть**: system/персона, история, tool-результаты |
+| `tools`, `max_tokens`, `temperature` | остальные параметры, если были |
+| `headers` | только безопасный allowlist (`content-type`, `accept`, `user-agent`, `openai-*`); `authorization`/`api-key`/`cookie`/`x-opencode-session` пишутся как `[redacted]` |
+| `response.status` | HTTP-статус апстрима |
+| `response.text` | `choices[0].message.content` для JSON или склеенные `delta.content` для SSE |
+| `response.usage`, `response.finishReason` | usage/finish_reason, если апстрим их прислал |
+| `response.textTruncated` / `responseTruncated` | сработал кап |
+
+Ограничения, чтобы диск не кончился: одно строковое поле ≤ 200 КБ, весь
+`messages` ≤ 2 МБ (сохраняются ведущий system-блок и самые новые сообщения,
+середина длинной истории отбрасывается с маркером `__truncated`),
+`response.text` ≤ 64 КБ. SSE не буферизуется:
+контент копится по мере стриминга, клиент получает байты без задержки.
+Запись асинхронная, после ответа; ошибка записи только один раз пишет warning
+в лог и никогда не ломает прокси. Файлы старше `LLM_TRACE_KEEP_DAYS` удаляются
+при старте и раз в сутки. Токен OpenCode в трассы не попадает ни в каком виде.
+
+Смотреть:
+
+```bash
+ls infra/n8n/data/llm-traces/
+# последняя трасса: модель, число сообщений, первые 400 символов ответа
+tail -n1 infra/n8n/data/llm-traces/$(date -u +%F).jsonl |
+  jq '{ts,model,messageCount,roles:[.messages[].role],text:.response.text[0:400]}'
+# только system-контекст (персона) последнего запроса
+tail -n1 infra/n8n/data/llm-traces/$(date -u +%F).jsonl |
+  jq -r '.messages[] | select(.role=="system") | .content' | head -50
+# поток запросов в реальном времени
+tail -f infra/n8n/data/llm-traces/$(date -u +%F).jsonl | jq -c '{ts,path,model,messageCount}'
+```
+
+**В трассах лежит переписка.** Каталог `data/` в git не попадает; не выкладывайте
+его и не открывайте порт `4100` наружу.
 
 ## n8n Assistant: sandbox
 

@@ -42,7 +42,17 @@ export interface MessageLike {
   sendingState?: 'pending' | 'failed' | null;
   sender: PeerLike;
   chat: PeerLike;
-  replyToMessage: { id: number | null } | null;
+  replyToMessage: { id: number | null; text?: string; quoteText?: string } | null;
+  /** Display name of the original author for a forwarded message. */
+  forwardedFrom?: string | null;
+  /**
+   * mtcute's `MessageForwardInfo`. Structural: only the sender name is read,
+   * and the sender may be a peer object or a plain name string.
+   */
+  forward?: {
+    sender?: { displayName?: string } | string | null;
+    signature?: string | null;
+  } | null;
   /**
    * Only the fields we read are structural. `fileName` / `mimeType` are
    * getters on mtcute's document classes and `fileSize` lives on
@@ -54,6 +64,8 @@ export interface MessageLike {
     fileName?: string | null;
     mimeType?: string | null;
     fileSize?: number;
+    /** Bot API/TDLib-compatible file id; needed to resend a saved sticker. */
+    fileId?: string | null;
     /** Sticker/animated-emoji emoji, when Telegram knows one. */
     emoji?: string | null;
     /** Explicit animation flag (TDLib); mtcute derives it from `sourceType`. */
@@ -135,6 +147,8 @@ export interface MessageMediaView {
   fileName: string | null;
   size: number | null;
   downloadable: boolean;
+  /** Bot API-compatible file id of the media (stickers, photos, documents). */
+  fileId?: string;
   /** Unicode emoji of a sticker or an animated emoji. */
   emoji?: string;
   /** The media moves (`.tgs`, `.webm`, GIF): a still frame is not all of it. */
@@ -204,6 +218,10 @@ export interface MessageView {
   senderId: number;
   senderName: string;
   replyToId: number | null;
+  /** Quoted text of the replied-to message, when Telegram provides it. */
+  replyToText?: string | null;
+  /** Original author for a forwarded message. */
+  forwardedFrom?: string | null;
   /** Kept for older clients; `media` is the structured descriptor. */
   mediaType: string | null;
   media: MessageMediaView | null;
@@ -456,6 +474,7 @@ export function toMessageMediaView(
     finiteNumber(readMediaOption<unknown>(media, 'durationSec')) ??
     finiteNumber(readMediaOption<unknown>(media, 'duration'));
   const emoji = readMediaOption<string>(media, 'emoji');
+  const fileId = readMediaOption<string>(media, 'fileId');
   const stickerSet = stickerSetName(media);
 
   const view: MessageMediaView = {
@@ -466,6 +485,7 @@ export function toMessageMediaView(
     size: readMediaField<number>(media, 'fileSize'),
     downloadable: DOWNLOADABLE_KINDS.has(kind),
   };
+  if (typeof fileId === 'string' && fileId) view.fileId = fileId;
   if (typeof emoji === 'string' && emoji) view.emoji = emoji;
   if (isAnimated) view.isAnimated = true;
   if (width !== null) view.width = width;
@@ -638,8 +658,23 @@ export function toMessageThreadInfo(
   return { comments: count, hasComments, discussionChatId };
 }
 
+/** Display name of a forward origin: a peer or a plain private-forward name. */
+function forwardSenderName(forward: MessageLike['forward']): string | null {
+  if (!forward) return null;
+  const sender = forward.sender;
+  if (typeof sender === 'string') return sender.trim() || null;
+  if (sender && typeof sender === 'object') {
+    return typeof sender.displayName === 'string'
+      ? sender.displayName.trim() || null
+      : null;
+  }
+  return null;
+}
+
 /** Message DTO shared by REST responses and WS events. */
 export function toMessageView(message: MessageLike): MessageView {
+  const replyText =
+    message.replyToMessage?.text ?? message.replyToMessage?.quoteText ?? null;
   return {
     id: message.id,
     chatId: message.chat.id,
@@ -650,6 +685,12 @@ export function toMessageView(message: MessageLike): MessageView {
     senderId: message.sender.id,
     senderName: message.sender.displayName,
     replyToId: message.replyToMessage?.id ?? null,
+    replyToText: replyText?.slice(0, 300) ?? null,
+    forwardedFrom:
+      (message.forwardedFrom ?? forwardSenderName(message.forward))?.slice(
+        0,
+        120,
+      ) ?? null,
     mediaType: legacyMediaType(message.media?.type ?? null),
     media: toMessageMediaView(message.media),
     reactions: toMessageReactions(message),

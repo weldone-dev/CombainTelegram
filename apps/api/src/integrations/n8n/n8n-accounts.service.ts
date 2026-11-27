@@ -352,6 +352,23 @@ export class N8nAccountsService {
    * Ownership check shared by every action: an account of another user is
    * reported as missing, never as forbidden, so ids cannot be probed.
    */
+  /**
+   * `true` when the account is bound to an Eve persona. Eve owns replies for
+   * that account, so the legacy Action API must not send a second one.
+   */
+  async isEveBound(accountId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.evePersonaAccount.findFirst({
+        where: { accountId, enabled: true },
+        select: { id: true },
+      });
+      return row !== null;
+    } catch {
+      // An older database without Eve tables keeps the legacy workflow alive.
+      return false;
+    }
+  }
+
   async requireAccount(userId: string, accountId: string): Promise<void> {
     const account = await this.prisma.telegramAccount.findFirst({
       where: { id: accountId, userId },

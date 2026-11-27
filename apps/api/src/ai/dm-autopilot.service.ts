@@ -710,6 +710,23 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (!account) return;
     if (Number(account.tgUserId) === chatId) return; // Saved Messages
 
+    // Eve gate: an account bound to a new girl-agent persona is driven by the
+    // Eve channel, not by the legacy DM autopilot. The event is still written
+    // to `EveEvent` by `EveEventsService`.
+    if (await this.isEveAccount(accountId)) {
+      this.nextToken(`${accountId}:${chatId}`);
+      emitLog({
+        level: 'debug',
+        source: 'ai',
+        action: 'dm.autopilot.eve',
+        message: `Autopilot skipped in ${chatId}: the account is bound to an Eve persona`,
+        status: 'ok',
+        accountId,
+        chatId,
+      });
+      return;
+    }
+
     const threadId = threadIdOf(data, message);
 
     // Workflow gate. An account assigned to n8n is driven by its workflow:
@@ -2304,6 +2321,24 @@ export class DmAutopilotService implements OnModuleInit, OnModuleDestroy {
   private workflowGate(account: Pick<TelegramAccountModel, 'workflowId'>): boolean {
     if (account.workflowId) return true;
     return envFlag('AI_WORKFLOW_STRICT');
+  }
+
+  /**
+   * True when the account is bound to a girl-agent style Eve persona.
+   *
+   * The query is defensive: an older database without the Eve tables must keep
+   * the legacy autopilot working rather than failing every incoming message.
+   */
+  private async isEveAccount(accountId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.evePersonaAccount.findFirst({
+        where: { accountId, enabled: true },
+        select: { id: true },
+      });
+      return row !== null;
+    } catch {
+      return false;
+    }
   }
 
   /** Same gate for a late check where only the account id is at hand. */

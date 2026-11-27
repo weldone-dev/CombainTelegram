@@ -62,9 +62,9 @@ model Proxy {
 
 /// One attached Telegram account slot. A local user can have many.
 model TelegramAccount {
-  id                     String            @id @default(cuid())
+  id                     String              @id @default(cuid())
   userId                 String
-  user                   User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                   User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   tgUserId               BigInt
   phoneEncrypted         Bytes?
   phoneNonce             Bytes?
@@ -76,14 +76,14 @@ model TelegramAccount {
   cloudPasswordEncrypted Bytes?
   cloudPasswordNonce     Bytes?
   cloudPasswordTag       Bytes?
-  deviceProfile          String            @default("{}")
+  deviceProfile          String              @default("{}")
   /// Free-form per-account variables handed to n8n (JSON object).
-  aiVariables            String            @default("{}")
-  isActive               Boolean           @default(false)
+  aiVariables            String              @default("{}")
+  isActive               Boolean             @default(false)
   /// Session the app uses as the account's transport (engine + routing).
   activeSessionId        String?
   lastUsedAt             DateTime?
-  createdAt              DateTime          @default(now())
+  createdAt              DateTime            @default(now())
   sessions               TelegramSession[]
   soul                   Soul?
   bots                   TelegramBot[]
@@ -97,7 +97,10 @@ model TelegramAccount {
   aiSetting              AiAccountSetting?
   /// Workflow engine assignment. Null = AI disabled for this account.
   workflowId             String?
-  workflow               Workflow?         @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+  workflow               Workflow?           @relation(fields: [workflowId], references: [id], onDelete: SetNull)
+  /// girl-agent style personas bound to this account (new Eve engine).
+  evePersonaAccounts     EvePersonaAccount[]
+  eveChatBindings        EveChatBinding[]
 
   @@unique([userId, tgUserId])
   @@index([userId])
@@ -717,4 +720,393 @@ model AgentRun {
 
   @@index([accountId, createdAt])
   @@index([source, createdAt])
+}
+
+// ============================================================================
+// Eve engine: girl-agent style personas, memory and state.
+// NestJS owns this database; the Eve process talks to Nest over HTTP.
+// ============================================================================
+
+/// A girl-agent style persona. This is intentionally separate from `Soul`.
+model EvePersona {
+  id              String   @id @default(cuid())
+  name            String
+  age             Int      @default(22)
+  nationality     String   @default("RU")
+  timezone        String   @default("Europe/Moscow")
+  stage           String   @default("tg-given-warming")
+  mode            String   @default("auto")
+  sleepFrom       Int      @default(23)
+  sleepTo         Int      @default(8)
+  nightWakeChance Float    @default(0.05)
+  ignoreTendency  Int      @default(35)
+  communication   String   @default("{}")
+  /// Weekly busy routine as JSON (`BusySlot[]`); empty/null means no routine.
+  busySchedule    String?
+  vibe            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  docs          EvePersonaDoc[]
+  accounts      EvePersonaAccount[]
+  bindings      EveChatBinding[]
+  relationships EveRelationship[]
+
+  @@index([name])
+}
+
+/// A named document of a persona: persona/speech/boundaries/communication/...
+model EvePersonaDoc {
+  id        String     @id @default(cuid())
+  personaId String
+  persona   EvePersona @relation(fields: [personaId], references: [id], onDelete: Cascade)
+  kind      String
+  content   String     @default("")
+  updatedAt DateTime   @updatedAt
+  createdAt DateTime   @default(now())
+
+  @@unique([personaId, kind])
+}
+
+/// Bind one persona to one Telegram account (or several accounts to one persona).
+model EvePersonaAccount {
+  id               String          @id @default(cuid())
+  personaId        String
+  persona          EvePersona      @relation(fields: [personaId], references: [id], onDelete: Cascade)
+  accountId        String
+  account          TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  /// shared = one relationship per persona+peer; isolated = per account+chat.
+  relationshipMode String          @default("isolated")
+  enabled          Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@unique([personaId, accountId])
+  @@index([accountId])
+}
+
+/// Explicit allowlist: a chat is answered only when this row is allowed.
+model EveChatBinding {
+  id        String          @id @default(cuid())
+  personaId String
+  persona   EvePersona      @relation(fields: [personaId], references: [id], onDelete: Cascade)
+  accountId String
+  account   TelegramAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  chatId    BigInt
+  threadId  Int             @default(0)
+  allowed   Boolean         @default(false)
+  note      String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([personaId, accountId, chatId, threadId])
+  @@index([accountId, chatId])
+}
+
+/// Relationship state for a persona and a peer scope key.
+model EveRelationship {
+  id         String     @id @default(cuid())
+  personaId  String
+  persona    EvePersona @relation(fields: [personaId], references: [id], onDelete: Cascade)
+  /// shared: persona+tgUserId; isolated: persona+accountId+chatId.
+  scopeKey   String
+  stage      String     @default("tg-given-warming")
+  interest   Int        @default(0)
+  trust      Int        @default(0)
+  attraction Int        @default(0)
+  annoyance  Int        @default(0)
+  cringe     Int        @default(0)
+  notes      String     @default("")
+  updatedAt  DateTime   @updatedAt
+  createdAt  DateTime   @default(now())
+
+  events   EveRelationshipEvent[]
+  conflict EveConflict?
+
+  @@unique([personaId, scopeKey])
+}
+
+model EveRelationshipEvent {
+  id             String          @id @default(cuid())
+  relationshipId String
+  relationship   EveRelationship @relation(fields: [relationshipId], references: [id], onDelete: Cascade)
+  kind           String          @default("note")
+  text           String
+  createdAt      DateTime        @default(now())
+
+  @@index([relationshipId, createdAt])
+}
+
+model EveConflict {
+  id             String          @id @default(cuid())
+  relationshipId String          @unique
+  relationship   EveRelationship @relation(fields: [relationshipId], references: [id], onDelete: Cascade)
+  level          Int             @default(0)
+  coldUntil      DateTime?
+  reason         String?
+  history        String          @default("[]")
+  updatedAt      DateTime        @updatedAt
+  createdAt      DateTime        @default(now())
+
+  events EveConflictEvent[]
+}
+
+model EveConflictEvent {
+  id            String       @id @default(cuid())
+  conflictId    String
+  level         Int
+  note          String       @default("")
+  createdAt     DateTime     @default(now())
+  eveConflict   EveConflict? @relation(fields: [eveConflictId], references: [id])
+  eveConflictId String?
+
+  @@index([conflictId, createdAt])
+}
+
+model EveAgendaItem {
+  id         String   @id @default(cuid())
+  personaId  String
+  accountId  String
+  chatId     BigInt
+  about      String
+  reason     String   @default("")
+  kind       String   @default("proactive-life")
+  state      String   @default("pending")
+  importance Int      @default(1)
+  pingAt     DateTime
+  attempts   Int      @default(0)
+  history    String   @default("[]")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([personaId, state, pingAt])
+  @@index([accountId, chatId])
+}
+
+model EveDailyLife {
+  id        String   @id @default(cuid())
+  personaId String
+  date      String
+  markdown  String   @default("")
+  json      String   @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([personaId, date])
+}
+
+model EveMemoryDaily {
+  id        String   @id @default(cuid())
+  personaId String
+  date      String
+  markdown  String   @default("")
+  json      String   @default("{}")
+  complete  Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([personaId, date])
+}
+
+model EveMemoryFact {
+  id             String   @id @default(cuid())
+  personaId      String
+  relationshipId String?
+  kind           String   @default("fact")
+  content        String
+  importance     Int      @default(3)
+  source         String   @default("agent")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([personaId, kind])
+  @@index([relationshipId])
+}
+
+model EveEpisode {
+  id        String   @id @default(cuid())
+  personaId String
+  date      String
+  content   String
+  createdAt DateTime @default(now())
+
+  @@unique([personaId, date])
+}
+
+model EvePalaceDrawer {
+  id        String   @id @default(cuid())
+  personaId String
+  drawerId  String
+  wing      String
+  hall      String
+  room      String
+  content   String
+  keywords  String   @default("[]")
+  salience  Int      @default(5)
+  source    String   @default("interaction")
+  hash      String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([personaId, drawerId])
+  @@index([personaId, hall])
+}
+
+model EveTimeItem {
+  id             String    @id @default(cuid())
+  personaId      String
+  relationshipId String?
+  kind           String    @default("open-loop")
+  content        String
+  status         String    @default("open")
+  dueAt          DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([personaId, kind, status])
+}
+
+model EveCrossChatMemory {
+  id        String   @id @default(cuid())
+  personaId String
+  peerId    String
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([personaId, peerId])
+}
+
+model EveSessionLog {
+  id        String   @id @default(cuid())
+  personaId String
+  accountId String
+  chatId    BigInt
+  day       String
+  line      String
+  createdAt DateTime @default(now())
+
+  @@index([personaId, day])
+  @@index([accountId, chatId, createdAt])
+}
+
+model EveSticker {
+  id        String   @id @default(cuid())
+  personaId String
+  fileId    String
+  emoji     String   @default("")
+  tags      String   @default("[]")
+  createdAt DateTime @default(now())
+
+  @@unique([personaId, fileId])
+}
+
+model EveProactiveState {
+  id        String   @id @default(cuid())
+  personaId String
+  date      String
+  marker    String
+  createdAt DateTime @default(now())
+
+  @@unique([personaId, date, marker])
+}
+
+model EveSessionState {
+  id        String   @id @default(cuid())
+  personaId String
+  accountId String
+  chatId    BigInt
+  state     String   @default("{}")
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([personaId, accountId, chatId])
+}
+
+/// Durable deferred work for the Eve channel: a delayed turn or a delayed
+/// Telegram action. Nest owns the clock, so an Eve restart loses nothing.
+model EveDelayedAction {
+  id        String    @id @default(cuid())
+  personaId String
+  accountId String
+  chatId    BigInt
+  threadId  Int       @default(0)
+  /// turn | send | edit | delete | react | read
+  kind      String
+  /// delay | sleep | busy | offline | followup
+  reason    String    @default("delay")
+  /// Idempotency key of the originating event; null for ad-hoc work.
+  key       String?
+  payload   String    @default("{}")
+  /// null = wait for a state change (asleep/busy), not for the clock.
+  dueAt     DateTime?
+  state     String    @default("pending")
+  attempts  Int       @default(0)
+  lastError String?
+  firedAt   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([personaId, key])
+  @@index([state, dueAt])
+  @@index([personaId, state])
+  @@index([accountId, chatId])
+}
+
+/// Durable event outbox for the Eve channel. Nest writes; Eve reads/replays.
+model EveEvent {
+  id          String    @id @default(cuid())
+  kind        String
+  personaId   String?
+  accountId   String?
+  chatId      BigInt?
+  threadId    Int       @default(0)
+  payload     String    @default("{}")
+  createdAt   DateTime  @default(now())
+  deliveredAt DateTime?
+
+  @@index([createdAt])
+  @@index([personaId, createdAt])
+  @@index([deliveredAt])
+}
+
+/// What actually went to the model on one Eve turn.
+///
+/// The Eve process captures the final model input in an instrumentation
+/// provider (exactly the instructions and messages the AI SDK received) and
+/// posts it here after the turn settles. `systemJson`/`messagesJson` are JSON
+/// arrays, `tokensJson` is the usage or an estimate (`meta.estimated`).
+/// `turnId` is `<eveSessionId>:<turnId>` so a retried turn is idempotent even
+/// after a session reset (turn ids restart at `turn_0`).
+model EveContextSnapshot {
+  id           String   @id @default(cuid())
+  personaId    String
+  accountId    String
+  chatId       BigInt
+  threadId     Int      @default(0)
+  /// inbound | proactive | deletion | reaction | other
+  kind         String   @default("other")
+  model        String   @default("")
+  turnId       String?
+  tokensJson   String   @default("{}")
+  systemJson   String   @default("[]")
+  messagesJson String   @default("[]")
+  metaJson     String   @default("{}")
+  /// Outbound actions were suppressed for this chat while the turn ran.
+  dryRun       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@unique([personaId, accountId, chatId, turnId])
+  @@index([personaId, chatId, createdAt])
+  @@index([personaId, accountId, createdAt])
+}
+
+/// Durable dedupe claim for the Eve event outbox. `EveEvent.dedupeKey` is not
+/// unique (legacy rows may repeat), and the in-memory claim is lost on restart,
+/// so a replayed realtime update could become a second event and a second turn.
+/// Pruned by age; `key` is the provider dedupe key.
+model EveEventDedupe {
+  key       String   @id
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
 }

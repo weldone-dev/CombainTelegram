@@ -23,8 +23,8 @@
 
 | Компонент | Где | Адрес | Кто обращается |
 | --- | --- | --- | --- |
-| Приложение (NestJS API) | процесс на хосте | `0.0.0.0:3001`, Swagger `/docs` | дашборд, n8n-контейнер, curl |
-| Дашборд (Next.js) | процесс на хосте | `http://localhost:3000` | браузер |
+| Приложение (NestJS API) | процесс на хосте | `0.0.0.0:4001`, Swagger `/docs` | дашборд, n8n-контейнер, curl |
+| Дашборд (Next.js) | процесс на хосте | `http://localhost:4000` | браузер |
 | n8n | контейнер `n8n-n8n-1` | `http://192.168.1.88:5678` (`N8N_HOST`), внутри сети — `http://n8n:5678` | браузер, приложение |
 | Postgres n8n | контейнер, наружу не публикуется | `postgres:5432` | только n8n |
 | llm-proxy (OpenCode Go) | контейнер | `:4100` на хосте, `http://llm-proxy:4000` в сети | n8n Assistant |
@@ -32,8 +32,8 @@
 | SearXNG | контейнер | `127.0.0.1:8081`, в сети `http://searxng:8080` | n8n Assistant |
 
 Ключевой момент про адреса: **внутри контейнера `127.0.0.1` — это сам контейнер**.
-Поэтому n8n не может ходить в приложение ни по `127.0.0.1:3001`, ни по
-`192.168.1.88:3001` (этот адрес может быть недоступен из bridge-сети).
+Поэтому n8n не может ходить в приложение ни по `127.0.0.1:4001`, ни по
+`192.168.1.88:4001` (этот адрес может быть недоступен из bridge-сети).
 Для этого в `infra/n8n/docker-compose.yml` у сервисов `n8n` и `llm-proxy` есть:
 
 ```yaml
@@ -41,21 +41,21 @@ extra_hosts:
   - "host.docker.internal:host-gateway"
 ```
 
-и приложение доступно из контейнера как `http://host.docker.internal:3001`.
+и приложение доступно из контейнера как `http://host.docker.internal:4001`.
 Из браузера это имя **не** работает — оно только для контейнеров.
 
 Проверка (приложение должно быть запущено):
 
 ```bash
 cd infra/n8n
-docker compose exec n8n wget -qO- http://host.docker.internal:3001/ai/settings
+docker compose exec n8n wget -qO- http://host.docker.internal:4001/ai/settings
 # ожидаем JSON: {"provider":"openai-compatible",...}
 ```
 
 Направления запросов:
 
 ```
-n8n workflow ──HTTP (x-combain-token)──▶ приложение :3001 /integrations/n8n/*
+n8n workflow ──HTTP (x-combain-token)──▶ приложение :4001 /integrations/n8n/*
 n8n workflow ──HTTP────────────────────▶ llm-proxy :4100 / sandbox / searxng
 приложение   ──HTTP (X-N8N-API-KEY)────▶ n8n :5678 /api/v1/*   (только список
                                           workflow и executions для дашборда)
@@ -89,10 +89,10 @@ Action API (`/integrations/n8n/*`) закрыт общим секретом в �
    ```bash
    TOKEN=$(grep '^N8N_ACTION_TOKEN=' apps/api/.env | cut -d= -f2)
    curl -s -H "x-combain-token: $TOKEN" \
-     'http://127.0.0.1:3001/integrations/n8n/events?limit=1'
+     'http://127.0.0.1:4001/integrations/n8n/events?limit=1'
    # {"events":[],"nextCursor":null}   ← 200 и пустая лента = всё хорошо
    curl -s -o /dev/null -w '%{http_code}\n' \
-     'http://127.0.0.1:3001/integrations/n8n/events?limit=1'
+     'http://127.0.0.1:4001/integrations/n8n/events?limit=1'
    # 401 — токен не передан; 503 — токен не задан в API
    ```
 
@@ -211,7 +211,7 @@ curl -s -X POST http://127.0.0.1:5678/api/v1/workflows \
 (`PUT /workflows/:id/accounts`):
 
 ```bash
-curl -s -X PUT http://127.0.0.1:3001/workflows/<wfId>/accounts \
+curl -s -X PUT http://127.0.0.1:4001/workflows/<wfId>/accounts \
   -H 'Content-Type: application/json' \
   -d '{"accountIds":["<accountId>"]}'
 ```
@@ -261,7 +261,7 @@ workflow»); чтобы остановить движок — деактивир
 ```bash
 TOKEN=$(grep '^N8N_ACTION_TOKEN=' apps/api/.env | cut -d= -f2)
 curl -s -H "x-combain-token: $TOKEN" \
-  'http://127.0.0.1:3001/integrations/n8n/accounts' \
+  'http://127.0.0.1:4001/integrations/n8n/accounts' \
   | jq '.[] | {id,title,workflowId,workflowName,soulMode}'
 ```
 
@@ -272,7 +272,7 @@ Telegram-аккаунта в личку этому аккаунту и посм�
 
 ```bash
 curl -s -H "x-combain-token: $TOKEN" \
-  'http://127.0.0.1:3001/integrations/n8n/events?limit=5&wait=5' | jq
+  'http://127.0.0.1:4001/integrations/n8n/events?limit=5&wait=5' | jq
 ```
 
 Ответ: `{ "events": [ { "id", "kind", "accountId", "chatId", "threadId",
@@ -297,13 +297,13 @@ n8n → **Executions** → последний запуск. Ожидаемая �
 
 ```bash
 # debug-записи гейта: «Autopilot skipped in <chatId>: the account is assigned…»
-curl -s 'http://127.0.0.1:3001/logs?q=dm.autopilot&limit=20' \
+curl -s 'http://127.0.0.1:4001/logs?q=dm.autopilot&limit=20' \
   | jq '.entries[] | {level,action,message}'
 # запуски агента, в том числе созданные soul-reply
-curl -s 'http://127.0.0.1:3001/ai/runs?source=dm&limit=5' \
+curl -s 'http://127.0.0.1:4001/ai/runs?source=dm&limit=5' \
   | jq '.runs[] | {id,status,steps,model,error}'
 # события, которые приложение записало в outbox
-curl -s 'http://127.0.0.1:3001/logs?q=n8n.event&limit=20' \
+curl -s 'http://127.0.0.1:4001/logs?q=n8n.event&limit=20' \
   | jq '.entries[] | {action,message}'
 ```
 
@@ -320,7 +320,7 @@ prompt, output, steps, trace, токены, ошибка.
 | `200`, `events: []`, но workflow привязан | сообщение пришло до привязки/до старта приложения; либо это группа и её отфильтровали | написать новое сообщение, проверить `chatId > 0` |
 | `200`, `events: []`, `nextCursor` не меняется | курсор уже указывает на последнее событие | это норма: ждём новых |
 | курсор «застрял» на удалённой записи | ретенция вычистила строку | лента сама переиграет с самой старой сохранённой; если нет — очистить `staticData.global.cursor` в n8n (Workflow → ⋯ → Settings → Static Data) |
-| n8n: `ECONNREFUSED`/`ENOTFOUND host.docker.internal` | нет `extra_hosts` или контейнер не пересоздан | `docker compose up -d` в `infra/n8n`, затем `docker compose exec n8n wget -qO- http://host.docker.internal:3001/ai/settings` |
+| n8n: `ECONNREFUSED`/`ENOTFOUND host.docker.internal` | нет `extra_hosts` или контейнер не пересоздан | `docker compose up -d` в `infra/n8n`, затем `docker compose exec n8n wget -qO- http://host.docker.internal:4001/ai/settings` |
 | n8n: `connect ETIMEDOUT` | приложение слушает только loopback или другой порт | `PORT=3001` и `0.0.0.0` в `apps/api` |
 | n8n: `socket hang up` на soul-reply | ответ дольше 120 с | увеличить `options.timeout`; смотреть `GET /logs?level=error` |
 | `404 SOUL_NOT_FOUND` | у аккаунта не настроена душа | Настройки аккаунта → Душа |
@@ -341,7 +341,7 @@ prompt, output, steps, trace, токены, ошибка.
 обычным HTTP-вызовом
 
 ```http
-POST http://host.docker.internal:3001/integrations/n8n/actions/tool/<name>
+POST http://host.docker.internal:4001/integrations/n8n/actions/tool/<name>
 x-combain-token: <N8N_ACTION_TOKEN>
 content-type: application/json
 
@@ -380,7 +380,7 @@ content-type: application/json
 Пример: узнать историю чата тем же путём, которым это делает агент:
 
 ```bash
-curl -s -X POST http://127.0.0.1:3001/integrations/n8n/actions/tool/messages_history \
+curl -s -X POST http://127.0.0.1:4001/integrations/n8n/actions/tool/messages_history \
   -H "x-combain-token: $TOKEN" -H 'Content-Type: application/json' \
   -d '{"accountId":"<id>","args":{"chatId":123456789,"limit":10}}'
 ```
@@ -422,7 +422,7 @@ MCP-инструмент. Поле **Path** — это полный путь, а
 ноду **MCP Client Tool** и указать
 
 ```
-URL:    http://host.docker.internal:3001/mcp
+URL:    http://host.docker.internal:4001/mcp
 Header: Authorization: Bearer <токен из GET /ai/mcp>
 ```
 

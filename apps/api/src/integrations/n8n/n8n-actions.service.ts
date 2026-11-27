@@ -23,7 +23,7 @@ import { PresenceService } from '../../ai/presence.service.js';
 import { SoulsService, parseSoulSettings } from '../../ai/souls.service.js';
 import { clampTypingHeartbeat } from '../../ai/typing.js';
 import { AutomationsService } from '../../automations/automations.service.js';
-import { apiError } from '../../common/api-error.js';
+import { apiError, conflict } from '../../common/api-error.js';
 import { emitLog } from '../../logs/log-sink.js';
 import { MessagingService } from '../../messaging/messaging.service.js';
 import { parseTypingSendOption } from '../../messaging/params.js';
@@ -234,6 +234,7 @@ export class N8nActionsService implements OnModuleDestroy {
       splitOutgoingText(requireText(body.text, 'text', 4096 * MAX_PARTS));
 
     await this.accounts.requireAccount(userId, accountId);
+    await this.assertNotEve(accountId);
     await this.assertNotBlocked(userId, accountId, chatId, threadId);
 
     const result = await this.autopilot.sendText({
@@ -266,6 +267,7 @@ export class N8nActionsService implements OnModuleDestroy {
     const maxParts = optionalInteger(body.maxParts, 'maxParts', 1, 3);
 
     await this.accounts.requireAccount(userId, accountId);
+    await this.assertNotEve(accountId);
     return this.autopilot.generateReply({
       userId,
       accountId,
@@ -297,6 +299,7 @@ export class N8nActionsService implements OnModuleDestroy {
     const returnText = optionalBoolean(body.returnText, 'returnText');
 
     await this.accounts.requireAccount(userId, accountId);
+    await this.assertNotEve(accountId);
 
     const key =
       replyToMessageId === undefined
@@ -828,6 +831,20 @@ export class N8nActionsService implements OnModuleDestroy {
       throw apiError(code, result.error ?? 'Tool call failed', status);
     }
     return { ok: true, result: result.result, dryRun: result.dryRun === true };
+  }
+
+  /**
+   * Eve gate for the legacy Action API. A workflow that keeps calling
+   * `send-text`/`generate`/`soul-reply` for an Eve account gets a 409 instead
+   * of a second reply in the same chat.
+   */
+  private async assertNotEve(accountId: string): Promise<void> {
+    if (await this.accounts.isEveBound(accountId)) {
+      throw conflict(
+        'N8N_EVE_ACCOUNT',
+        'Account is bound to an Eve persona; the Eve channel owns replies',
+      );
+    }
   }
 
   private async assertNotBlocked(

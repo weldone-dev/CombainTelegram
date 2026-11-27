@@ -44,7 +44,10 @@ function accessRow(): AiChatAccessModel {
 function harness(
   options: { block?: AiChatBlockModel | null } = {},
 ) {
-  const accounts = { requireAccount: vi.fn(async () => undefined) };
+  const accounts = {
+    requireAccount: vi.fn(async () => undefined),
+    isEveBound: vi.fn(async () => false),
+  };
   const access = {
     accessFor: vi.fn(async () => ({
       allowed: options.block ? false : true,
@@ -207,6 +210,21 @@ function codeOf(error: HttpException): string {
 }
 
 describe('N8nActionsService.sendText', () => {
+  it('refuses an Eve-bound account and sends nothing', async () => {
+    const h = harness();
+    h.accounts.isEveBound.mockResolvedValueOnce(true);
+    const error = await failure(() =>
+      h.service.sendText('user-1', {
+        accountId: ACCOUNT,
+        chatId: CHAT,
+        text: 'hello',
+      }),
+    );
+    expect(error.getStatus()).toBe(409);
+    expect(codeOf(error)).toBe('N8N_EVE_ACCOUNT');
+    expect(h.autopilot.sendText).not.toHaveBeenCalled();
+  });
+
   it('refuses a blocked chat with CHAT_BLOCKED and sends nothing', async () => {
     const h = harness({ block: blockRow() });
     const error = await failure(() =>

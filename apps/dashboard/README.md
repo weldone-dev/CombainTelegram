@@ -14,9 +14,9 @@ bun run db:migrate
 bun run dev
 ```
 
-- Dashboard: http://localhost:3000 (fixed port, no auto-increment)
-- API: http://localhost:3001
-- Swagger UI: http://localhost:3001/docs (OpenAPI JSON: `/docs-json`)
+- Dashboard: http://localhost:4000 (fixed port, no auto-increment)
+- API: http://localhost:4001
+- Swagger UI: http://localhost:4001/docs (OpenAPI JSON: `/docs-json`)
 
 To run only the dashboard:
 
@@ -26,12 +26,12 @@ bunx turbo run dev --filter=dashboard
 
 ## Configuration
 
-`NEXT_PUBLIC_API_URL` (default `http://localhost:3001`) is read by the browser.
+`NEXT_PUBLIC_API_URL` (default `http://localhost:4001`) is read by the browser.
 See `.env.example`; `.env.local` is gitignored and overrides it for local dev.
 
 ## Using the UI
 
-1. Open http://localhost:3000. The app is single-user — there is no login or
+1. Open http://localhost:4000. The app is single-user — there is no login or
    registration; it runs as `DEFAULT_USER_ID` (default `local`).
 2. Add Telegram accounts from the sidebar:
    - **Phone** — `+number`, then the Telegram code; handles 2FA password and

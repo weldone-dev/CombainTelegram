@@ -1,5 +1,9 @@
 # n8n runtime state (workflows, executions, postgres cluster) - host-side only
-data/
+data/*
+# only the empty trace directory is tracked; traces/logs stay out of git
+!data/llm-traces/
+data/llm-traces/*
+!data/llm-traces/.gitkeep
 
 # real secrets; .env.example is committed instead
 .env

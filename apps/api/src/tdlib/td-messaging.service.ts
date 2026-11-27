@@ -42,6 +42,7 @@ import type {
   ChatInfoPollView,
   ChatInfoSimilarView,
   ChatSearchView,
+  ContactBlockView,
   DeletedMessageView,
   ForwardView,
   GlobalSearchView,
@@ -147,6 +148,8 @@ export interface TdSendMessageInput {
   replyToId?: number;
   /** Short quote from the replied message, shown above the reply. */
   quote?: string;
+  /** UTF-16 spans for Telegram spoilers. */
+  entities?: Array<{ offset: number; length: number }>;
 }
 
 export interface TdSendMediaInput {
@@ -154,6 +157,23 @@ export interface TdSendMediaInput {
   fileName: string;
   mimeType: string;
   size: number;
+  caption?: string;
+  replyToId?: number;
+}
+
+/** One sticker reference, as a Bot API/TDLib remote file id. */
+export interface TdSendStickerInput {
+  fileId: string;
+}
+
+export interface TdSendVoiceInput {
+  buffer: Buffer;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  durationSec: number;
+  /** OGG/Opus: a real voice note; otherwise an audio document. */
+  voiceNote: boolean;
   caption?: string;
   replyToId?: number;
 }
@@ -246,6 +266,12 @@ export interface TdMessenger {
   ): Promise<TdDownloadPayload>;
   sendMessage(peerId: number, input: TdSendMessageInput): Promise<MessageView>;
   sendMedia(peerId: number, input: TdSendMediaInput): Promise<MessageView>;
+  sendSticker(peerId: number, input: TdSendStickerInput): Promise<MessageView>;
+  sendVoice(peerId: number, input: TdSendVoiceInput): Promise<MessageView>;
+  setContactBlocked(
+    peerId: number,
+    blocked: boolean,
+  ): Promise<ContactBlockView>;
   sendReaction(
     peerId: number,
     messageId: number,
@@ -261,6 +287,14 @@ export interface TdMessenger {
     messageId: number,
     revoke: boolean,
   ): Promise<DeletedMessageView>;
+  /**
+   * Clears the whole history (`deleteChatHistory`). `revoke` deletes for all
+   * participants, `removeFromChatList` drops the dialog like a bare delete.
+   */
+  deleteChatHistory(
+    peerId: number,
+    options: { revoke: boolean; removeFromChatList: boolean },
+  ): Promise<void>;
   markRead(peerId: number, maxId?: number): Promise<ReadView>;
   markAllRead(): Promise<ReadAllView>;
   setOnline(online: boolean): Promise<{ online: boolean }>;
@@ -1501,8 +1535,20 @@ export class TdSessionMessenger implements TdMessenger {
 
   // ------------------------------------------------------------------ write
 
-  private formattedText(text: string) {
-    return { _: 'formattedText' as const, text, entities: [] };
+  private formattedText(
+    text: string,
+    spans?: Array<{ offset: number; length: number }>,
+  ) {
+    return {
+      _: 'formattedText' as const,
+      text,
+      entities: (spans ?? []).map((span) => ({
+        _: 'textEntity' as const,
+        offset: span.offset,
+        length: span.length,
+        type: { _: 'textEntityTypeSpoiler' as const },
+      })),
+    };
   }
 
   /** Manual quote of the replied message: plain text, no rich formatting. */
@@ -1695,7 +1741,7 @@ export class TdSessionMessenger implements TdMessenger {
       reply_markup: null,
       input_message_content: {
         _: 'inputMessageText',
-        text: this.formattedText(input.text),
+        text: this.formattedText(input.text, input.entities),
         link_preview_options: null,
         clear_draft: false,
       },
@@ -1839,6 +1885,142 @@ export class TdSessionMessenger implements TdMessenger {
     } finally {
       await this.files.cleanup(uploadPath);
     }
+  }
+
+  /**
+   * Send a sticker by a remote file id. TDLib can only send files it knows:
+   * `getRemoteFile` maps the id to a local `file`, which `inputMessageSticker`
+   * accepts. A foreign or unknown id throws, and `MessagingService` retries the
+   * same send on mtcute (which understands Bot API file ids directly).
+   *
+   * TDLib asks for sticker dimensions, but a file id carries none. 512×512 is
+   * the usual square sticker box; Telegram keeps the document's own attributes
+   * for rendering, so wrong defaults affect the bubble layout only.
+   */
+  async sendSticker(
+    peerId: number,
+    input: TdSendStickerInput,
+  ): Promise<MessageView> {
+    const chatId = await this.registry.resolve(peerId);
+    const file = await this.client.api.getRemoteFile({
+      remote_file_id: input.fileId,
+      file_type: { _: 'fileTypeSticker' },
+    });
+    const sent = await this.client.api.sendMessage({
+      chat_id: chatId,
+      reply_to: null,
+      options: null,
+      reply_markup: null,
+      input_message_content: {
+        _: 'inputMessageSticker',
+        sticker: {
+          _: 'inputSticker',
+          sticker: { _: 'inputFileId', id: file.id },
+          thumbnail: null,
+          width: 512,
+          height: 512,
+        },
+        emoji: '',
+      },
+    });
+    return this.sentMessage(chatId, sent);
+  }
+
+  /**
+   * Send a voice note (OGG/Opus) or an audio document. The caller already
+   * decided which one is honest for the payload; this method only maps it to
+   * TDLib content and keeps the 50 MB upload on disk like `sendMedia`.
+   */
+  async sendVoice(
+    peerId: number,
+    input: TdSendVoiceInput,
+  ): Promise<MessageView> {
+    const chatId = await this.registry.resolve(peerId);
+    const uploadPath = await this.files.writeUpload(
+      input.buffer,
+      input.fileName,
+    );
+    const file = this.localFile(uploadPath);
+    const caption = this.caption(input.caption);
+
+    const content = input.voiceNote
+      ? {
+          _: 'inputMessageVoiceNote' as const,
+          voice_note: {
+            _: 'inputVoiceNote' as const,
+            voice_note: file,
+            duration: input.durationSec,
+            waveform: '',
+          },
+          caption,
+          self_destruct_type: null,
+        }
+      : {
+          _: 'inputMessageAudio' as const,
+          audio: {
+            _: 'inputAudio' as const,
+            audio: file,
+            album_cover_thumbnail: null,
+            duration: input.durationSec,
+            title: '',
+            performer: '',
+          },
+          caption,
+        };
+
+    try {
+      const sent = await this.client.api.sendMessage({
+        chat_id: chatId,
+        reply_to:
+          input.replyToId !== undefined
+            ? {
+                _: 'inputMessageReplyToMessage',
+                message_id: input.replyToId,
+                quote: null,
+                checklist_task_id: 0,
+                poll_option_id: '',
+              }
+            : null,
+        options: null,
+        reply_markup: null,
+        input_message_content: content,
+      });
+      return this.sentMessage(chatId, sent);
+    } finally {
+      await this.files.cleanup(uploadPath);
+    }
+  }
+
+  /**
+   * Block/unblock a user (or a supergroup chat) through TDLib's message-sender
+   * block list. Non-private, non-channel chats cannot be blocked and fail
+   * typed so `MessagingService` can retry on mtcute.
+   */
+  async setContactBlocked(
+    peerId: number,
+    blocked: boolean,
+  ): Promise<ContactBlockView> {
+    const chatId = await this.registry.resolve(peerId);
+    const entry = await this.chatFor(chatId);
+    const type = entry.type;
+
+    let senderId;
+    if (type._ === 'chatTypePrivate' || type._ === 'chatTypeSecret') {
+      senderId = { _: 'messageSenderUser' as const, user_id: type.user_id };
+    } else if (type._ === 'chatTypeSupergroup') {
+      senderId = { _: 'messageSenderChat' as const, chat_id: chatId };
+    } else {
+      throw apiError(
+        'VALIDATION_ERROR',
+        'Only users and channels can be blocked',
+      );
+    }
+
+    await this.client.api.setMessageSenderBlockList({
+      sender_id: senderId,
+      block_list: blocked ? { _: 'blockListMain' } : null,
+    });
+    return { userId: peerId, blocked };
   }
 
   async sendReaction(
@@ -1994,6 +2176,22 @@ export class TdSessionMessenger implements TdMessenger {
       revoke,
     });
     return { deleted: true, messageId };
+  }
+
+  /**
+   * "Clear history" as official clients do it: every message is deleted for
+   * both sides, the dialog itself stays in the list.
+   */
+  async deleteChatHistory(
+    peerId: number,
+    options: { revoke: boolean; removeFromChatList: boolean },
+  ): Promise<void> {
+    const chatId = await this.registry.resolve(peerId);
+    await this.client.api.deleteChatHistory({
+      chat_id: chatId,
+      revoke: options.revoke,
+      remove_from_chat_list: options.removeFromChatList,
+    });
   }
 
   /**

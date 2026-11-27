@@ -924,7 +924,7 @@ export function rotateMcpToken(): Promise<{ token: string }> {
 
 /**
  * Absolute MCP URL for copy/paste into a client config. Uses the same API
- * origin as every other request (`NEXT_PUBLIC_API_URL`, `localhost:3001` by
+ * origin as every other request (`NEXT_PUBLIC_API_URL`, `localhost:4001` by
  * default), so the dashboard never advertises a dead endpoint.
  */
 export function mcpEndpoint(): string {

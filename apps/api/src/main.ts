@@ -5,7 +5,7 @@ import { AppModule } from './app.module.js';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // The dashboard runs on another origin (default :3000). No cookies are used,
+  // The dashboard runs on another origin (default :4000). No cookies are used,
   // so credentials stay off; CORS_ORIGIN can be a comma-separated allowlist.
   // Outside production any port on localhost/127.0.0.1 is accepted too, so
   // opening the dashboard via 127.0.0.1 or a preview port does not look like
@@ -52,6 +52,6 @@ async function bootstrap() {
     jsonDocumentUrl: 'docs-json',
   });
 
-  await app.listen(process.env.PORT ?? 3001);
+  await app.listen(process.env.PORT ?? 4001);
 }
 await bootstrap();

@@ -27,12 +27,17 @@ function fakeClient() {
         const index = listeners.indexOf(listener);
         if (index >= 0) listeners.splice(index, 1);
       },
+      emit: (value: unknown) => {
+        for (const listener of [...listeners]) listener(value);
+      },
     };
   };
   return {
     onNewMessage: emitter(),
     onEditMessage: emitter(),
     onDeleteMessage: emitter(),
+    onRawUpdate: emitter(),
+    getMessages: vi.fn(async () => [] as unknown[]),
     onHistoryRead: emitter(),
     onUserTyping: emitter(),
     startUpdatesLoop: vi.fn(async () => undefined),
@@ -61,7 +66,7 @@ function createService(
     clients as never,
     realtime as never,
   );
-  return { service, clients, prisma };
+  return { service, clients, prisma, realtime };
 }
 
 describe('UpdatesService — TDLib session wins', () => {
@@ -147,6 +152,85 @@ describe('UpdatesService — TDLib session wins', () => {
     await service.startForUser('user-1');
 
     expect(clients.clientForSession).toHaveBeenCalledTimes(1);
+
+    await service.stopForUser('user-1');
+  });
+});
+
+describe('UpdatesService — reactions on own messages (mtcute)', () => {
+  function reactionUpdate(
+    chatId: number,
+    msgId: number,
+    emoji = '❤',
+  ): unknown {
+    return {
+      update: {
+        _: 'updateMessageReactions',
+        peer: { _: 'peerUser', userId: chatId },
+        msgId,
+        reactions: {
+          recentReactions: [
+            {
+              _: 'messagePeerReaction',
+              peerId: { _: 'peerUser', userId: 7 },
+              reaction: { _: 'reactionEmoji', emoticon: emoji },
+              date: 1_700_000_000,
+              my: false,
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  it('an outgoing send is indexed and a reaction on it is targetIsMine', async () => {
+    const { service, clients, realtime } = createService([
+      { id: 'acc-r', sessions: [session('s-r', 'mtcute')] },
+    ]);
+    await service.startForUser('user-1');
+    const client = (await clients.clientForSession.mock.results[0]!.value) as {
+      onRawUpdate: { emit: (value: unknown) => void };
+    };
+
+    // This is what MessagingService does after every Nest/Eve send.
+    service.noteOutgoing('acc-r', 42, 501, 'привет');
+
+    client.onRawUpdate.emit(reactionUpdate(42, 501));
+
+    await vi.waitFor(() => {
+      expect(realtime.emitToUser).toHaveBeenCalledWith(
+        'user-1',
+        'message.reaction',
+        expect.objectContaining({ targetIsMine: true, messageId: 501 }),
+      );
+    });
+
+    await service.stopForUser('user-1');
+  });
+
+  it('a reaction on his message resolves to targetIsMine false', async () => {
+    const { service, clients, realtime } = createService([
+      { id: 'acc-r', sessions: [session('s-r', 'mtcute')] },
+    ]);
+    // Different account id keeps the two tests independent at the emit level.
+    await service.startForUser('user-1');
+    const client = (await clients.clientForSession.mock.results[0]!.value) as {
+      onRawUpdate: { emit: (value: unknown) => void };
+      getMessages: { mockResolvedValue: (value: unknown[]) => void };
+    };
+    client.getMessages.mockResolvedValue([
+      { id: 502, isOutgoing: false, text: 'его сообщение', date: new Date(0) },
+    ]);
+
+    client.onRawUpdate.emit(reactionUpdate(42, 502, '🔥'));
+
+    await vi.waitFor(() => {
+      expect(realtime.emitToUser).toHaveBeenCalledWith(
+        'user-1',
+        'message.reaction',
+        expect.objectContaining({ targetIsMine: false, messageId: 502 }),
+      );
+    });
 
     await service.stopForUser('user-1');
   });

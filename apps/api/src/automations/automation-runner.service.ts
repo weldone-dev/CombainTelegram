@@ -5,6 +5,7 @@ import type { Subscription } from 'rxjs';
 import { DefaultUserService } from '../user-context/default-user.service.js';
 import { RealtimeService } from '../realtime/realtime.service.js';
 import { MessagingService } from '../messaging/messaging.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
 import { emitLog } from '../logs/log-sink.js';
 import { AgentService } from '../ai/agent.service.js';
 import { AiPolicyService } from '../ai/ai-policy.service.js';
@@ -67,6 +68,7 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
     private readonly messaging: MessagingService,
     private readonly users: DefaultUserService,
     private readonly realtime: RealtimeService,
+    private readonly prisma: PrismaService,
   ) {}
 
   onModuleInit(): void {
@@ -161,6 +163,15 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
     automation: AutomationModel,
     input: Record<string, unknown> = {},
   ): Promise<{ runId: string; status: string; output?: string; error?: string }> {
+    // An account bound to an Eve persona is driven by the Eve channel. Running
+    // a scheduled automation would produce a second, uncontrolled reply.
+    if (automation.accountId && (await this.isEveAccount(automation.accountId))) {
+      return {
+        runId: '',
+        status: 'skipped',
+        output: 'account is bound to an Eve persona',
+      };
+    }
     this.running.add(automation.id);
     const trigger = record(automation.trigger);
     const action = record(automation.action);
@@ -291,6 +302,18 @@ export class AutomationRunnerService implements OnModuleInit, OnModuleDestroy {
       return { runId: run.id, status: 'failed', error: message };
     } finally {
       this.running.delete(automation.id);
+    }
+  }
+
+  private async isEveAccount(accountId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.evePersonaAccount.findFirst({
+        where: { accountId, enabled: true },
+        select: { id: true },
+      });
+      return row !== null;
+    } catch {
+      return false;
     }
   }
 }

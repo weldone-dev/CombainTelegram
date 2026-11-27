@@ -48,6 +48,8 @@ describe('message DTO mapping', () => {
       senderId: 42,
       senderName: 'Alice',
       replyToId: null,
+      replyToText: null,
+      forwardedFrom: null,
       mediaType: null,
       media: null,
       reactions: [],
@@ -83,6 +85,43 @@ describe('message DTO mapping', () => {
         downloadable: true,
       },
     });
+  });
+
+  it('maps the mtcute quote text of a replied message', () => {
+    const view = toMessageView(
+      fakeMessage({
+        // mtcute's RepliedMessageInfo exposes `quoteText`, not `text`.
+        replyToMessage: { id: 7, quoteText: 'ты где был' },
+      }),
+    );
+    expect(view.replyToId).toBe(7);
+    expect(view.replyToText).toBe('ты где был');
+  });
+
+  it('maps a mtcute forward origin to forwardedFrom', () => {
+    const view = toMessageView(
+      fakeMessage({
+        forward: { sender: { displayName: 'Мемный канал' } },
+      }),
+    );
+    expect(view.forwardedFrom).toBe('Мемный канал');
+  });
+
+  it('keeps a plain-string forward sender', () => {
+    const view = toMessageView(
+      fakeMessage({ forward: { sender: 'Скрытый автор' } }),
+    );
+    expect(view.forwardedFrom).toBe('Скрытый автор');
+  });
+
+  it('exposes the file id needed to resend a sticker', () => {
+    const view = toMessageView(
+      fakeMessage({
+        media: { type: 'sticker', fileId: 'CAACAgIAAxkBAAI', emoji: '🔥' },
+      }),
+    );
+    expect(view.media?.fileId).toBe('CAACAgIAAxkBAAI');
+    expect(view.media?.emoji).toBe('🔥');
   });
 
   it('maps document media with file name, MIME type and size', () => {

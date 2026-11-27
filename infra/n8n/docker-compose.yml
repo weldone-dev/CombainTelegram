@@ -133,7 +133,15 @@ services:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
       OPENCODE_SESSION: ${OPENCODE_SESSION:-combain-n8n}
       OPENCODE_DB_PATH: /data/opencode/opencode.db
+      # Opt-in body tracing (see README "Трассы запросов"). One JSONL line per
+      # POST with the real messages context and the accumulated answer. Set
+      # LLM_TRACE_DIR to "" to switch it off completely.
+      LLM_TRACE_DIR: /data/llm-traces
+      LLM_TRACE_KEEP_DAYS: ${LLM_TRACE_KEEP_DAYS:-7}
     volumes:
+      # Request/response traces, one file per UTC day. Same host folder as the
+      # rest of the stack state (gitignored); safe to delete at any time.
+      - ./data/llm-traces:/data/llm-traces
       # Live OpenCode Go token: the opencode CLI refreshes this file and keeps
       # its WAL open, so the whole directory is mounted read-only (SQLite needs
       # the -shm/-wal siblings; a file-only ro mount fails with "attempt to
