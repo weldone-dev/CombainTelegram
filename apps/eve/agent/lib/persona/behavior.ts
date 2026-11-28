@@ -156,23 +156,21 @@ export function sleepIgnoreChance(config: BehaviorContext['config']): number {
 }
 
 /**
- * Delay while actively texting: priority 3+55r, normal 8+40r, muted 18+25r
- * (the spread also depends on message style).
+ * Delay while actively texting, 2–8 s total: priority 2–5, normal 3–7,
+ * muted 5–8. A live dialogue should feel like a phone call, not a queue.
  */
 export function activeDialogDelay(
   config: BehaviorContext['config'],
   rand: () => number,
 ): number {
   const comm = normalizeCommunicationProfile(config);
-  const base =
-    comm.notifications === 'priority' ? 3 : comm.notifications === 'muted' ? 18 : 8;
-  const spread =
-    comm.messageStyle === 'one-liners'
-      ? 55
-      : comm.messageStyle === 'bursty'
-        ? 25
-        : 40;
-  return base + rand() * spread;
+  const [min, max] =
+    comm.notifications === 'priority'
+      ? [2, 5]
+      : comm.notifications === 'muted'
+        ? [5, 8]
+        : [3, 7];
+  return min + rand() * (max - min);
 }
 
 export function sampleBubbles(
@@ -257,8 +255,12 @@ export function adjustDelay(
   else delay *= 0.8;
   if (comm.initiative === 'high') delay *= 0.85;
 
-  if (ctx.activeDialog) {
-    delay = Math.min(delay, activeDialogDelay(config, rand) + 20);
+  if (ctx.activeDialog && ctx.presence?.asleep !== true) {
+    // A live dialogue overrides the stage/presence pause instead of merely
+    // capping it: 2–8 seconds by communication style, no +20 s slack. This is
+    // also the dueAt of a deferred turn that a new message superseded while
+    // the dialogue was open. Sleep still wins: a 03:00 answer stays sleepy.
+    delay = activeDialogDelay(config, rand);
   }
   if (ctx.presence?.online) {
     delay = Math.min(delay, comm.notifications === 'priority' ? 120 : 240);
@@ -890,7 +892,7 @@ export async function decideBehavior(
         activeDialogDelay(ctx.config, rand) *
           hormoneMultiplier(ctx.hormones, 'delayMultiplier'),
         2,
-        180,
+        8,
       ),
     );
     const bubbles = applyHormoneBubbles(

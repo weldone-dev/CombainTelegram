@@ -44,7 +44,7 @@
 | T9 | Proactive: agenda tick, presence schedule, daily-life | `apps/eve/agent/schedules/**`, `apps/api/src/eve/eve-agenda.service.ts` | **готово** (21 тест) |
 | T10 | Memory lifecycle: daily summary, palace, retrieval, reflection | `apps/api/src/eve/eve-memory.service.ts`, `apps/eve/agent/lib/memory/**` | **готово** (19+10 тестов) |
 | T11 | Multi-account/shared relationships + memory UI | dashboard + `eve.service.ts` | **готово** (build) |
-| T12 | Durable delayed actions: `EveDelayedAction` + 60 s tick в Nest, без `setTimeout` в Eve | `apps/api/src/eve/eve-delayed.service.ts`, `apps/eve/agent/channels/nest.ts` | **готово** (19 тестов) |
+| T12 | Durable delayed actions: `EveDelayedAction` + 5 s tick в Nest (`EVE_DELAYED_TICK_MS`), без `setTimeout` в Eve | `apps/api/src/eve/eve-delayed.service.ts`, `apps/eve/agent/channels/nest.ts` | **готово** (19 тестов) |
 | T13 | Стиль girl-agent: полный системный промпт, динамика персоны, пузыри, опечатки | `apps/eve/agent/instructions.md`, `instructions/persona.ts`, `eve-text.ts`, `lib/realism/typos.ts` | **готово** (18 тестов) |
 | T14 | Гормоны, ночные пробуждения, входящие реакции/удаления, LLM-доки и daily-life, санитайз, эмбеддинги | `lib/persona/hormones.ts`, `realtime/reactions.ts`, `eve-persona-llm.ts`, `lib/realism/sanitize.ts`, `eve-memory-rank.ts` | **готово** (391 API + 153 Eve) |
 | T7 | Ops: turbo, env, docs, feature flags, automations guard | root/turbo/docs | **частично** |

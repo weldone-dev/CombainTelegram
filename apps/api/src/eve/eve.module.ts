@@ -16,6 +16,7 @@ import { EveProactiveController } from './eve-proactive.controller.js';
 import { EveProactiveService } from './eve-proactive.service.js';
 import { EveSchedulesService } from './eve-schedules.service.js';
 import { EveTimelineService } from './eve-timeline.service.js';
+import { EveTraceService } from './eve-trace.service.js';
 import { EveTurnService } from './eve-turn.service.js';
 import { EveService } from './eve.service.js';
 import { EveTokenGuard } from './eve-token.guard.js';
@@ -43,6 +44,7 @@ import { EveTokenGuard } from './eve-token.guard.js';
     EveSchedulesService,
     EveService,
     EveTimelineService,
+    EveTraceService,
   ],
   exports: [
     EveLlmService,

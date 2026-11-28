@@ -14,11 +14,16 @@ import {
 } from "../../../components/dashboard/ai-ui";
 import { useAppData } from "../../../components/dashboard/app-data";
 import {
+  fireChatDelayedTurns,
+  fireDelayedAction,
+} from "../../../lib/eve-actions";
+import {
   type EvePersonaView,
   eveErrorMessage,
   listPersonas,
 } from "../../../lib/eve-api";
 import {
+  type EveScheduleDelayedAction,
   type EveSchedulesOverview,
   getSchedulesOverview,
 } from "../../../lib/eve-schedules";
@@ -166,6 +171,11 @@ export function SchedulesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // "Reply now" feedback: one row at a time plus the bulk action.
+  const [firingId, setFiringId] = useState<string | null>(null);
+  const [firingAll, setFiringAll] = useState(false);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   // Starts at 0: `Date.now()` during render is unstable for prerendering.
   const [nowMs, setNowMs] = useState(0);
   const [auto, setAuto] = useState(true);
@@ -250,7 +260,8 @@ export function SchedulesPage() {
     [personaOptions],
   );
   const accountNames = useMemo(
-    () => new Map(accounts.map((account) => [account.id, accountName(account)])),
+    () =>
+      new Map(accounts.map((account) => [account.id, accountName(account)])),
     [accounts],
   );
 
@@ -258,8 +269,7 @@ export function SchedulesPage() {
     // Live rows already come filtered by Nest. Fixtures carry every state, so
     // apply the same state filter here to keep the demo honest.
     const rows = (overview?.delayed ?? []).filter(
-      (row) =>
-        !demo || stateFilter === "all" || row.state === stateFilter,
+      (row) => !demo || stateFilter === "all" || row.state === stateFilter,
     );
     return rows
       .filter((row) => kindFilter === "all" || row.kind === kindFilter)
@@ -272,6 +282,87 @@ export function SchedulesPage() {
     () => (nowMs > 0 ? nextDueAt(overview?.delayed ?? [], nowMs) : null),
     [overview, nowMs],
   );
+
+  // Only a pending turn can be "answered now": sends/edits/reactions have a
+  // clock but no model call, and a settled row must never be re-sent.
+  const pendingTurns = useMemo(
+    () =>
+      filtered.filter((row) => row.kind === "turn" && row.state === "pending"),
+    [filtered],
+  );
+
+  const fireOne = useCallback(
+    async (action: EveScheduleDelayedAction) => {
+      if (firingId !== null || firingAll) return;
+      setFiringId(action.id);
+      setActionNotice(null);
+      setActionError(null);
+      try {
+        const result = await fireDelayedAction(action.id);
+        if (result.ok) {
+          setActionNotice(
+            `Отправлено сейчас · чат ${action.chatId}${
+              action.threadId ? ` / ${action.threadId}` : ""
+            }`,
+          );
+        } else if (result.reason === "not-pending") {
+          setActionNotice(
+            "Действие уже не в очереди: его отправил тик или оно снято.",
+          );
+        } else {
+          setActionError(
+            `Не отправлено: ${result.reason ?? result.outcome ?? "неизвестная причина"}`,
+          );
+        }
+      } catch (caught) {
+        setActionError(eveErrorMessage(caught));
+      } finally {
+        setFiringId(null);
+        await load();
+      }
+    },
+    [firingId, firingAll, load],
+  );
+
+  const fireAll = useCallback(async () => {
+    if (firingAll || firingId !== null) return;
+    // `fireChat` is addressed to one persona/account/chat/thread: group the
+    // visible pending turns and fire each group sequentially.
+    const groups = new Map<string, EveScheduleDelayedAction>();
+    for (const row of pendingTurns) {
+      groups.set(
+        `${row.personaId}|${row.accountId}|${row.chatId}|${row.threadId}`,
+        row,
+      );
+    }
+    if (groups.size === 0) {
+      setActionNotice("Нет отложенных ответов для отправки.");
+      return;
+    }
+    setFiringAll(true);
+    setActionNotice(null);
+    setActionError(null);
+    let fired = 0;
+    try {
+      for (const row of groups.values()) {
+        const result = await fireChatDelayedTurns({
+          personaId: row.personaId,
+          accountId: row.accountId,
+          chatId: row.chatId,
+          threadId: row.threadId,
+        });
+        fired += result.fired;
+      }
+      setActionNotice(
+        `Отправлено сейчас: ${fired} из ${pendingTurns.length} отложенных ответов.`,
+      );
+    } catch (caught) {
+      setActionError(eveErrorMessage(caught));
+    } finally {
+      setFiringAll(false);
+      await load();
+    }
+  }, [firingAll, firingId, pendingTurns, load]);
 
   const filtersActive =
     personaId !== "" ||
@@ -532,7 +623,11 @@ export function SchedulesPage() {
             </select>
           </Field>
 
-          <Field label="Поиск" hint="по preview, ошибке, chat и id" className="sm:col-span-2 xl:col-span-1">
+          <Field
+            label="Поиск"
+            hint="по preview, ошибке, chat и id"
+            className="sm:col-span-2 xl:col-span-1"
+          >
             <input
               type="search"
               value={search}
@@ -638,7 +733,7 @@ export function SchedulesPage() {
           <p className="mt-3 border-t border-zinc-800 pt-2 text-[11px] text-zinc-500">
             В `eve dev` cron не тикает: расписание можно запустить вручную через
             `POST /eve/v1/dev/schedules/&lt;name&gt;`. Nest при этом ведёт свои
-            тики: delayed-очередь раз в 60 с, presence обновляется по вызову
+            тики: delayed-очередь раз в 5 с, presence обновляется по вызову
             самого расписания.
           </p>
         </Card>
@@ -696,11 +791,36 @@ export function SchedulesPage() {
           filtersActive ? " · фильтры активны" : ""
         }`}
         actions={
-          counts && counts.overdue > 0 ? (
-            <Pill tone="red">просрочено: {counts.overdue}</Pill>
-          ) : null
+          <div className="flex flex-wrap items-center gap-2">
+            {counts && counts.overdue > 0 ? (
+              <Pill tone="red">просрочено: {counts.overdue}</Pill>
+            ) : null}
+            {!demo && pendingTurns.length > 0 && (
+              <GhostButton
+                onClick={() => void fireAll()}
+                disabled={firingAll || firingId !== null}
+              >
+                {firingAll
+                  ? "Отправляю…"
+                  : `Отправить все сейчас (${pendingTurns.length})`}
+              </GhostButton>
+            )}
+          </div>
         }
       >
+        {actionNotice && (
+          <p className="mb-2 break-words rounded-md border border-emerald-900/60 bg-emerald-950/30 px-2.5 py-2 text-xs text-emerald-200">
+            {actionNotice}
+          </p>
+        )}
+        {actionError && (
+          <p
+            role="alert"
+            className="mb-2 break-words rounded-md border border-red-900/60 bg-red-950/30 px-2.5 py-2 text-xs text-red-200"
+          >
+            {actionError}
+          </p>
+        )}
         {loading && !overview ? (
           <div className="space-y-1" aria-hidden="true">
             {[0, 1, 2, 3].map((row) => (
@@ -816,9 +936,7 @@ export function SchedulesPage() {
                       <>
                         <span>·</span>
                         <span
-                          className={
-                            action.attempts >= 5 ? "text-red-300" : ""
-                          }
+                          className={action.attempts >= 5 ? "text-red-300" : ""}
                         >
                           попыток: {action.attempts}
                         </span>
@@ -831,6 +949,24 @@ export function SchedulesPage() {
                       {action.lastError}
                     </p>
                   )}
+
+                  {!demo &&
+                    action.kind === "turn" &&
+                    action.state === "pending" && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void fireOne(action)}
+                          disabled={firingAll || firingId !== null}
+                          title="Отправить этот отложенный ответ сейчас, не дожидаясь тика"
+                          className="rounded border border-sky-800/80 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-200 transition-colors hover:border-sky-500 hover:bg-sky-500/20 disabled:opacity-40"
+                        >
+                          {firingId === action.id
+                            ? "Отправляю…"
+                            : "Ответить сейчас"}
+                        </button>
+                      </div>
+                    )}
                 </li>
               );
             })}

@@ -314,6 +314,12 @@ function harness(options: HarnessOptions = {}) {
       online,
     })),
     listMessages: vi.fn(async () => ({ messages: [], hasMore: false })),
+    transcribeVoice: vi.fn(
+      async (): Promise<{ text: string; pending: boolean } | null> => ({
+        text: '',
+        pending: false,
+      }),
+    ),
   };
   const users = { get: vi.fn(async () => ({ id: 'local' })) };
   const media = {
@@ -873,5 +879,87 @@ describe('EveService dry-run', () => {
     });
 
     expect(messaging.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('EveService voice transcription', () => {
+  const MESSAGE_ID = 951058432;
+  const request = {
+    personaId: PERSONA,
+    accountId: ACCOUNT,
+    chatId: CHAT,
+    messageId: MESSAGE_ID,
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('returns the transcript of an allowed chat', async () => {
+    const { service, messaging, bindings, keyOf } = harness();
+    allow(bindings, keyOf);
+    messaging.transcribeVoice.mockResolvedValueOnce({
+      text: '  привет, как дела  ',
+      pending: false,
+    });
+
+    await expect(service.transcribeVoice(request)).resolves.toEqual({
+      text: 'привет, как дела',
+    });
+    expect(messaging.transcribeVoice).toHaveBeenCalledWith(
+      'local',
+      ACCOUNT,
+      String(CHAT),
+      String(MESSAGE_ID),
+    );
+  });
+
+  it('answers text:null when the engine throws instead of failing the route', async () => {
+    const { service, messaging, bindings, keyOf } = harness();
+    allow(bindings, keyOf);
+    messaging.transcribeVoice.mockRejectedValueOnce(
+      new Error('PREMIUM_ACCOUNT_REQUIRED'),
+    );
+
+    await expect(service.transcribeVoice(request)).resolves.toEqual({
+      text: null,
+    });
+  });
+
+  it('answers text:null for an empty or pending transcript', async () => {
+    const { service, messaging, bindings, keyOf } = harness();
+    allow(bindings, keyOf);
+    messaging.transcribeVoice.mockResolvedValueOnce({
+      text: '',
+      pending: true,
+    });
+
+    await expect(service.transcribeVoice(request)).resolves.toEqual({
+      text: null,
+    });
+  });
+
+  it('stops waiting after the 20 s budget', async () => {
+    vi.useFakeTimers();
+    const { service, messaging, bindings, keyOf } = harness();
+    allow(bindings, keyOf);
+    messaging.transcribeVoice.mockImplementationOnce(
+      () => new Promise(() => undefined),
+    );
+
+    const pending = service.transcribeVoice(request);
+    await vi.advanceTimersByTimeAsync(20_001);
+
+    await expect(pending).resolves.toEqual({ text: null });
+  });
+
+  it('keeps the allowlist gate: a denied chat is a 403, not a transcript', async () => {
+    const { service, messaging, bindings, keyOf } = harness();
+    allow(bindings, keyOf, false);
+
+    await expect(service.transcribeVoice(request)).rejects.toMatchObject({
+      response: { code: 'EVE_CHAT_NOT_ALLOWED' },
+    });
+    expect(messaging.transcribeVoice).not.toHaveBeenCalled();
   });
 });

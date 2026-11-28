@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  activeDialogDelay,
   adjustDelay,
+  busyDelaySec,
   canRecoverReply,
   decideBehavior,
   normalizeBubbles,
@@ -381,6 +383,91 @@ describe('reaction and bubble helpers', () => {
 
     const priority = adjustDelay(1000, config('priority'), { presence: presence() }, () => 0);
     expect(priority).toBeLessThan(base);
+  });
+
+  test('an active dialog replies in 2–8 s, by notification mode', () => {
+    const cases: Array<[NotificationMode, number, number]> = [
+      ['priority', 2, 5],
+      ['normal', 3, 7],
+      ['muted', 5, 8],
+    ];
+    for (const [mode, lo, hi] of cases) {
+      expect(activeDialogDelay(config(mode), () => 0)).toBeCloseTo(lo, 5);
+      expect(activeDialogDelay(config(mode), () => 1)).toBeCloseTo(hi, 5);
+    }
+
+    // No stage/presence pause survives an open dialogue.
+    const normal = adjustDelay(
+      120,
+      config('normal'),
+      { presence: presence({ online: false }), activeDialog: true },
+      () => 0.5,
+    );
+    expect(normal).toBeGreaterThanOrEqual(3);
+    expect(normal).toBeLessThanOrEqual(7);
+
+    const priority = adjustDelay(
+      120,
+      config('priority'),
+      { presence: presence({ online: false }), activeDialog: true },
+      () => 0.5,
+    );
+    expect(priority).toBeGreaterThanOrEqual(2);
+    expect(priority).toBeLessThanOrEqual(5);
+
+    const muted = adjustDelay(
+      120,
+      config('muted'),
+      { presence: presence({ online: false }), activeDialog: true },
+      () => 1,
+    );
+    expect(muted).toBe(8);
+  });
+
+  test('outside an active dialog the previous pauses stay', () => {
+    const notActive = adjustDelay(
+      1000,
+      config('normal'),
+      { presence: presence({ online: false }) },
+      () => 0,
+    );
+    expect(notActive).toBe(800);
+
+    const busy: Partial<PresenceState> = {
+      busy: { label: 'работа', until: '18:00', checkAfterMin: 20 },
+    };
+    // 20 min phone-in-bag wait survives when the dialogue is not open…
+    expect(busyDelaySec(ctx({ presence: presence(busy) }))).toBe(1200);
+    // …and is dropped for a live dialogue.
+    expect(
+      busyDelaySec(ctx({ presence: presence(busy), activeDialog: true })),
+    ).toBeNull();
+  });
+
+  test('decideBehavior keeps busy time without an active dialog', async () => {
+    const busy = presence({
+      busy: { label: 'работа', until: '18:00', checkAfterMin: 20 },
+    });
+
+    const live = await decideBehavior({
+      config: config('normal'),
+      score: ZERO,
+      presence: busy,
+      activeDialog: true,
+      now: NOW,
+      rand: () => 0.5,
+    });
+    expect(live.delaySec).toBeGreaterThanOrEqual(2);
+    expect(live.delaySec).toBeLessThanOrEqual(8);
+
+    const away = await decideBehavior({
+      config: config('normal'),
+      score: ZERO,
+      presence: busy,
+      now: NOW,
+      rand: () => 0.99,
+    });
+    expect(away.delaySec).toBeGreaterThanOrEqual(20 * 60);
   });
 });
 

@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { apiError, forbidden, notFound } from '../common/api-error.js';
+import { emitLog } from '../logs/log-sink.js';
 import { DefaultUserService } from '../user-context/default-user.service.js';
 import { MessagingService } from '../messaging/messaging.service.js';
 import type { VoiceUploadInput } from '../messaging/messaging.service.js';
@@ -99,6 +100,36 @@ function probability(value: unknown, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(0, Math.min(1, parsed));
+}
+
+/** Budget for one voice transcription: Eve must never hang a turn on STT. */
+const TRANSCRIBE_TIMEOUT_MS = 20_000;
+/** Transcript ceiling; the channel truncates for the prompt on its own. */
+const MAX_TRANSCRIPT_CHARS = 4_000;
+
+/**
+ * Races a task against a deadline. The losing task is not cancelled (TDLib has
+ * no abort), but the caller stops waiting, which is what a turn needs.
+ */
+function withTimeout<T>(
+  task: Promise<T>,
+  ms: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    timer.unref?.();
+    task.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function requiredMessageId(body: Record<string, unknown>): string {
@@ -1560,6 +1591,73 @@ export class EveService {
       address.chatId.toString(),
       { maxId: body.maxId },
     );
+  }
+
+  /**
+   * Transcript of an incoming voice note / audio / video note for the Eve
+   * channel. The address is gated like every other Eve action (persona,
+   * account, allowlist), but a failing engine is not an error: `{ text: null }`
+   * lets the model answer the message anyway. The call is capped at
+   * {@link TRANSCRIBE_TIMEOUT_MS} so a stuck TDLib/STT never holds the turn.
+   */
+  async transcribeVoice(raw: unknown): Promise<{ text: string | null }> {
+    const body = record(raw);
+    const address = await this.writeAddress(raw);
+    const messageId = requiredMessageId(body);
+    const user = await this.users.get();
+    const started = Date.now();
+    try {
+      const result = await withTimeout(
+        this.messaging.transcribeVoice(
+          user.id,
+          address.accountId,
+          address.chatId.toString(),
+          messageId,
+        ),
+        TRANSCRIBE_TIMEOUT_MS,
+        `transcription timed out after ${TRANSCRIBE_TIMEOUT_MS} ms`,
+      );
+      const value = text(result?.text).slice(0, MAX_TRANSCRIPT_CHARS);
+      if (!value) {
+        emitLog({
+          level: 'warn',
+          source: 'messaging',
+          action: 'eve.transcribe',
+          message: `Voice note ${messageId} produced no text (pending=${result?.pending === true})`,
+          status: 'failed',
+          accountId: address.accountId,
+          chatId: Number(address.chatId),
+          durationMs: Date.now() - started,
+          details: { messageId, pending: result?.pending === true },
+        });
+        return { text: null };
+      }
+      emitLog({
+        level: 'debug',
+        source: 'messaging',
+        action: 'eve.transcribe',
+        message: `Transcribed voice note ${messageId} (${value.length} chars)`,
+        status: 'ok',
+        accountId: address.accountId,
+        chatId: Number(address.chatId),
+        durationMs: Date.now() - started,
+        details: { messageId, chars: value.length },
+      });
+      return { text: value };
+    } catch (error) {
+      emitLog({
+        level: 'warn',
+        source: 'messaging',
+        action: 'eve.transcribe',
+        message: `Voice note ${messageId} transcription failed: ${(error as Error).message}`,
+        status: 'failed',
+        accountId: address.accountId,
+        chatId: Number(address.chatId),
+        durationMs: Date.now() - started,
+        details: { messageId, reason: (error as Error).message },
+      });
+      return { text: null };
+    }
   }
 
   /**

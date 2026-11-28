@@ -18,6 +18,7 @@ import {
   effectiveKind,
   formatCount,
   formatSnapshotTime,
+  instructionsWrapperIndex,
   MESSAGE_KIND_LABELS,
   type MessageFilter,
   matchesFilter,
@@ -27,11 +28,58 @@ import {
   snapshotKindTone,
   snapshotSize,
   splitHighlight,
+  systemPromptText,
+  systemSummary,
   tokenLabel,
 } from "./context-utils";
 
 /** Longer text is collapsed unless the user asks for the whole thing. */
 const CLAMP = 900;
+
+/** Renders `text` with every search match wrapped in `<mark>`. */
+function highlighted(text: string, query: string) {
+  let offset = 0;
+  return splitHighlight(text, query).map((part) => {
+    const start = offset;
+    offset += part.text.length;
+    return part.match ? (
+      <mark
+        key={`${start}-mark`}
+        className="rounded-sm bg-amber-400/30 text-amber-100"
+      >
+        {part.text}
+      </mark>
+    ) : (
+      <span key={`${start}-plain`}>{part.text}</span>
+    );
+  });
+}
+
+/** Clipboard API with a hidden-textarea fallback for older browsers. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path below.
+  }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
 
 const FILTERS: Array<{ value: MessageFilter; label: string }> = [
   { value: "all", label: "все" },
@@ -91,28 +139,11 @@ function ContextText({
 }) {
   const limit = compact && !expanded ? CLAMP : Number.POSITIVE_INFINITY;
   const visible = text.length > limit ? text.slice(0, limit) : text;
-  const parts = splitHighlight(visible, query);
-
-  let offset = 0;
-  const nodes = parts.map((part) => {
-    const start = offset;
-    offset += part.text.length;
-    return part.match ? (
-      <mark
-        key={`${start}-mark`}
-        className="rounded-sm bg-amber-400/30 text-amber-100"
-      >
-        {part.text}
-      </mark>
-    ) : (
-      <span key={`${start}-plain`}>{part.text}</span>
-    );
-  });
 
   return (
     <div>
       <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed text-zinc-300">
-        {nodes}
+        {highlighted(visible, query)}
         {text.length > visible.length && (
           <span className="text-zinc-600">…</span>
         )}
@@ -148,22 +179,36 @@ function MetaCell({ label, value }: { label: string; value: string }) {
 export function ContextViewer({
   snapshot,
   demo,
+  defaultCompact = true,
 }: {
   snapshot: EveContextSnapshot;
   demo: boolean;
+  /** The chat panel shows the full text; the inspector opens compact. */
+  defaultCompact?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MessageFilter>("all");
-  const [compact, setCompact] = useState(true);
+  const [compact, setCompact] = useState(defaultCompact);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [fullSystem, setFullSystem] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "done" | "error">("idle");
+
+  // Eve's technical wrapper (`system` / "Instructions (instructions)") is not a
+  // real prompt block: it folds into the section header instead of looking empty.
+  const wrapperIndex = instructionsWrapperIndex(snapshot.system);
+  const wrapper = wrapperIndex >= 0 ? snapshot.system[wrapperIndex] : undefined;
   const [openBlocks, setOpenBlocks] = useState<ReadonlySet<number>>(
-    () => new Set([0]),
+    () => new Set([wrapperIndex === 0 && snapshot.system.length > 1 ? 1 : 0]),
   );
 
   const needle = query.trim().toLowerCase();
   const size = useMemo(() => snapshotSize(snapshot), [snapshot]);
+  const systemText = useMemo(
+    () => systemPromptText(snapshot.system),
+    [snapshot.system],
+  );
   const issues = useMemo(
     () => analyzeBlocks(snapshot.system),
     [snapshot.system],
@@ -176,12 +221,14 @@ export function ContextViewer({
 
   const blockEntries = useMemo(() => {
     const seen = new Map<string, number>();
-    return snapshot.system.map((block, index) => {
-      const occurrence = (seen.get(block.name) ?? 0) + 1;
-      seen.set(block.name, occurrence);
-      return { block, index, key: `${block.name}#${occurrence}` };
-    });
-  }, [snapshot.system]);
+    return snapshot.system
+      .map((block, index) => {
+        const occurrence = (seen.get(block.name) ?? 0) + 1;
+        seen.set(block.name, occurrence);
+        return { block, index, key: `${block.name}#${occurrence}` };
+      })
+      .filter(({ index }) => index !== wrapperIndex);
+  }, [snapshot.system, wrapperIndex]);
 
   const messageEntries = useMemo(() => {
     const seen = new Map<string, number>();
@@ -231,6 +278,12 @@ export function ContextViewer({
   const openAllBlocks = () =>
     setOpenBlocks(new Set(blockEntries.map(({ index }) => index)));
   const closeAllBlocks = () => setOpenBlocks(new Set());
+
+  const copySystemPrompt = async () => {
+    const copied = await copyText(systemText);
+    setCopyState(copied ? "done" : "error");
+    window.setTimeout(() => setCopyState("idle"), 1600);
+  };
 
   const tokens = snapshot.tokens;
 
@@ -286,7 +339,7 @@ export function ContextViewer({
 
       <Card
         title="Что уходит в модель"
-        description="Порядок сообщений совпадает с запросом; блоки system идут первыми."
+        description="Порядок сообщений совпадает с запросом; system prompt передаётся отдельным полем instructions и идёт до messages."
         actions={
           <div className="flex flex-wrap items-center justify-end gap-2">
             <input
@@ -334,18 +387,47 @@ export function ContextViewer({
         </div>
 
         <section aria-labelledby="context-blocks-title">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3
-              id="context-blocks-title"
-              className="min-w-0 flex-1 text-xs font-semibold text-zinc-200"
-            >
-              System-блоки
-            </h3>
-            <Pill tone={visibleBlocks.length > 0 ? "sky" : "zinc"}>
-              {visibleBlocks.length} / {snapshot.system.length}
-            </Pill>
-            <GhostButton onClick={openAllBlocks}>Развернуть</GhostButton>
-            <GhostButton onClick={closeAllBlocks}>Свернуть</GhostButton>
+          <div className="flex flex-wrap items-end justify-between gap-2">
+            <div className="min-w-0">
+              <h3
+                id="context-blocks-title"
+                className="flex flex-wrap items-baseline gap-x-2 text-sm font-semibold text-zinc-100"
+              >
+                System prompt
+                <span className="font-mono text-xs font-normal text-zinc-300">
+                  {systemSummary(snapshot.system, tokens.system)}
+                </span>
+              </h3>
+              <p className="mt-1 max-w-3xl break-words text-[11px] text-zinc-500">
+                Передаётся модели отдельным полем{" "}
+                <code className="rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300">
+                  instructions
+                </code>
+                ; в{" "}
+                <code className="rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300">
+                  messages
+                </code>{" "}
+                его нет by design.
+                {wrapper && (
+                  <>
+                    {" "}
+                    Первый технический блок — «{wrapper.name}: {wrapper.text}» (
+                    {formatCount(wrapper.chars)} симв.) — включён в заголовок
+                    промпта и не показан отдельным блоком.
+                  </>
+                )}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Pill tone={visibleBlocks.length > 0 ? "sky" : "zinc"}>
+                {visibleBlocks.length} / {snapshot.system.length}
+              </Pill>
+              <GhostButton onClick={() => setFullSystem((value) => !value)}>
+                {fullSystem ? "Показать блоками" : "Показать целиком"}
+              </GhostButton>
+              <GhostButton onClick={openAllBlocks}>Развернуть</GhostButton>
+              <GhostButton onClick={closeAllBlocks}>Свернуть</GhostButton>
+            </div>
           </div>
 
           {issues.length > 0 && (
@@ -362,8 +444,28 @@ export function ContextViewer({
 
           {snapshot.system.length === 0 ? (
             <p className="mt-2 text-xs text-zinc-500">
-              System-блоки не переданы в снапшоте.
+              System prompt не передан в снапшоте.
             </p>
+          ) : fullSystem ? (
+            <div className="mt-2 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/40">
+              <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800/70 px-2.5 py-1.5">
+                <span className="min-w-0 flex-1 text-[11px] text-zinc-400">
+                  instructions целиком · {formatCount(size.systemChars)} симв. ·{" "}
+                  {tokenLabel(tokens.system, size.systemChars)} ·{" "}
+                  {formatCount(snapshot.system.length)} блоков текстом
+                </span>
+                <GhostButton onClick={() => void copySystemPrompt()}>
+                  {copyState === "done"
+                    ? "Скопировано"
+                    : copyState === "error"
+                      ? "Не удалось"
+                      : "Копировать"}
+                </GhostButton>
+              </div>
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words p-2.5 font-sans text-xs leading-relaxed text-zinc-300">
+                {highlighted(systemText, query)}
+              </pre>
+            </div>
           ) : visibleBlocks.length === 0 ? (
             <p className="mt-2 text-xs text-zinc-500">
               Ни один блок не совпал с поиском.
@@ -373,6 +475,7 @@ export function ContextViewer({
               {visibleBlocks.map(({ block, index, key }) => {
                 const issue = issueByIndex.get(index);
                 const open = openBlocks.has(index);
+                const empty = block.text.trim().length === 0;
                 return (
                   <div
                     key={key}
@@ -380,7 +483,7 @@ export function ContextViewer({
                       issue
                         ? "border-amber-800/60 bg-amber-950/10"
                         : "border-zinc-800 bg-zinc-950/30"
-                    }`}
+                    } ${empty ? "opacity-60" : ""}`}
                   >
                     <div className="flex flex-wrap items-center gap-2 px-2.5 py-1.5">
                       <button

@@ -72,6 +72,14 @@ const MAX_CHUNK_MS = 15_000;
 const MAX_CHUNKS = 40;
 /** Silence detection sensitivity for the split pass. */
 const SILENCE_FILTER = 'silencedetect=noise=-45dB:d=0.25';
+/** Loudness normalization applied before every engine: quiet notes are lost. */
+const LOUDNORM_FILTER = 'loudnorm=I=-16:TP=-1.5:LRA=11';
+/** Fallback for clips the loudnorm pass cannot handle (too quiet/short). */
+const DYNAUDNORM_FILTER = 'dynaudnorm=f=150:g=15';
+/** A normalize pass is a local resample of a note, never minutes of work. */
+const MAX_NORMALIZE_MS = 20_000;
+/** The normalized WAV is capped, so a huge document cannot fill the disk. */
+const MAX_NORMALIZE_SECONDS = 600;
 const DEFAULT_PARAKEET_DIR = '~/.local/share/combain/parakeet-tdt-0.6b-v3';
 const DEFAULT_WHISPER_MODEL = '~/.local/share/combain/whisper/ggml-small.bin';
 const DEFAULT_STT_MODEL = 'parakeet-tdt-0.6b-v3';
@@ -326,14 +334,16 @@ export function parseWhisperJson(
  * Used when the native `readWave` export is unavailable; returns `null` for
  * anything the recognizer cannot consume.
  */
+export function isWavFile(buffer: Buffer): boolean {
+  return (
+    buffer.length >= 44 &&
+    buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    buffer.toString('ascii', 8, 12) === 'WAVE'
+  );
+}
+
 export function readWavSamples(buffer: Buffer): WavData | null {
-  if (
-    buffer.length < 44 ||
-    buffer.toString('ascii', 0, 4) !== 'RIFF' ||
-    buffer.toString('ascii', 8, 12) !== 'WAVE'
-  ) {
-    return null;
-  }
+  if (!isWavFile(buffer)) return null;
   let format = 1;
   let channels = 1;
   let sampleRate = SAMPLE_RATE;
@@ -473,6 +483,45 @@ export function planChunks(
 }
 
 /**
+ * Filters tried by the pre-STT normalize pass, in order. `loudnorm` hits the
+ * target loudness for speech; `dynaudnorm` is the fallback when that pass
+ * fails (odd container, extreme silence) so the note is still sent.
+ */
+export const NORMALIZE_FILTERS = [LOUDNORM_FILTER, DYNAUDNORM_FILTER] as const;
+
+/**
+ * ffmpeg arguments for the normalize pass: level filter, 16 kHz mono PCM WAV
+ * and a duration cap. Exported so the filter/format contract is tested without
+ * spawning a process.
+ */
+export function normalizeArgs(
+  inputPath: string,
+  outputPath: string,
+  filter: string,
+  maxSeconds = MAX_NORMALIZE_SECONDS,
+): string[] {
+  return [
+    '-y',
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-i',
+    inputPath,
+    '-t',
+    String(maxSeconds),
+    '-af',
+    filter,
+    '-ar',
+    String(SAMPLE_RATE),
+    '-ac',
+    '1',
+    '-f',
+    'wav',
+    outputPath,
+  ];
+}
+
+/**
  * Loads the Parakeet TDT recognizer from `sherpa-onnx-node`.
  *
  * The package is a native CommonJS addon, so it is imported dynamically and
@@ -553,8 +602,9 @@ async function loadSherpaRecognizer(directory: string): Promise<{
  * `STT_REMOTE=off` removes the remote engine from every selection.
  *
  * Telegram's own transcription needs Premium, so everything happens in this
- * process: ffmpeg converts the note to 16 kHz mono WAV and the chosen engine
- * turns that into text.
+ * process: ffmpeg converts the note to a loudness-normalized 16 kHz mono WAV
+ * and the chosen engine turns that into text. The normalize pass matters:
+ * quiet voice notes transcribe as an empty string without it.
  *
  * `transcribe` never throws: a missing binary, a dead model, a timeout or an
  * empty result all return `null` so the caller can answer the peer anyway.
@@ -646,13 +696,22 @@ export class SpeechService {
       const deadline = started + timeoutMs;
       let lastError: unknown = null;
 
-      // The HTTP engine takes the original file, so no ffmpeg pass is needed.
+      // The remote engine receives a normalized WAV: raw OGG from a quiet note
+      // comes back as an empty transcript, while the same audio at a usable
+      // level is recognized. Normalization is best-effort, so a missing or
+      // failing ffmpeg still sends the original file.
       const remote = this.remote;
       if (remote && engines.includes('remote') && (await this.remoteUsable(remote))) {
         try {
+          directory = await mkdtemp(join(tmpdir(), 'combain-speech-'));
+          const normalized = await this.normalizeForStt(
+            directory,
+            input,
+            deadline,
+          );
           const result = await this.transcribeRemote(
             remote,
-            input,
+            normalized ?? input,
           );
           if (!result.text) throw new Error('remote returned no text');
           return this.finish('remote', result, bytes, mime, started);
@@ -675,7 +734,7 @@ export class SpeechService {
         return null;
       }
 
-      directory = await mkdtemp(join(tmpdir(), 'combain-speech-'));
+      directory ??= await mkdtemp(join(tmpdir(), 'combain-speech-'));
       const inputPath = join(
         directory,
         `input${this.extensionFor(mime, input.fileName)}`,
@@ -691,10 +750,18 @@ export class SpeechService {
           'error',
           '-i',
           inputPath,
+          '-t',
+          String(MAX_NORMALIZE_SECONDS),
+          // Same level fix as the remote path, so a quiet note reaches the
+          // local recognizer at a comparable loudness.
+          '-af',
+          LOUDNORM_FILTER,
           '-ar',
           String(SAMPLE_RATE),
           '-ac',
           '1',
+          '-f',
+          'wav',
           wavPath,
         ],
         deadline - Date.now(),
@@ -911,6 +978,72 @@ export class SpeechService {
       );
     }
     return ok;
+  }
+
+  /**
+   * Converts the note to a loudness-normalized 16 kHz mono WAV before STT.
+   *
+   * Returns `null` when ffmpeg is missing or every filter fails, so the caller
+   * falls back to the original file instead of failing the transcription. The
+   * temp files live in the caller's directory and are removed with it.
+   */
+  private async normalizeForStt(
+    directory: string,
+    input: SpeechInput,
+    deadline: number,
+  ): Promise<SpeechInput | null> {
+    if (!this.ffmpegReady()) {
+      this.logger.warn('[speech] normalize skipped: ffmpeg is unavailable');
+      return null;
+    }
+    const binary = envValue('FFMPEG_BIN') ?? 'ffmpeg';
+    const extension = this.extensionFor(input.mimeType, input.fileName);
+    const inputPath = join(directory, `normalize-in${extension}`);
+    const outputPath = join(directory, 'normalized.wav');
+    const label =
+      (input.fileName ? basename(input.fileName) : '') || `voice${extension}`;
+    try {
+      await writeFile(inputPath, input.data);
+    } catch (error) {
+      this.logger.warn(
+        `[speech] normalize failed to write the input: ${(error as Error).message}`,
+      );
+      return null;
+    }
+
+    for (const filter of NORMALIZE_FILTERS) {
+      const timeout = Math.min(MAX_NORMALIZE_MS, deadline - Date.now());
+      if (timeout <= 0) break;
+      const started = Date.now();
+      try {
+        await this.runCommand(
+          binary,
+          normalizeArgs(inputPath, outputPath, filter),
+          timeout,
+        );
+        const data = await readFile(outputPath);
+        if (!isWavFile(data)) throw new Error('ffmpeg produced no WAV');
+        const mode =
+          filter === LOUDNORM_FILTER ? 'loudnorm' : 'dynaudnorm';
+        this.logger.log(
+          `[speech] normalize ${label} (${input.data.length} B) -> ` +
+            `${basename(outputPath)} (${data.length} B) ${mode} in ${Date.now() - started} ms`,
+        );
+        return {
+          data,
+          mimeType: 'audio/wav',
+          fileName: `${label.replace(/\.[^.]*$/, '') || 'voice'}.wav`,
+        };
+      } catch (error) {
+        this.logger.warn(
+          `[speech] normalize with ${filter} failed: ${(error as Error).message}`,
+        );
+      }
+    }
+    this.logger.warn(
+      `[speech] normalize ${label} failed, sending the original file`,
+    );
+    return null;
   }
 
   /** OpenAI-compatible `/v1/audio/transcriptions` call. */

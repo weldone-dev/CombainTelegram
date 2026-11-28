@@ -472,6 +472,67 @@ export function getChatTimeline(
   return eveFetch(`timeline?${params.toString()}`);
 }
 
+function stringOf(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** Behavior decision of the last turn, proxied from the running Eve process. */
+export interface EveTurnWhyView {
+  ok: boolean;
+  decision: {
+    at: string;
+    intent: string;
+    shouldReply: boolean;
+    ignoreReason?: string;
+    delaySec: number;
+    reaction?: string;
+    source?: string;
+  } | null;
+  error?: string;
+}
+
+function normalizeTurnWhy(value: unknown): EveTurnWhyView {
+  const payload = isRecord(value) ? value : {};
+  const decision = isRecord(payload.decision) ? payload.decision : null;
+  const intent = decision ? stringOf(decision.intent).trim() : "";
+  const delay = decision ? Number(decision.delaySec) : Number.NaN;
+  const error = stringOf(payload.error).trim();
+  return {
+    ok: payload.ok === true,
+    decision:
+      decision && intent
+        ? {
+            at: stringOf(decision.at),
+            intent,
+            shouldReply: decision.shouldReply === true,
+            delaySec:
+              Number.isFinite(delay) && delay >= 0 ? Math.trunc(delay) : 0,
+            ...(stringOf(decision.ignoreReason).trim()
+              ? { ignoreReason: stringOf(decision.ignoreReason).trim() }
+              : {}),
+            ...(stringOf(decision.reaction).trim()
+              ? { reaction: stringOf(decision.reaction).trim() }
+              : {}),
+            ...(stringOf(decision.source).trim()
+              ? { source: stringOf(decision.source).trim() }
+              : {}),
+          }
+        : null,
+    ...(error ? { error } : {}),
+  };
+}
+
+export async function getTurnWhy(
+  personaId: string,
+  accountId: string,
+  chatId: string,
+): Promise<EveTurnWhyView> {
+  const params = new URLSearchParams({ personaId, accountId, chatId });
+  return normalizeTurnWhy(
+    await eveFetch<unknown>(`turn/why?${params.toString()}`),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Persona documents (persona / speech / boundaries / communication)
 // ---------------------------------------------------------------------------

@@ -8,7 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLogSink } from '../logs/log-sink.js';
 import type { LogInput } from '../logs/log-sink.js';
 import {
+  NORMALIZE_FILTERS,
   SpeechService,
+  normalizeArgs,
   parseWhisperJson,
   planChunks,
   readWavSamples,
@@ -495,6 +497,31 @@ describe('SpeechService remote engine', () => {
     return (fetchMock.mock.calls[1][1] as { body: UndiciFormData }).body;
   }
 
+  /** The multipart `file` part as undici stores it (a File-like Blob). */
+  function postedFile(): { name?: string; type: string; size: number } {
+    return postBody().get('file') as unknown as {
+      name?: string;
+      type: string;
+      size: number;
+    };
+  }
+
+  /** ffmpeg mock that fails only for the given filter, as a broken pass would. */
+  function failFilter(filter: string): void {
+    vi.mocked(execFile).mockImplementation(((
+      file: string,
+      args: string[],
+      _options: unknown,
+      callback: (error: Error | null) => void,
+    ) => {
+      execCalls.push({ file, args, done: () => callback(null) });
+      const filterIndex = args.indexOf('-af');
+      const used = filterIndex >= 0 ? args[filterIndex + 1] : '';
+      callback(used === filter ? new Error('ffmpeg failed: invalid data') : null);
+      return {} as never;
+    }) as never);
+  }
+
   it('uses an OpenAI-compatible endpoint before the local engines', async () => {
     const service = new SpeechService();
     respond();
@@ -507,11 +534,27 @@ describe('SpeechService remote engine', () => {
       language: null,
       durationMs: 0,
     });
-    expect(execFile).not.toHaveBeenCalled();
+    expect(execCalls.map((call) => call.file)).toEqual(['ffmpeg']);
+    expect(execCalls[0].args).toEqual(
+      expect.arrayContaining([
+        '-af',
+        'loudnorm=I=-16:TP=-1.5:LRA=11',
+        '-ar',
+        '16000',
+        '-ac',
+        '1',
+        '-f',
+        'wav',
+      ]),
+    );
     expect(urls()).toEqual([
       'https://stt.example/health',
       'https://stt.example/v1/audio/transcriptions',
     ]);
+    const posted = postedFile();
+    expect(posted.type).toBe('audio/wav');
+    expect(posted.name).toBe('voice.wav');
+    expect(posted.size).toBe(WAV.length);
     const init = fetchMock.mock.calls[1][1] as {
       dispatcher?: unknown;
       headers?: unknown;
@@ -582,6 +625,56 @@ describe('SpeechService remote engine', () => {
     const post = fetchMock.mock.calls[1][1] as { dispatcher?: unknown };
     expect(health.dispatcher).toBeInstanceOf(Agent);
     expect(post.dispatcher).toBeInstanceOf(Agent);
+  });
+
+  it('falls back to dynaudnorm when loudnorm fails', async () => {
+    failFilter('loudnorm=I=-16:TP=-1.5:LRA=11');
+    const service = new SpeechService();
+    respond();
+
+    const result = await service.transcribe(INPUT);
+
+    expect(result?.text).toBe('удалённая расшифровка');
+    expect(
+      execCalls.map((call) => call.args[call.args.indexOf('-af') + 1]),
+    ).toEqual([...NORMALIZE_FILTERS]);
+    expect(postedFile().type).toBe('audio/wav');
+  });
+
+  it('sends the original file when every normalize pass fails', async () => {
+    vi.mocked(execFile).mockImplementation(((
+      file: string,
+      args: string[],
+      _options: unknown,
+      callback: (error: Error | null) => void,
+    ) => {
+      execCalls.push({ file, args, done: () => callback(null) });
+      callback(new Error('ffmpeg failed: invalid data'));
+      return {} as never;
+    }) as never);
+    const service = new SpeechService();
+    respond();
+
+    const result = await service.transcribe(INPUT);
+
+    expect(result?.text).toBe('удалённая расшифровка');
+    expect(execCalls).toHaveLength(NORMALIZE_FILTERS.length);
+    const posted = postedFile();
+    expect(posted.type).toBe('audio/ogg');
+    expect(posted.name).toBe('voice.ogg');
+    expect(posted.size).toBe(INPUT.data.length);
+  });
+
+  it('sends the original file when ffmpeg is not installed', async () => {
+    vi.stubEnv('FFMPEG_BIN', '/nope/ffmpeg');
+    const service = new SpeechService();
+    respond();
+
+    const result = await service.transcribe(INPUT);
+
+    expect(result?.text).toBe('удалённая расшифровка');
+    expect(execFile).not.toHaveBeenCalled();
+    expect(postedFile().type).toBe('audio/ogg');
   });
 
   it('returns null when STT_ENGINE=disabled', async () => {
@@ -719,7 +812,7 @@ describe('SpeechService engine selection from STT_ENGINE', () => {
     const result = await service.transcribe(INPUT);
 
     expect(result?.text).toBe('из сети');
-    expect(execFile).not.toHaveBeenCalled();
+    expect(execCalls.map((call) => call.file)).toEqual(['ffmpeg']);
   });
 
   it('STT_REMOTE=off maps auto to local Parakeet', async () => {
@@ -839,6 +932,32 @@ describe('planChunks', () => {
       2_000_000,
     );
     expect(chunks).toHaveLength(40);
+  });
+});
+
+describe('normalizeArgs', () => {
+  it('builds a loudness-normalized 16 kHz mono WAV pass with a duration cap', () => {
+    const args = normalizeArgs('/tmp/in.ogg', '/tmp/out.wav', 'loudnorm=I=-16');
+
+    expect(args).toEqual([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      '/tmp/in.ogg',
+      '-t',
+      '600',
+      '-af',
+      'loudnorm=I=-16',
+      '-ar',
+      '16000',
+      '-ac',
+      '1',
+      '-f',
+      'wav',
+      '/tmp/out.wav',
+    ]);
   });
 });
 

@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import type { EveDelayedActionModel as EveDelayedActionRow } from '@repo/database';
-import { apiError } from '../common/api-error.js';
+import { apiError, notFound } from '../common/api-error.js';
 import { MessagingService } from '../messaging/messaging.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { DefaultUserService } from '../user-context/default-user.service.js';
+import { eveId, parseChatId, parseThreadId } from './eve-access.js';
 import {
   dryRunKindOf,
   eveDryRunRequested,
@@ -25,7 +26,7 @@ import { EveTurnService } from './eve-turn.service.js';
  *
  * - the channel posts `POST /internal/eve/actions` instead of scheduling;
  * - the row lives in SQLite with a `dueAt`;
- * - one 60-second tick dispatches whatever is due:
+ * - one short tick (5 s by default) dispatches whatever is due:
  *   - `turn` re-enters Eve at `POST /eve/v1/nest/turn`, so the model answer is
  *     generated later in the *same* session (no second behavior decision);
  *   - `send`/`edit`/`delete`/`react`/`read` go straight to the transport, with
@@ -35,7 +36,29 @@ import { EveTurnService } from './eve-turn.service.js';
  * rather than for the clock. The presence tick releases it once she is awake.
  */
 
-export const DELAYED_TICK_MS = 60_000;
+/**
+ * How often the durable queue is swept. Five seconds keeps a due reply close to
+ * its `dueAt` without a timer per row; `EVE_DELAYED_TICK_MS` overrides it
+ * inside the 1–60 s clamp.
+ */
+export const DELAYED_TICK_MS = 5_000;
+export const DELAYED_TICK_MIN_MS = 1_000;
+export const DELAYED_TICK_MAX_MS = 60_000;
+
+/** Resolves `EVE_DELAYED_TICK_MS`, falling back to {@link DELAYED_TICK_MS}. */
+export function delayedTickMs(
+  raw: string | undefined = process.env.EVE_DELAYED_TICK_MS,
+): number {
+  const parsed = Number(raw);
+  if (raw === undefined || raw === '' || !Number.isFinite(parsed) || parsed <= 0) {
+    return DELAYED_TICK_MS;
+  }
+  return Math.min(
+    DELAYED_TICK_MAX_MS,
+    Math.max(DELAYED_TICK_MIN_MS, Math.round(parsed)),
+  );
+}
+
 /** girl-agent runtime cap for a normal delayed reply. */
 export const MAX_TURN_DELAY_SEC = 3_600;
 /** girl-agent runtime cap for a busy/offline action. */
@@ -85,6 +108,29 @@ export interface EveDelayedActionView {
   firedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Outcome of "reply now" for one queued row. */
+export interface EveDelayedFireResult {
+  /** `true` only when the row was accepted by the transport/Eve turn route. */
+  ok: boolean;
+  /** `not-pending`, `in-flight` or the dispatch outcome when `ok` is false. */
+  reason?: string;
+  outcome?: EveDelayedOutcome;
+  /** Row after the attempt (state/attempts/firedAt are fresh). */
+  action: EveDelayedActionView;
+}
+
+/** Outcome of "reply now" for every queued turn of one chat. */
+export interface EveDelayedFireChatResult {
+  /** Rows accepted for immediate delivery. */
+  fired: number;
+  results: Array<{
+    id: string;
+    ok: boolean;
+    outcome?: EveDelayedOutcome;
+    reason?: string;
+  }>;
 }
 
 function text(value: unknown, fallback = ''): string {
@@ -218,6 +264,13 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EveDelayedService.name);
   private timer?: ReturnType<typeof setInterval>;
   private running = false;
+  /**
+   * Rows currently being dispatched by a manual "reply now". The periodic tick
+   * must not pick the same row again: `fire` moves `dueAt` to now before the
+   * push, so a tick running in parallel would see it as due and duplicate it.
+   * This is a single-process guard, which matches the one-process deployment.
+   */
+  private readonly inFlight = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -230,7 +283,7 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     this.timer = setInterval(() => {
       void this.runTick();
-    }, DELAYED_TICK_MS);
+    }, delayedTickMs());
     this.timer.unref?.();
   }
 
@@ -381,11 +434,21 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
   /** `GET /internal/eve/actions`: queue inspection for the dashboard/logs. */
   async list(query: {
     personaId?: string;
+    accountId?: string;
+    chatId?: string;
+    threadId?: string;
+    kind?: string;
     state?: string;
     limit?: string;
   }): Promise<{ actions: EveDelayedActionView[] }> {
     const personaId = text(query.personaId);
+    const accountId = text(query.accountId);
+    const kind = text(query.kind);
     const state = text(query.state);
+    const chatId = text(query.chatId) ? parseChatId(query.chatId) : null;
+    const threadId = text(query.threadId)
+      ? parseThreadId(query.threadId)
+      : null;
     const parsed = Number(query.limit);
     const limit = Math.min(
       200,
@@ -394,12 +457,125 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
     const rows = await this.prisma.eveDelayedAction.findMany({
       where: {
         ...(personaId ? { personaId } : {}),
+        ...(accountId ? { accountId } : {}),
+        ...(chatId !== null ? { chatId } : {}),
+        ...(threadId !== null ? { threadId } : {}),
+        ...(kind ? { kind } : {}),
         ...(state ? { state } : {}),
       },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       take: limit,
     });
     return { actions: rows.map(toView) };
+  }
+
+  /**
+   * `POST /internal/eve/actions/:id/fire`: send one queued action now.
+   *
+   * The row keeps its state until the dispatch settles, so a failed push is
+   * retried by the regular tick; only a non-pending row is refused outright.
+   */
+  async fire(id: string): Promise<EveDelayedFireResult> {
+    const actionId = text(id);
+    if (!actionId) {
+      throw apiError('EVE_ACTION_ID_REQUIRED', 'action id is required');
+    }
+    const row = await this.prisma.eveDelayedAction.findUnique({
+      where: { id: actionId },
+    });
+    if (!row) {
+      throw notFound(
+        'EVE_ACTION_NOT_FOUND',
+        `Eve action ${actionId} does not exist`,
+      );
+    }
+    return this.fireRow(row);
+  }
+
+  /**
+   * `POST /internal/eve/actions/fire`: every pending turn of one chat goes out
+   * now, one after another. Only `turn` rows are fired: reactions, reads and
+   * edits keep their own clocks.
+   */
+  async fireChat(raw: unknown): Promise<EveDelayedFireChatResult> {
+    const body = record(raw);
+    const personaId = eveId(
+      body.personaId,
+      'EVE_PERSONA_REQUIRED',
+      'personaId is required',
+    );
+    const accountId = eveId(
+      body.accountId,
+      'EVE_ACCOUNT_REQUIRED',
+      'accountId is required',
+    );
+    const chatId = parseChatId(body.chatId);
+    const threadId = parseThreadId(body.threadId);
+
+    const rows = await this.prisma.eveDelayedAction.findMany({
+      where: {
+        personaId,
+        accountId,
+        chatId,
+        threadId,
+        kind: 'turn',
+        state: 'pending',
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: DELAYED_BATCH,
+    });
+
+    const results: EveDelayedFireChatResult['results'] = [];
+    // Sequential on purpose: two turns of one chat must not race the writeback
+    // counters or reach Telegram out of order.
+    for (const row of rows) {
+      const result = await this.fireRow(row);
+      results.push({
+        id: row.id,
+        ok: result.ok,
+        ...(result.outcome ? { outcome: result.outcome } : {}),
+        ...(result.reason ? { reason: result.reason } : {}),
+      });
+    }
+    return { fired: results.filter((item) => item.ok).length, results };
+  }
+
+  private async fireRow(row: EveDelayedActionRow): Promise<EveDelayedFireResult> {
+    if (row.state !== 'pending') {
+      return {
+        ok: false,
+        reason: 'not-pending',
+        action: toView(row),
+      };
+    }
+    if (this.inFlight.has(row.id)) {
+      return { ok: false, reason: 'in-flight', action: toView(row) };
+    }
+
+    const now = new Date();
+    this.inFlight.add(row.id);
+    try {
+      // The row is due from this moment on: if the push fails and the row stays
+      // pending, the next tick retries it immediately instead of waiting out the
+      // original delay.
+      await this.prisma.eveDelayedAction.update({
+        where: { id: row.id },
+        data: { dueAt: now },
+      });
+      const current = { ...row, dueAt: now };
+      const outcome = await this.dispatch(current, now);
+      const fresh = await this.prisma.eveDelayedAction.findUnique({
+        where: { id: row.id },
+      });
+      return {
+        ok: outcome === 'sent',
+        ...(outcome === 'sent' ? {} : { reason: outcome }),
+        outcome,
+        action: toView(fresh ?? current),
+      };
+    } finally {
+      this.inFlight.delete(row.id);
+    }
   }
 
   /** `POST /internal/eve/actions/tick`: one dispatch pass, for tests/dev. */
@@ -436,6 +612,9 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
       dropped: 0,
     };
     for (const row of rows) {
+      // A manual "reply now" is already dispatching this row; the tick must not
+      // send it a second time.
+      if (this.inFlight.has(row.id)) continue;
       const outcome = await this.dispatch(row, now);
       result[outcome === 'retried' ? 'retried' : outcome] += 1;
     }

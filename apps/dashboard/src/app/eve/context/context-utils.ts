@@ -78,6 +78,67 @@ export function formatCount(value: number | undefined): string {
   return Math.round(value).toLocaleString("ru-RU");
 }
 
+/** Russian plural for "блок": 1 блок, 2 блока, 5 блоков. */
+export function pluralBlocks(count: number): string {
+  const mod100 = Math.abs(count) % 100;
+  const mod10 = mod100 % 10;
+  if (mod100 >= 11 && mod100 <= 14) return "блоков";
+  if (mod10 === 1) return "блок";
+  if (mod10 >= 2 && mod10 <= 4) return "блока";
+  return "блоков";
+}
+
+/**
+ * Eve passes the whole system prompt through AI SDK's `instructions` field.
+ * Its first line is a technical wrapper (`system` / "Instructions (instructions)")
+ * that says nothing on its own — the viewer folds it into the section header.
+ */
+const INSTRUCTIONS_WRAPPER_RE = /^instructions\s*\(\s*instructions\s*\)$/i;
+
+export function isInstructionsWrapper(block: EveContextBlock): boolean {
+  return (
+    block.name.trim().toLowerCase() === "system" &&
+    INSTRUCTIONS_WRAPPER_RE.test(block.text.trim())
+  );
+}
+
+/** Index of the wrapper block, or `-1` when the prompt starts with real text. */
+export function instructionsWrapperIndex(blocks: EveContextBlock[]): number {
+  return blocks.findIndex(isInstructionsWrapper);
+}
+
+/**
+ * The system prompt as one string — exactly the order the provider gets in
+ * `instructions`, with block texts separated by a blank line.
+ */
+export function systemPromptText(blocks: EveContextBlock[]): string {
+  return blocks
+    .map((block) => block.text.trim())
+    .filter((text) => text.length > 0)
+    .join("\n\n");
+}
+
+/**
+ * Headline numbers for the system section: block count, characters and tokens.
+ * Tokens come from usage when the backend reported them.
+ */
+export function systemSummary(
+  blocks: EveContextBlock[],
+  tokens: number | undefined,
+): string {
+  const chars = blocks.reduce((total, block) => total + block.chars, 0);
+  const parts = [
+    `${formatCount(blocks.length)} ${pluralBlocks(blocks.length)}`,
+    `${formatCount(chars)} симв.`,
+  ];
+  if (tokens !== undefined && Number.isFinite(tokens)) {
+    parts.push(`${formatCount(tokens)} ток.`);
+  } else if (chars > 0) {
+    parts.push(`≈${formatCount(Math.ceil(chars / 4))} ток.`);
+  }
+  return parts.join(" · ");
+}
+
 /** Backends that do not report tokens get a clearly marked 4-chars/token guess. */
 export function tokenLabel(tokens: number | undefined, chars: number): string {
   if (tokens !== undefined && Number.isFinite(tokens)) {

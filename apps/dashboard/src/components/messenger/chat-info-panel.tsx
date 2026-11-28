@@ -33,10 +33,12 @@ import type {
 } from "../../lib/types";
 import { Avatar } from "../avatar";
 import { ChatAdminPanel } from "./chat-admin-panel";
+import { ChatContextTab } from "./chat-context-tab";
 import { ChatEveMemoryTab } from "./chat-eve-memory-tab";
 import { ChatLogsTab } from "./chat-logs-tab";
 import { ChatRelationshipCard } from "./chat-relationship-card";
 import { ChatTimelineTab } from "./chat-timeline-tab";
+import { ChatTraceTab } from "./chat-trace-tab";
 
 /** Same storage key on purpose: one panel width per browser/device. */
 const INFO_PANEL_WIDTH_KEY = "tg-info-panel-width";
@@ -79,6 +81,8 @@ type InfoTab =
   | ChatInfoMediaKind
   | "logs"
   | "timeline"
+  | "trace"
+  | "context"
   | "similar"
   | "admin";
 
@@ -435,6 +439,8 @@ export function ChatInfoPanel({
     { id: "polls", label: "Опросы" },
     { id: "logs", label: "Логи" },
     { id: "timeline", label: "Хроника" },
+    { id: "trace", label: "Трассировка" },
+    { id: "context", label: "Контекст" },
   ];
   if (similar && similar.length > 0) {
     tabs.push({ id: "similar", label: "Похожие" });
@@ -654,6 +660,22 @@ export function ChatInfoPanel({
 
           {tab === "timeline" && (
             <ChatTimelineTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
+            />
+          )}
+
+          {tab === "trace" && (
+            <ChatTraceTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
+            />
+          )}
+
+          {tab === "context" && (
+            <ChatContextTab
               accountId={accountId}
               chatId={chatId}
               threadId={threadId}

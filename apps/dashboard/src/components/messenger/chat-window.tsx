@@ -17,6 +17,16 @@ import {
   readDraft,
   writeDraft,
 } from "../../lib/drafts";
+import {
+  type EveDelayedActionView,
+  fireChatDelayedTurns,
+  listDelayedActions,
+} from "../../lib/eve-actions";
+import { type EveTimelineEntryView, getChatTimeline } from "../../lib/eve-api";
+import {
+  type ChatPersonaMatch,
+  resolveChatPersonas,
+} from "../../lib/eve-chat-personas";
 import { formatFileSize, formatTime } from "../../lib/format";
 import {
   hasMediaBody,
@@ -81,6 +91,62 @@ const TRANSLATE_LANGS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 const TRANSLATE_LANG_KEY = "tg-translate-lang";
+
+/** Pending turns of the open chat are polled while the window is visible. */
+const QUEUE_POLL_MS = 5_000;
+/** Relationship deltas change only after a turn; a slower read is enough. */
+const RELATIONSHIP_POLL_MS = 20_000;
+/** Chips shown in one position before the rest are summarised. */
+const MAX_CHIPS_PER_POSITION = 4;
+/** Voice notes transcribed at the same time when they scroll into view. */
+const AUTO_TRANSCRIBE_PARALLEL = 2;
+
+/** One relationship mutation from the chat timeline. */
+type RelationshipEntry = Extract<
+  EveTimelineEntryView,
+  { kind: "relationship" }
+>;
+
+const RELATIONSHIP_METRICS = [
+  { key: "interest", label: "интерес" },
+  { key: "trust", label: "доверие" },
+  { key: "attraction", label: "влечение" },
+  { key: "annoyance", label: "раздражение" },
+  { key: "cringe", label: "кринж" },
+] as const;
+
+/** "+2" / "−1" with a true minus sign, like the Хроника tab. */
+function signedDelta(value: number): string {
+  return `${value > 0 ? "+" : "−"}${Math.abs(value)}`;
+}
+
+/**
+ * Speech-bearing messages of this chat: voice notes, audio files and round
+ * video notes. Outgoing messages and service rows are never transcribed.
+ */
+function isTranscribable(message: MessageView): boolean {
+  if (message.outgoing || message.service) return false;
+  if (message.isVoice) return true;
+  const media = message.media;
+  if (!media) return false;
+  const kind = resolveMediaKind(media, message.mediaType);
+  return kind === "audio" || kind === "video_note";
+}
+
+/** "42 с", "3 мин 05 с", "2 ч 10 мин" — short countdown for the queue banner. */
+export function formatQueueWait(ms: number): string {
+  if (ms <= 0) return "вот-вот";
+  const total = Math.ceil(ms / 1000);
+  if (total < 60) return `${total} с`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes} мин ${seconds} с` : `${minutes} мин`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest > 0 ? `${hours} ч ${rest} мин` : `${hours} ч`;
+}
 
 function messagePreview(message: MessageView | undefined): string {
   if (!message) return "";
@@ -235,6 +301,11 @@ export function ChatWindow({
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transcribingRef = useRef<Set<number>>(new Set());
+  /** Latest transcript map, readable from the auto-transcribe observer. */
+  const transcriptsRef = useRef(transcripts);
+  transcriptsRef.current = transcripts;
+  /** Messages the auto-transcriber already attempted (success or failure). */
+  const autoTranscribeTriedRef = useRef<Set<number>>(new Set());
   const handledFocusRef = useRef(0);
   const stickRef = useRef(true);
   const sendingRef = useRef(false);
@@ -244,6 +315,21 @@ export function ChatWindow({
   const pendingUnreadRef = useRef(0);
   const readUpToRef = useRef(0);
   const [unreadAnchor, setUnreadAnchor] = useState(0);
+
+  // ---- Eve queue + relationship deltas of the open chat ------------------
+  // The persona that owns this chat; `null` when it is not bound to Eve or the
+  // proxy is unavailable, which keeps every extra below silent.
+  const [chatPersona, setChatPersona] = useState<ChatPersonaMatch | null>(null);
+  const [queuedTurns, setQueuedTurns] = useState<EveDelayedActionView[]>([]);
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [queueStatus, setQueueStatus] = useState<string | null>(null);
+  // "Скрыть" hides the banner until the queue content changes.
+  const [queueHiddenKey, setQueueHiddenKey] = useState<string | null>(null);
+  // Ticks every second while the banner is visible so the countdown stays true.
+  const [clockMs, setClockMs] = useState(0);
+  const [relationshipEntries, setRelationshipEntries] = useState<
+    RelationshipEntry[]
+  >([]);
 
   const accountId = account?.id ?? null;
   const chatId = chat?.id ?? null;
@@ -341,6 +427,9 @@ export function ChatWindow({
     setTranscribing(new Set());
     setThreadFor(null);
     setThreadCounts(new Map());
+    setQueueHiddenKey(null);
+    setQueueStatus(null);
+    autoTranscribeTriedRef.current = new Set();
   }, [draftKey]);
 
   // The translate target is a user preference, restored after mount so the
@@ -870,6 +959,162 @@ export function ChatWindow({
     return () => clearTimeout(timer);
   }, [transcripts, transcribe, chatId]);
 
+  // Auto-transcribe incoming voice notes once they scroll into view: two
+  // requests at a time, one attempt per message, never the whole history.
+  // Already transcribed and failed ids are skipped; the manual button stays.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `messages.length` re-observes the list when a new voice note arrives; the effect reads the DOM, not the array.
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container || chatId === null || !accountId) return;
+    const items = container.querySelectorAll<HTMLElement>(
+      "[data-transcribable-id]",
+    );
+    if (items.length === 0) return;
+
+    const queue: number[] = [];
+    let active = 0;
+
+    const pump = () => {
+      while (active < AUTO_TRANSCRIBE_PARALLEL && queue.length > 0) {
+        const id = queue.shift();
+        if (id === undefined) break;
+        if (autoTranscribeTriedRef.current.has(id)) continue;
+        if (transcriptsRef.current.has(id)) continue;
+        autoTranscribeTriedRef.current.add(id);
+        active += 1;
+        // `transcribe` never rejects: it stores text or an "unavailable" chip.
+        void transcribe(id).finally(() => {
+          active -= 1;
+          pump();
+        });
+      }
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const element = entry.target as HTMLElement;
+          const raw = element.dataset.transcribableId;
+          if (raw === undefined) continue;
+          const id = Number(raw);
+          if (!Number.isFinite(id)) continue;
+          if (autoTranscribeTriedRef.current.has(id)) continue;
+          if (queue.includes(id)) continue;
+          queue.push(id);
+        }
+        pump();
+      },
+      { root: container, threshold: 0.5 },
+    );
+
+    for (const item of items) observer.observe(item);
+    return () => observer.disconnect();
+  }, [accountId, chatId, transcribe, messages.length]);
+
+  // Resolve the persona that owns this chat once per chat switch. A failed or
+  // empty read means "not an Eve chat": no banner, no chips, no errors.
+  useEffect(() => {
+    if (!accountId || chatId === null) {
+      setChatPersona(null);
+      return;
+    }
+    let cancelled = false;
+    resolveChatPersonas(accountId, String(chatId), 0)
+      .then((list) => {
+        if (!cancelled) setChatPersona(list[0] ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setChatPersona(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, chatId]);
+
+  // Pending turns of this chat. Polled, not pushed: the queue is a small table
+  // and the banner must reflect a turn fired from the admin page too. Rows of
+  // every topic are kept, the "reply now" call is made per thread.
+  useEffect(() => {
+    setQueuedTurns([]);
+    setQueueStatus(null);
+    if (!chatPersona || !accountId || chatId === null) return;
+    const personaId = chatPersona.persona.id;
+    const chat = String(chatId);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const rows = await listDelayedActions({
+          personaId,
+          accountId,
+          chatId: chat,
+          kind: "turn",
+          state: "pending",
+          limit: 20,
+        });
+        if (!cancelled) setQueuedTurns(rows);
+      } catch {
+        // The banner is an extra: a failed read must not disturb the chat.
+        if (!cancelled) setQueuedTurns([]);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, QUEUE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [chatPersona, accountId, chatId]);
+
+  // Relationship deltas of the same chat, shown as system chips between
+  // messages. The timeline is read-only, so a slow poll is safe.
+  useEffect(() => {
+    setRelationshipEntries([]);
+    if (!chatPersona || !accountId || chatId === null) return;
+    const personaId = chatPersona.persona.id;
+    const chat = String(chatId);
+    const threadId = chatPersona.binding.threadId;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const page = await getChatTimeline(personaId, accountId, chat, {
+          threadId,
+          limit: 80,
+        });
+        if (cancelled) return;
+        setRelationshipEntries(
+          page.entries.filter(
+            (entry): entry is RelationshipEntry =>
+              entry.kind === "relationship",
+          ),
+        );
+      } catch {
+        if (!cancelled) setRelationshipEntries([]);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, RELATIONSHIP_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [chatPersona, accountId, chatId]);
+
+  // The countdown needs a ticking clock, but only while something is queued.
+  useEffect(() => {
+    if (queuedTurns.length === 0) {
+      setClockMs(0);
+      return;
+    }
+    setClockMs(Date.now());
+    const timer = window.setInterval(() => setClockMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [queuedTurns]);
+
   if (!account || !chat) {
     return (
       <section className="flex min-w-[420px] flex-1 items-center justify-center bg-zinc-950 text-sm text-zinc-500">
@@ -882,6 +1127,83 @@ export function ChatWindow({
   const forwardTargets = chats.filter((item) => item.id !== chat.id);
   const selectedIds = [...selected];
   const canWrite = chat.canSendMessages !== false;
+
+  // ---- queue banner -------------------------------------------------------
+  const queueKey = queuedTurns.map((row) => row.id).join(":");
+  const queueEarliest = queuedTurns.reduce<number | null>((earliest, row) => {
+    if (!row.dueAt) return earliest;
+    const time = new Date(row.dueAt).getTime();
+    if (!Number.isFinite(time)) return earliest;
+    return earliest === null ? time : Math.min(earliest, time);
+  }, null);
+  const queueWaitsForState = queuedTurns.length > 0 && queueEarliest === null;
+  const queueLabel = queueWaitsForState
+    ? "ждёт состояния"
+    : queueEarliest !== null
+      ? `ответ через ${formatQueueWait(
+          queueEarliest - (clockMs || Date.now()),
+        )}`
+      : "";
+  const queueVisible = queuedTurns.length > 0 && queueKey !== queueHiddenKey;
+
+  /** `fireChat` is per address, so one call per topic of this chat. */
+  const fireQueue = async () => {
+    if (!chatPersona || !accountId || chatId === null || queueBusy) return;
+    const personaId = chatPersona.persona.id;
+    const chat = String(chatId);
+    setQueueBusy(true);
+    setQueueStatus(null);
+    try {
+      const threads = [...new Set(queuedTurns.map((row) => row.threadId))];
+      let fired = 0;
+      for (const threadId of threads) {
+        const result = await fireChatDelayedTurns({
+          personaId,
+          accountId,
+          chatId: chat,
+          threadId,
+        });
+        fired += result.fired;
+      }
+      setQueueStatus(fired > 0 ? `отправлено: ${fired}` : "уже пусто");
+      // Refresh right away instead of waiting for the next poll.
+      const rows = await listDelayedActions({
+        personaId,
+        accountId,
+        chatId: chat,
+        kind: "turn",
+        state: "pending",
+        limit: 20,
+      });
+      setQueuedTurns(rows);
+    } catch (caught) {
+      setQueueStatus(errorMessage(caught));
+    } finally {
+      setQueueBusy(false);
+    }
+  };
+
+  // ---- relationship chips -------------------------------------------------
+  // Chips are placed before the first message at or after the change. Entries
+  // older than the loaded window land above the oldest message; deltas newer
+  // than the newest loaded message wait for the next page instead of jumping.
+  const chipsBefore = new Map<number, RelationshipEntry[]>();
+  if (relationshipEntries.length > 0 && visible.length > 0) {
+    const sorted = [...relationshipEntries]
+      .filter((entry) => Number.isFinite(Date.parse(entry.at)))
+      .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+    let cursor = 0;
+    visible.forEach((message, index) => {
+      const time = Date.parse(message.date);
+      if (!Number.isFinite(time)) return;
+      const bucket: RelationshipEntry[] = [];
+      while (cursor < sorted.length && Date.parse(sorted[cursor].at) <= time) {
+        bucket.push(sorted[cursor]);
+        cursor += 1;
+      }
+      if (bucket.length > 0) chipsBefore.set(index, bucket);
+    });
+  }
 
   return (
     <section className="relative flex min-w-[420px] flex-1 flex-col bg-zinc-950">
@@ -1011,6 +1333,7 @@ export function ChatWindow({
           const transcript = transcripts.get(message.id);
           const reactionBusy = reactionPending.has(message.id);
           const voteBusy = votingId === message.id;
+          const transcribable = isTranscribable(message);
           // Telegram repeats the sticker emoji as the message text; the media
           // bubble already shows it as a caption, so skip the duplicate line.
           const stickerMedia = message.media;
@@ -1040,7 +1363,7 @@ export function ChatWindow({
               onSelect: () => void toggleTranslation(message),
             });
           }
-          if (message.isVoice) {
+          if (isTranscribable(message)) {
             menuActions.push({
               label:
                 transcript?.pending || transcribing.has(message.id)
@@ -1081,6 +1404,9 @@ export function ChatWindow({
           });
           return (
             <Fragment key={message.id}>
+              {(chipsBefore.get(index) ?? []).map((entry) => (
+                <RelationshipChip key={`rel:${entry.id}`} entry={entry} />
+              ))}
               {index === unreadDividerIndex && (
                 <div
                   data-unread-divider
@@ -1093,6 +1419,7 @@ export function ChatWindow({
               )}
               <article
                 data-message-id={message.id}
+                data-transcribable-id={transcribable ? message.id : undefined}
                 {...(selecting
                   ? {
                       onClick: () => toggleSelected(message.id),
@@ -1257,6 +1584,57 @@ export function ChatWindow({
                               </span>
                               {translation.text}
                             </p>
+                          )}
+                          {/* VoiceBubble renders its own transcript block; audio
+                              files and round video notes get this one. */}
+                          {transcribable && !message.isVoice && (
+                            <div className="mt-1 border-t border-white/15 pt-1 text-[11px]">
+                              {transcribing.has(message.id) ||
+                              transcript?.pending ? (
+                                <span className="flex items-center gap-1.5 opacity-75">
+                                  <span
+                                    aria-hidden="true"
+                                    className="h-3 w-3 animate-spin rounded-full border border-current/30 border-t-current"
+                                  />
+                                  Расшифровка…
+                                </span>
+                              ) : transcript ? (
+                                <>
+                                  <p
+                                    className={`text-xs leading-snug ${
+                                      transcript.unavailable
+                                        ? "italic opacity-60"
+                                        : ""
+                                    }`}
+                                  >
+                                    {transcript.text || "Пустая расшифровка"}
+                                  </p>
+                                  {transcript.unavailable && (
+                                    <button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void transcribe(message.id);
+                                      }}
+                                      className="mt-0.5 underline underline-offset-2 opacity-80 transition-opacity hover:opacity-100"
+                                    >
+                                      Расшифровать
+                                    </button>
+                                  )}
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void transcribe(message.id);
+                                  }}
+                                  className="underline underline-offset-2 opacity-80 transition-opacity hover:opacity-100"
+                                >
+                                  Расшифровать
+                                </button>
+                              )}
+                            </div>
                           )}
                         </>
                       )}
@@ -1448,6 +1826,47 @@ export function ChatWindow({
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {queueVisible && (
+        // biome-ignore lint/a11y/useSemanticElements: the banner holds action buttons, not a form result, so a div with role=status is the honest element.
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-amber-900/50 bg-amber-950/25 px-5 py-1.5 text-[11px] text-amber-100"
+        >
+          <span className="font-medium">В очереди</span>
+          {queueLabel && (
+            <span className="text-amber-200/80">· {queueLabel}</span>
+          )}
+          {queuedTurns.length > 1 && (
+            <span className="text-amber-200/60">
+              · ответов: {queuedTurns.length}
+            </span>
+          )}
+          {queueStatus && (
+            <span className="text-amber-200/60">· {queueStatus}</span>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void fireQueue()}
+              disabled={queueBusy}
+              title="Отправить отложенный ответ сейчас, не дожидаясь тика"
+              className="rounded border border-amber-700/70 bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-100 transition-colors hover:border-amber-500 hover:bg-amber-500/25 disabled:opacity-40"
+            >
+              {queueBusy ? "Отправляю…" : "Ответить сейчас"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setQueueHiddenKey(queueKey)}
+              title="Скрыть до следующего сообщения в очереди"
+              className="rounded border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+            >
+              Скрыть
+            </button>
+          </div>
         </div>
       )}
 
@@ -1951,6 +2370,87 @@ function DocumentThumb({ src, alt }: { src: string; alt: string }) {
       onError={() => setFailed(true)}
       className="h-12 w-12 shrink-0 rounded object-cover"
     />
+  );
+}
+
+/**
+ * Passive system chip of one relationship mutation, placed between two
+ * messages. It shows only what actually changed: a repeated "конфликт 1" on
+ * every turn would drown the feed.
+ */
+function RelationshipChip({ entry }: { entry: RelationshipEntry }) {
+  const chips: Array<{
+    key: string;
+    label: string;
+    tone: "plus" | "minus" | "neutral";
+  }> = [];
+
+  for (const metric of RELATIONSHIP_METRICS) {
+    const value = entry.delta[metric.key] ?? 0;
+    if (value === 0) continue;
+    chips.push({
+      key: metric.key,
+      label: `${signedDelta(value)} ${metric.label}`,
+      tone: value > 0 ? "plus" : "minus",
+    });
+  }
+
+  if (entry.stageTo !== undefined && entry.stageFrom !== entry.stageTo) {
+    chips.push({
+      key: "stage",
+      label: `стадия → ${entry.stageTo}`,
+      tone: "neutral",
+    });
+  }
+
+  const conflictMoved =
+    entry.conflictTo !== undefined && entry.conflictTo !== entry.conflictFrom;
+  // A conflict level that did not move is only shown when it is the only news.
+  if (entry.conflictTo !== undefined && (conflictMoved || chips.length === 0)) {
+    chips.push({
+      key: "conflict",
+      label: conflictMoved
+        ? `конфликт ${entry.conflictFrom ?? 0} → ${entry.conflictTo}`
+        : `конфликт ${entry.conflictTo}`,
+      tone:
+        entry.conflictTo >= 2
+          ? "minus"
+          : entry.conflictTo === 1
+            ? "neutral"
+            : "plus",
+    });
+  }
+
+  if (chips.length === 0) return null;
+
+  const shown = chips.slice(0, MAX_CHIPS_PER_POSITION);
+  const hidden = chips.length - shown.length;
+
+  return (
+    <div
+      data-relationship-chip={entry.id}
+      title={`${formatTime(entry.at)} · ${entry.source}`}
+      className="flex flex-wrap items-center justify-center gap-1.5 py-0.5"
+    >
+      {shown.map((chip) => (
+        <span
+          key={chip.key}
+          className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${
+            chip.tone === "plus"
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+              : chip.tone === "minus"
+                ? "border-red-500/30 bg-red-500/10 text-red-300"
+                : "border-zinc-700 bg-zinc-800/60 text-zinc-300"
+          }`}
+        >
+          {chip.label}
+        </span>
+      ))}
+      {hidden > 0 && (
+        <span className="text-[10px] text-zinc-500">+{hidden}</span>
+      )}
+      <span className="text-[10px] text-zinc-600">{formatTime(entry.at)}</span>
+    </div>
   );
 }
 

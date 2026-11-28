@@ -284,9 +284,10 @@ export function ContextPage() {
             )}
           </h2>
           <p className="mt-1 max-w-3xl text-xs text-zinc-500">
-            Что реально уходит в модель на каждом turn'е Eve: system-блоки
+            Что реально уходит в модель на каждом turn'е Eve: system prompt
             (instructions, persona, memory, media) и сообщения в порядке
-            запроса.
+            запроса. Промпт идёт отдельным полем instructions, поэтому в
+            messages его нет.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-xs">

@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetEveDryRunState, takeEveDryRunOutbound } from './eve-dry-run.js';
 import {
+  DELAYED_TICK_MS,
   EveDelayedService,
   MAX_DELAYED_ATTEMPTS,
   MAX_TURN_DELAY_SEC,
   clampDelaySec,
   delayedDueAt,
+  delayedTickMs,
 } from './eve-delayed.service.js';
 
 const PERSONA = 'persona-1';
@@ -58,6 +60,8 @@ interface HarnessOptions {
   due?: ActionRow[];
   waiting?: ActionRow[];
   existing?: ActionRow | null;
+  /** Row returned by `findUnique({ where: { id } })` (manual "reply now"). */
+  byId?: ActionRow;
   linked?: boolean;
   allowed?: boolean;
   timezone?: string;
@@ -88,6 +92,13 @@ function harness(options: HarnessOptions = {}) {
         },
       ),
       findFirst: vi.fn(async () => options.existing ?? null),
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+        if (!options.byId || options.byId.id !== where.id) return null;
+        const last = [...calls.update]
+          .reverse()
+          .find((entry) => entry.where.id === where.id);
+        return { ...options.byId, ...(last?.data ?? {}) };
+      }),
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
         calls.create.push(data);
         return {
@@ -174,6 +185,40 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe('tick interval', () => {
+  it('defaults to five seconds', () => {
+    expect(DELAYED_TICK_MS).toBe(5_000);
+    expect(delayedTickMs(undefined)).toBe(5_000);
+    expect(delayedTickMs('')).toBe(5_000);
+    expect(delayedTickMs('nope')).toBe(5_000);
+    expect(delayedTickMs('-1')).toBe(5_000);
+  });
+
+  it('clamps EVE_DELAYED_TICK_MS to 1–60 seconds', () => {
+    expect(delayedTickMs('100')).toBe(1_000);
+    expect(delayedTickMs('120000')).toBe(60_000);
+    expect(delayedTickMs('7500')).toBe(7_500);
+  });
+
+  it('picks up a row whose dueAt has already passed on the next tick', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const row = actionRow({
+      kind: 'turn',
+      dueAt: new Date(NOW.getTime() - 120_000),
+      payload: JSON.stringify({ incoming: 'просроченное' }),
+    });
+    const { service, calls } = harness({ due: [row] });
+
+    const result = await service.tick(NOW);
+
+    expect(result.picked).toBe(1);
+    expect(result.sent).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(calls.update.at(-1)?.data.state).toBe('sent');
+  });
 });
 
 describe('delay math', () => {
@@ -589,6 +634,208 @@ describe('list', () => {
         take: 10,
       }),
     );
+  });
+
+  it('narrows the queue by chat, thread and kind', async () => {
+    const { service, prisma } = harness({ due: [actionRow()] });
+    await service.list({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: '1000',
+      threadId: '7',
+      kind: 'turn',
+      state: 'pending',
+    });
+    expect(prisma.eveDelayedAction.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          personaId: PERSONA,
+          accountId: ACCOUNT,
+          chatId: CHAT,
+          threadId: 7,
+          kind: 'turn',
+          state: 'pending',
+        },
+      }),
+    );
+  });
+});
+
+describe('fire: reply now', () => {
+  it('dispatches a pending turn immediately and moves dueAt to now', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const row = actionRow({
+      kind: 'turn',
+      dueAt: new Date(NOW.getTime() + 600_000),
+      payload: JSON.stringify({ incoming: 'привет' }),
+    });
+    const { service, calls } = harness({ byId: row });
+
+    const result = await service.fire(row.id);
+
+    expect(result.ok).toBe(true);
+    expect(result.outcome).toBe('sent');
+    expect(result.action.state).toBe('sent');
+    // The clock is rewritten before the push, so a failed row is due at once.
+    expect(calls.update[0]?.data.dueAt).toEqual(NOW);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      { body: string },
+    ];
+    expect(url).toBe('http://eve.test/eve/v1/nest/turn');
+    expect(JSON.parse(init.body)).toMatchObject({
+      actionId: row.id,
+      incoming: 'привет',
+    });
+    expect(calls.update.at(-1)?.data.state).toBe('sent');
+  });
+
+  it('sends a pending non-turn action through the transport', async () => {
+    const row = actionRow({
+      payload: JSON.stringify({ messageId: 5, emoji: '🔥' }),
+    });
+    const { service, messaging } = harness({ byId: row });
+
+    const result = await service.fire(row.id);
+
+    expect(result.ok).toBe(true);
+    expect(messaging.sendReaction).toHaveBeenCalledWith(
+      'user-1',
+      ACCOUNT,
+      '1000',
+      '5',
+      { emoji: '🔥' },
+    );
+  });
+
+  it('refuses a row that is no longer pending', async () => {
+    const row = actionRow({ state: 'sent' });
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { service, calls, messaging } = harness({ byId: row });
+
+    const result = await service.fire(row.id);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('not-pending');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(messaging.sendReaction).not.toHaveBeenCalled();
+    expect(calls.update).toHaveLength(0);
+  });
+
+  it('keeps the dry-run flag of a fired turn', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const row = actionRow({
+      kind: 'turn',
+      payload: JSON.stringify({ incoming: 'привет', dryRun: true }),
+    });
+    const { service } = harness({ byId: row });
+
+    await service.fire(row.id);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      { body: string },
+    ];
+    expect(JSON.parse(init.body)).toMatchObject({ dryRun: true });
+  });
+
+  it('answers 404 for an unknown action id', async () => {
+    const { service } = harness();
+    await expect(service.fire('missing')).rejects.toThrow(/does not exist/);
+  });
+});
+
+describe('fireChat: reply now for a whole chat', () => {
+  it('fires every pending turn of the chat in order', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const first = actionRow({
+      id: 'action-1',
+      kind: 'turn',
+      payload: JSON.stringify({ incoming: 'первое' }),
+    });
+    const second = actionRow({
+      id: 'action-2',
+      kind: 'turn',
+      payload: JSON.stringify({ incoming: 'второе' }),
+    });
+    const { service, prisma } = harness({ pending: [first, second] });
+
+    const result = await service.fireChat({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: '1000',
+      threadId: 0,
+    });
+
+    expect(prisma.eveDelayedAction.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          personaId: PERSONA,
+          accountId: ACCOUNT,
+          chatId: CHAT,
+          threadId: 0,
+          kind: 'turn',
+          state: 'pending',
+        },
+      }),
+    );
+    expect(result.fired).toBe(2);
+    // Sequential, not parallel: the second push starts after the first settles.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const bodies = fetchMock.mock.calls.map(
+      (call) => JSON.parse((call[1] as { body: string }).body) as {
+        incoming: string;
+      },
+    );
+    expect(bodies.map((body) => body.incoming)).toEqual([
+      'первое',
+      'второе',
+    ]);
+  });
+
+  it('fires nothing when the chat has no pending turn', async () => {
+    const { service } = harness({ pending: [] });
+    const result = await service.fireChat({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: CHAT,
+    });
+    expect(result.fired).toBe(0);
+    expect(result.results).toEqual([]);
+  });
+
+  it('does not fire a pending action of another kind', async () => {
+    // The mock returns the row regardless of kind; the service asks Prisma for
+    // `kind: 'turn'`, which is the guarantee under test.
+    const { service, prisma } = harness({ pending: [] });
+    await service.fireChat({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: CHAT,
+      threadId: 3,
+    });
+    expect(prisma.eveDelayedAction.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          threadId: 3,
+          kind: 'turn',
+          state: 'pending',
+        }),
+      }),
+    );
+  });
+
+  it('rejects an incomplete address before touching the queue', async () => {
+    const { service, prisma } = harness();
+    await expect(service.fireChat({ personaId: PERSONA })).rejects.toThrow(
+      /accountId is required/,
+    );
+    expect(prisma.eveDelayedAction.findMany).not.toHaveBeenCalled();
   });
 });
 

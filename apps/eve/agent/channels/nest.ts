@@ -506,6 +506,100 @@ function recentIncomingRefs(context: NestContext): IncomingRef[] {
   return refs.reverse();
 }
 
+/** Voice-like media whose content is text, so the model must hear it. */
+const TRANSCRIBE_LABELS: Record<
+  string,
+  { withText: string; failed: string }
+> = {
+  voice: { withText: 'голосовое', failed: 'голосовое, не расслышала' },
+  audio: { withText: 'аудио', failed: 'аудио, не расслышала' },
+  video_note: { withText: 'кружок', failed: 'кружок, не расслышала' },
+};
+/** Prompt budget for one transcript; longer notes are cut, not dropped. */
+const MAX_TRANSCRIPT_CHARS = 1_000;
+/** Same ceiling as the Nest endpoint: the turn never waits longer than this. */
+const TRANSCRIBE_TIMEOUT_MS = 20_000;
+/** A replay/burst of the same message reuses the transcript for ten minutes. */
+const TRANSCRIPT_TTL_MS = 10 * 60_000;
+
+/** Transcript per `account:chat:message`, `null` meaning "not heard". */
+const transcriptByMessage = new Map<
+  string,
+  { text: string | null; at: number }
+>();
+
+/**
+ * Best-effort transcript of one incoming voice note. Nest owns TDLib and the
+ * local STT engine; a missing endpoint, a timeout or an STT failure all answer
+ * `null` so the turn continues with the placeholder. The result — including a
+ * failure — is cached per message, so a burst of several messages that share
+ * one turn does not transcribe the same note twice.
+ */
+async function transcribeMessage(
+  state: NestState,
+  messageId: number,
+): Promise<string | null> {
+  const key = `${state.accountId}:${state.chatId}:${messageId}`;
+  const cached = transcriptByMessage.get(key);
+  if (cached && Date.now() - cached.at <= TRANSCRIPT_TTL_MS) {
+    return cached.text;
+  }
+  let text: string | null = null;
+  try {
+    const response = await fetch(`${nestBase()}/internal/eve/transcribe`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-eve-token': eveToken(),
+      },
+      body: JSON.stringify({
+        personaId: state.personaId,
+        accountId: state.accountId,
+        chatId: state.chatId,
+        threadId: state.threadId,
+        messageId,
+      }),
+      signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),
+    });
+    if (response.ok) {
+      const data = (await response.json()) as Record<string, unknown>;
+      const value = textOf(data.text).trim();
+      text = value ? value.slice(0, MAX_TRANSCRIPT_CHARS) : null;
+    }
+  } catch {
+    // Nest down, timeout or a broken body: the honest placeholder is enough.
+    text = null;
+  }
+  transcriptByMessage.set(key, { text, at: Date.now() });
+  if (transcriptByMessage.size > 500) {
+    const oldest = transcriptByMessage.keys().next().value;
+    if (oldest) transcriptByMessage.delete(oldest);
+  }
+  return text;
+}
+
+/**
+ * `mediaPrefix` with the heard text when the message is a voice note, audio
+ * file or video note. Everything else stays exactly as before (photos and
+ * videos travel to the model as files, not as labels).
+ */
+async function mediaPrefixFor(
+  state: NestState,
+  message: Record<string, unknown>,
+): Promise<string> {
+  const kind = mediaKindOf(message);
+  const label = TRANSCRIBE_LABELS[kind];
+  if (!label) return mediaPrefix(message);
+  const messageId = Number(message.id);
+  if (!Number.isSafeInteger(messageId) || messageId <= 0) {
+    return `[он прислал ${label.failed}]`;
+  }
+  const text = await transcribeMessage(state, messageId);
+  return text
+    ? `[он прислал ${label.withText}: «${text}»]`
+    : `[он прислал ${label.failed}]`;
+}
+
 function mediaPrefix(message: Record<string, unknown>): string {
   const media = recordOf(message.media);
   const kind = textOf(media.kind) || textOf(media.type);
@@ -739,6 +833,7 @@ export function resetChannelCaches(): void {
   deletionReplyAt.clear();
   deletionDeliveries.clear();
   deletionTurns.clear();
+  transcriptByMessage.clear();
 }
 
 /** Builds the turn content: text plus an image, when there is one. */
@@ -1541,9 +1636,13 @@ export default defineChannel<NestState, { state: NestState }>({
 
       const message = recordOf(body.message);
       const rawText = textOf(message.text).trim();
-      const media = mediaPrefix(message);
-      const text = [media, rawText].filter(Boolean).join(' ').trim();
-      if (!text) return Response.json({ ok: true, ignored: 'empty' });
+      // The placeholder is enough for the cheap empty check; a voice note is
+      // replaced by its transcript below, once the address is known.
+      const placeholder = [mediaPrefix(message), rawText]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      if (!placeholder) return Response.json({ ok: true, ignored: 'empty' });
 
       const state = parseState(body);
       if (!state) {
@@ -1552,6 +1651,12 @@ export default defineChannel<NestState, { state: NestState }>({
           { status: 400 },
         );
       }
+
+      // Voice/audio/video note: ask Nest for the text (best effort, cached,
+      // capped). A missed transcript keeps an honest placeholder instead of
+      // failing the turn.
+      const media = await mediaPrefixFor(state, message);
+      const text = [media, rawText].filter(Boolean).join(' ').trim();
 
       const address = `${state.personaId}:${state.accountId}:${state.chatId}`;
       const key = idempotencyKey(body, state);

@@ -132,7 +132,7 @@ EVE_DRY_RUN=false
 
 Eve не держит таймеров. Канал, увидев `delaySec > 0`, кладёт строку в
 `EveDelayedAction` (`POST /internal/eve/actions`) и отвечает 202. Nest тикает
-раз в 60 с (`EveDelayedService`):
+раз в 5 с (`EveDelayedService`, `EVE_DELAYED_TICK_MS`, кламп 1–60 с):
 
 | kind | что делает тик |
 |---|---|

@@ -35,8 +35,34 @@ export interface EveDelayedActionView {
 
 export interface EveDelayedActionQuery {
   personaId?: string;
+  accountId?: string;
+  /** Filter by chat; Nest parses it into the BigInt column. */
+  chatId?: string;
+  threadId?: number;
+  /** turn | send | edit | delete | react | read */
+  kind?: string;
   state?: string;
   limit?: number;
+}
+
+/** `POST /internal/eve/actions/:id/fire`. */
+export interface EveDelayedFireResult {
+  ok: boolean;
+  /** `not-pending`, `in-flight`, `retried`… when `ok` is false. */
+  reason: string | null;
+  outcome: string | null;
+  action: EveDelayedActionView | null;
+}
+
+/** `POST /internal/eve/actions/fire` for one chat. */
+export interface EveFireChatResult {
+  fired: number;
+  results: Array<{
+    id: string;
+    ok: boolean;
+    outcome: string | null;
+    reason: string | null;
+  }>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,6 +129,12 @@ export async function listDelayedActions(
 ): Promise<EveDelayedActionView[]> {
   const params = new URLSearchParams();
   if (query.personaId) params.set("personaId", query.personaId);
+  if (query.accountId) params.set("accountId", query.accountId);
+  if (query.chatId) params.set("chatId", query.chatId);
+  if (query.threadId !== undefined) {
+    params.set("threadId", String(query.threadId));
+  }
+  if (query.kind) params.set("kind", query.kind);
   if (query.state) params.set("state", query.state);
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   const suffix = params.size > 0 ? `?${params.toString()}` : "";
@@ -117,4 +149,58 @@ export async function listDelayedActions(
   return rows
     .map((row) => normalizeDelayedAction(row))
     .filter((row): row is EveDelayedActionView => row !== null);
+}
+
+/**
+ * `POST /internal/eve/actions/:id/fire` — deliver one queued row now. Nest
+ * refuses a row that is no longer pending instead of sending it twice.
+ */
+export async function fireDelayedAction(
+  id: string,
+): Promise<EveDelayedFireResult> {
+  const data = await eveFetch<unknown>(
+    `actions/${encodeURIComponent(id)}/fire`,
+    { method: "POST", body: {} },
+  );
+  const payload = isRecord(data) ? data : {};
+  return {
+    ok: payload.ok === true,
+    reason: typeof payload.reason === "string" ? payload.reason : null,
+    outcome: typeof payload.outcome === "string" ? payload.outcome : null,
+    action: normalizeDelayedAction(payload.action),
+  };
+}
+
+/**
+ * `POST /internal/eve/actions/fire` — every pending turn of one chat goes out
+ * now, in order. `threadId` limits the call to one topic.
+ */
+export async function fireChatDelayedTurns(query: {
+  personaId: string;
+  accountId: string;
+  chatId: string;
+  threadId?: number;
+}): Promise<EveFireChatResult> {
+  const data = await eveFetch<unknown>("actions/fire", {
+    method: "POST",
+    body: {
+      personaId: query.personaId,
+      accountId: query.accountId,
+      chatId: query.chatId,
+      threadId: query.threadId ?? 0,
+    },
+  });
+  const payload = isRecord(data) ? data : {};
+  const results = Array.isArray(payload.results)
+    ? payload.results.filter(isRecord).map((row) => ({
+        id: asString(row.id),
+        ok: row.ok === true,
+        outcome: typeof row.outcome === "string" ? row.outcome : null,
+        reason: typeof row.reason === "string" ? row.reason : null,
+      }))
+    : [];
+  return {
+    fired: asFiniteNumber(payload.fired) ?? 0,
+    results,
+  };
 }

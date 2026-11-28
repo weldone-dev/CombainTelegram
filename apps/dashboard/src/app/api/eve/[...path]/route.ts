@@ -45,9 +45,12 @@ const ROUTES: Array<{ method: string; pattern: RegExp }> = [
   { method: "GET", pattern: /^context\/snapshots$/ },
   { method: "GET", pattern: new RegExp(`^context/snapshots/${ID}$`) },
   // Durable deferred-action queue (delayed turns, edits, deletes, reactions).
-  // Read-only: enqueueing and dispatching stay with the Eve channel and Nest's
-  // 60-second tick.
+  // Reading is open; the only write the dashboard may do is "reply now": one
+  // row by id, or every pending turn of one chat. Enqueueing and the regular
+  // 60-second tick stay with the Eve channel and Nest.
   { method: "GET", pattern: /^actions$/ },
+  { method: "POST", pattern: new RegExp(`^actions/${ID}/fire$`) },
+  { method: "POST", pattern: /^actions\/fire$/ },
   // Schedules: compiled Eve schedules (from /eve/v1/info) plus the durable
   // delayed queue and its counts. Read-only.
   { method: "GET", pattern: /^schedules$/ },
@@ -55,6 +58,9 @@ const ROUTES: Array<{ method: string; pattern: RegExp }> = [
   { method: "GET", pattern: /^state\/conflict$/ },
   // Chat timeline («Хроника»): messages, ignores and relationship deltas.
   { method: "GET", pattern: /^timeline$/ },
+  // Behavior decision of the last turn, proxied from the running Eve process
+  // (`GET /eve/v1/nest/why`). Read-only diagnostic for the trace tab.
+  { method: "GET", pattern: /^turn\/why$/ },
 ];
 
 function json(status: number, code: string, message: string): Response {

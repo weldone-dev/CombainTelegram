@@ -19,6 +19,7 @@ import { EvePersonaGenService } from './eve-persona-gen.service.js';
 import { EveProactiveService } from './eve-proactive.service.js';
 import { EveSchedulesService } from './eve-schedules.service.js';
 import { EveTimelineService } from './eve-timeline.service.js';
+import { EveTraceService } from './eve-trace.service.js';
 import { EveTokenGuard } from './eve-token.guard.js';
 import { EveTurnService, parseTurnInput } from './eve-turn.service.js';
 import { EveService } from './eve.service.js';
@@ -62,6 +63,7 @@ export class EveController {
     private readonly contexts: EveContextService,
     private readonly schedules: EveSchedulesService,
     private readonly timeline: EveTimelineService,
+    private readonly trace: EveTraceService,
   ) {}
 
   @Get('personas')
@@ -249,15 +251,39 @@ export class EveController {
   @Get('actions')
   listActions(
     @Query('personaId') personaId?: string,
+    @Query('accountId') accountId?: string,
+    @Query('chatId') chatId?: string,
+    @Query('threadId') threadId?: string,
+    @Query('kind') kind?: string,
     @Query('state') state?: string,
     @Query('limit') limit?: string,
   ) {
-    return this.delayed.list({ personaId, state, limit });
+    return this.delayed.list({
+      personaId,
+      accountId,
+      chatId,
+      threadId,
+      kind,
+      state,
+      limit,
+    });
   }
 
   @Post('actions/tick')
   actionsTick(@Body() body: Record<string, unknown>) {
     return this.delayed.tickRequest(body);
+  }
+
+  /** Send one queued action now instead of waiting for its `dueAt`. */
+  @Post('actions/:id/fire')
+  fireAction(@Param('id') id: string) {
+    return this.delayed.fire(id);
+  }
+
+  /** Send every pending turn of one chat now, in order. */
+  @Post('actions/fire')
+  fireChatActions(@Body() body: Record<string, unknown>) {
+    return this.delayed.fireChat(body);
   }
 
   /**
@@ -294,6 +320,16 @@ export class EveController {
   @Post('typing')
   typing(@Body() body: Record<string, unknown>) {
     return this.eve.typing(body);
+  }
+
+  /**
+   * Voice-note transcript for the Eve channel. Reads only: the text is folded
+   * into the turn prompt, nothing is sent to Telegram. STT failures answer
+   * `{ text: null }`, never a 500.
+   */
+  @Post('transcribe')
+  transcribeVoice(@Body() body: Record<string, unknown>) {
+    return this.eve.transcribeVoice(body);
   }
 
   @Post('read')
@@ -342,6 +378,19 @@ export class EveController {
       limit,
       before,
     });
+  }
+
+  /**
+   * Last behavior decision of one chat, read from the running Eve process.
+   * The trace tab of the chat panel shows it next to the snapshot of the turn.
+   */
+  @Get('turn/why')
+  turnWhy(
+    @Query('personaId') personaId?: string,
+    @Query('accountId') accountId?: string,
+    @Query('chatId') chatId?: string,
+  ) {
+    return this.trace.why({ personaId, accountId, chatId });
   }
 
   @Get('history')

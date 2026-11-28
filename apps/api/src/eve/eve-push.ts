@@ -7,6 +7,9 @@ export const DEFAULT_EVE_WEBHOOK_URL =
 /** Where a local Eve process accepts a deferred turn (durable delayed reply). */
 export const DEFAULT_EVE_TURN_URL = 'http://127.0.0.1:4020/eve/v1/nest/turn';
 
+/** Where the running Eve process explains its last behavior decision. */
+export const DEFAULT_EVE_WHY_URL = 'http://127.0.0.1:4020/eve/v1/nest/why';
+
 export const EVE_PUSH_ATTEMPTS = 3;
 export const EVE_PUSH_TIMEOUT_MS = 10_000;
 export const EVE_PUSH_BACKOFF_MS = [250, 1000, 3000] as const;
@@ -47,6 +50,18 @@ export function eveTurnUrl(): string | null {
   const explicit = process.env.EVE_TURN_URL;
   if (explicit !== undefined) return explicit.trim() || null;
   return eveWebhookUrl() === null ? null : DEFAULT_EVE_TURN_URL;
+}
+
+/**
+ * Resolves the behavior-decision endpoint.
+ *
+ * - `EVE_WHY_URL` wins when it is defined; an empty value disables the trace.
+ * - Otherwise a configured Eve process gets the default local URL.
+ */
+export function eveWhyUrl(): string | null {
+  const explicit = process.env.EVE_WHY_URL;
+  if (explicit !== undefined) return explicit.trim() || null;
+  return eveWebhookUrl() === null ? null : DEFAULT_EVE_WHY_URL;
 }
 
 export interface EvePushOptions {
