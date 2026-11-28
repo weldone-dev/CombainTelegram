@@ -7,9 +7,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { EveMediaService } from './eve-media.service.js';
 import {
   dryRunMessageView,
-  eveDryRunAccounts,
-  eveDryRunApplies,
   eveDryRunEnabled,
+  eveDryRunRequested,
   noteEveDryRunOutbound,
 } from './eve-dry-run.js';
 import { busyNow, decideOnline, parseBusySchedule } from './eve-presence.js';
@@ -999,6 +998,7 @@ export class EveService {
           personaId: id,
           accountId,
           chatId,
+          threadId,
           day,
           line: `${text(item.role, 'user')}: ${content}`,
         };
@@ -1185,11 +1185,10 @@ export class EveService {
         now: now.getTime(),
       });
       try {
-        if (
-          eveDryRunEnabled() &&
-          (eveDryRunAccounts().size === 0 ||
-            eveDryRunAccounts().has(link.accountId))
-        ) {
+        // The presence tick is a scheduled account-wide action, not a turn:
+        // only the global kill-switch suppresses it. A per-turn `dryRun` does
+        // not leak into it.
+        if (eveDryRunEnabled()) {
           noteEveDryRunOutbound(
             'presence',
             link.accountId,
@@ -1262,7 +1261,7 @@ export class EveService {
       throw apiError('EVE_TEXT_REQUIRED', 'text is required');
     }
     const ids: number[] = [];
-    const dryRun = eveDryRunApplies(address.accountId, address.chatId);
+    const dryRun = eveDryRunRequested(body);
     for (const [index, part] of parts.entries()) {
       if (index > 0) {
         const pause = bubblePauseMs(index, parts[index - 1] ?? '');
@@ -1307,7 +1306,7 @@ export class EveService {
     if (buffer.byteLength === 0) {
       throw apiError('EVE_MEDIA_EMPTY', 'media payload is empty');
     }
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       const caption = text(body.caption);
       noteEveDryRunOutbound(
         'media',
@@ -1347,7 +1346,7 @@ export class EveService {
     if (buffer.byteLength === 0) {
       throw apiError('EVE_MEDIA_EMPTY', 'media payload is empty');
     }
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       const caption = text(body.caption);
       noteEveDryRunOutbound(
         'voice',
@@ -1380,7 +1379,7 @@ export class EveService {
     const user = await this.users.get();
     const fileId = text(body.fileId);
     if (!fileId) throw apiError('EVE_STICKER_REQUIRED', 'fileId is required');
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'sticker',
         address.accountId,
@@ -1406,7 +1405,7 @@ export class EveService {
     const messageId = requiredMessageId(body);
     const value = text(body.text);
     if (!value) throw apiError('EVE_TEXT_REQUIRED', 'text is required');
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'edit',
         address.accountId,
@@ -1431,7 +1430,7 @@ export class EveService {
     const address = await this.writeAddress(raw);
     const user = await this.users.get();
     const messageId = requiredMessageId(body);
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'delete',
         address.accountId,
@@ -1456,7 +1455,7 @@ export class EveService {
     const address = await this.writeAddress(raw);
     const user = await this.users.get();
     const messageId = requiredMessageId(body);
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'react',
         address.accountId,
@@ -1477,9 +1476,10 @@ export class EveService {
 
   /** Blocks the peer of an allowed Eve chat. */
   async blockContact(raw: unknown) {
+    const body = record(raw);
     const address = await this.writeAddress(raw);
     const user = await this.users.get();
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'block',
         address.accountId,
@@ -1498,9 +1498,10 @@ export class EveService {
 
   /** Unblocks the peer of an allowed Eve chat. */
   async unblockContact(raw: unknown) {
+    const body = record(raw);
     const address = await this.writeAddress(raw);
     const user = await this.users.get();
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'unblock',
         address.accountId,
@@ -1521,7 +1522,7 @@ export class EveService {
     const body = record(raw);
     const address = await this.writeAddress(raw);
     const user = await this.users.get();
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'typing',
         address.accountId,
@@ -1543,7 +1544,7 @@ export class EveService {
     const body = record(raw);
     const address = await this.writeAddress(raw);
     const user = await this.users.get();
-    if (eveDryRunApplies(address.accountId, address.chatId)) {
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'read',
         address.accountId,
@@ -1605,12 +1606,9 @@ export class EveService {
       }
     }
     const user = await this.users.get();
-    // Presence is account-wide: a chat-scoped dry run still must not flip the
-    // account's online flag, so the account switch is enough here.
-    if (
-      eveDryRunEnabled() &&
-      (eveDryRunAccounts().size === 0 || eveDryRunAccounts().has(accountId))
-    ) {
+    // Presence is account-wide: the per-request flag (or the global
+    // kill-switch) suppresses the flip for this call only.
+    if (eveDryRunRequested(body)) {
       noteEveDryRunOutbound(
         'presence',
         accountId,

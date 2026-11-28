@@ -60,6 +60,7 @@ export default defineHook({
           capture,
           address,
           normalizeKind(attribute(ctx, 'kind')),
+          attribute(ctx, 'dryRun') === 'true',
         );
         await postSnapshot(payload);
       } catch (error) {

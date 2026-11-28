@@ -338,6 +338,18 @@ describe('buildSnapshotPayload', () => {
     });
   });
 
+  it('carries the per-turn dryRun flag into the snapshot body', () => {
+    recordModelCallStarted(inboundCall());
+    const capture = takeTurnCapture('session-1', 'turn_6')!;
+    const dry = buildSnapshotPayload(capture, ADDRESS, 'inbound', true);
+    expect(dry.dryRun).toBe(true);
+
+    recordModelCallStarted(inboundCall());
+    const liveCapture = takeTurnCapture('session-1', 'turn_6')!;
+    const live = buildSnapshotPayload(liveCapture, ADDRESS, 'inbound');
+    expect(live.dryRun).toBeUndefined();
+  });
+
   it('marks tokens as estimated when the provider reported no usage', () => {
     recordModelCallStarted(inboundCall());
     const capture = takeTurnCapture('session-1', 'turn_6')!;

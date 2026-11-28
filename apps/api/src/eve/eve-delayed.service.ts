@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { DefaultUserService } from '../user-context/default-user.service.js';
 import {
   dryRunKindOf,
-  eveDryRunApplies,
+  eveDryRunRequested,
   noteEveDryRunOutbound,
 } from './eve-dry-run.js';
 import { eveTurnUrl } from './eve-push.js';
@@ -301,6 +301,14 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
         );
         payload = series.length > 0 ? { ...bodyPayload, burst: series } : bodyPayload;
       }
+      // Persist the per-request flag with the row so a test-triggered delay
+      // stays suppressed after a restart. An old row without it is live
+      // (the global kill-switch is re-read on every dispatch, not stored).
+      const requestedDryRun =
+        body.dryRun === true || bodyPayload.dryRun === true;
+      if (requestedDryRun && payload.dryRun !== true) {
+        payload = { ...payload, dryRun: true };
+      }
       const row = await this.prisma.eveDelayedAction.create({
         data: {
           personaId: address.personaId,
@@ -531,9 +539,11 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
       return this.drop(row, 'address-not-allowed');
     }
 
-    if (row.kind === 'turn') return this.dispatchTurn(row, now);
-
+    // The flag was frozen into the payload when the action was queued. An old
+    // row without it is live; the global kill-switch is applied at dispatch.
     const payload = parseJson(row.payload);
+    if (row.kind === 'turn') return this.dispatchTurn(row, now, payload);
+
     const chatId = row.chatId.toString();
     const messageId =
       payload.messageId === undefined || payload.messageId === null
@@ -542,7 +552,7 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
     const user = await this.users.get();
 
     try {
-      if (eveDryRunApplies(row.accountId, row.chatId)) {
+      if (eveDryRunRequested(payload)) {
         noteEveDryRunOutbound(
           dryRunKindOf(row.kind),
           row.accountId,
@@ -623,11 +633,14 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
   private async dispatchTurn(
     row: EveDelayedActionRow,
     now: Date,
+    payload: Record<string, unknown>,
   ): Promise<EveDelayedOutcome> {
     const url = eveTurnUrl();
     if (!url) return this.retry(row, 'turn-endpoint-disabled');
 
-    const payload = parseJson(row.payload);
+    // A deferred turn inherits the flag of the turn that queued it; the global
+    // kill-switch forces it on for this dispatch only.
+    const dryRun = eveDryRunRequested(payload);
     // The payload froze the series when the message arrived. Read the counter
     // right before the push: a message of that series may have been answered
     // or deliberately ignored while this turn waited, and the channel must not
@@ -647,6 +660,7 @@ export class EveDelayedService implements OnModuleInit, OnModuleDestroy {
       chatId: row.chatId.toString(),
       threadId: row.threadId,
       lastHisMessageId,
+      dryRun,
     };
     const result = await this.postTurn(url, body);
     if (!result.ok) {

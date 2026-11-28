@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { notFound } from '../common/api-error.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { eveId, parseChatId, parseThreadId } from './eve-access.js';
-import { eveDryRunApplies } from './eve-dry-run.js';
+import { eveDryRunRequested } from './eve-dry-run.js';
 import { EveService } from './eve.service.js';
 import type { EveScope } from './eve.service.js';
 
@@ -190,6 +190,17 @@ function isDumped(score: EveTurnScore): boolean {
 function oneLine(value: string, max = MAX_LOG_TEXT): string {
   const text = value.replace(/\s+/g, ' ').trim();
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/** Timeline source of one applied turn. An ignored turn is its own source. */
+function turnSource(input: EveTurnInput): string {
+  if (!input.decision.shouldReply) return 'ignore';
+  const origin = textOf(input.origin).toLowerCase();
+  if (origin === 'proactive' || origin === 'reaction') return origin;
+  const key = textOf(input.turnKey);
+  if (key.startsWith('proactive:')) return 'proactive';
+  if (key.startsWith('reaction:')) return 'reaction';
+  return 'inbound';
 }
 
 /* ------------------------------------------------------------------ */
@@ -597,6 +608,12 @@ export interface EveTurnInput {
    * different key whose series is already applied still writes its outcome.
    */
   turnKey?: string;
+  /**
+   * Where the turn came from (`inbound`, `deferred`, `proactive`, `reaction`,
+   * `deletion`). Stored on the relationship-change row so the timeline can
+   * tell a reply to his message from a proactive ping.
+   */
+  origin?: string;
   /** The same series with texts, used for one session-log line per message. */
   messages?: Array<{ id: number | null; text: string }>;
   /** Incoming message text. */
@@ -604,6 +621,19 @@ export interface EveTurnInput {
   /** Generated reply text, when the turn produced one. */
   reply?: string | null;
   decision: EveTurnDecision;
+  /**
+   * This turn was a test/dry run: no outbound action reached Telegram.
+   *
+   * A dry run writes no stage counters at all: not `hisMsgs`, `herMsgs`,
+   * `ignoresInStage`, `msgsSinceStageCheck` and, most importantly, not
+   * `lastHisMessageId`. Its message ids are synthetic (`990001010`-style) and
+   * larger than real Telegram ids, so advancing the applied id would make
+   * every following real message look already applied and silently dropped.
+   * The stage cannot move either (it is derived from those counters). Everything
+   * else — mood, conflict, stage audit, session log — is written as for a live
+   * turn; the log line is marked `(dry-run)`.
+   */
+  dryRun?: boolean;
   /** Epoch ms; injectable for deterministic specs. */
   now?: number;
   /** Injectable PRNG for cold-period lengths. */
@@ -768,6 +798,7 @@ export function parseTurnInput(raw: unknown): EveTurnInput {
     messageId,
     messageIds,
     turnKey: textOf(body.turnKey).slice(0, 256) || undefined,
+    origin: textOf(body.origin).toLowerCase().slice(0, 32) || undefined,
     messages,
     text: incomingText,
     reply: reply || null,
@@ -780,6 +811,7 @@ export function parseTurnInput(raw: unknown): EveTurnInput {
       bubbles: clampInt(intOf(decisionRaw.bubbles, 1), 1, 6),
       reaction: textOf(decisionRaw.reaction) || undefined,
     },
+    dryRun: eveDryRunRequested(body),
     now: typeof body.now === 'number' && Number.isFinite(body.now)
       ? body.now
       : undefined,
@@ -896,6 +928,26 @@ export class EveTurnService {
     const freshIds = seriesIds.filter((id) => id > counters.lastHisMessageId);
     const turnKey = textOf(input.turnKey);
     // A retried writeback of the same turn must be a full no-op: the mood, the
+    // outcome counters and the log line were already written for it. The
+    // durable gate is checked first because `EveSessionState` remembers only
+    // the last key: a retry that lands after another turn would otherwise look
+    // new and duplicate its messages, mood delta and log lines.
+    if (turnKey) {
+      const applied = await this.prisma.eveTurnApply.findFirst({
+        where: {
+          personaId: scope.personaId,
+          accountId: scope.accountId,
+          chatId: scope.chatId,
+          threadId: scope.threadId,
+          turnKey,
+        },
+        select: { id: true },
+      });
+      if (applied) {
+        return this.replayedTurn(relationship, counters, currentStage);
+      }
+    }
+    // A retried writeback of the same turn must be a full no-op: the mood, the
     // outcome counters and the log line were already written for it.
     if (turnKey && counters.lastAppliedTurnKey === turnKey) {
       return this.replayedTurn(relationship, counters, currentStage);
@@ -913,10 +965,17 @@ export class EveTurnService {
     }
     const counted = seriesIds.length > 0 ? freshIds.length : 1;
     const msgsBefore = counters.msgsSinceStageCheck;
-    counters.hisMsgs += counted;
-    counters.msgsSinceStageCheck += counted;
-    for (const id of seriesIds) {
-      if (id > counters.lastHisMessageId) counters.lastHisMessageId = id;
+    // A dry run is a test: it must never move the live stage counters. Above
+    // all it must not advance `lastHisMessageId`, or the next real Telegram
+    // message (whose ids are usually *lower* than a synthetic test id) would be
+    // filtered out as "already applied" and silently ignored forever.
+    const dryRun = input.dryRun === true;
+    if (!dryRun) {
+      counters.hisMsgs += counted;
+      counters.msgsSinceStageCheck += counted;
+      for (const id of seriesIds) {
+        if (id > counters.lastHisMessageId) counters.lastHisMessageId = id;
+      }
     }
 
     // 2. Mood delta, clamped.
@@ -990,11 +1049,13 @@ export class EveTurnService {
     }
 
     // 4. Auto-dump beats a stage check: terminal and irreversible here.
+    // A dry run never changes the stage: stage moves are derived from the
+    // counters it does not touch, and a test must not dump a live relationship.
     let stage: Stage = currentStage;
     let stageChanged: EveTurnStageChange | undefined;
     let agendaCancelled = false;
 
-    if (currentStage !== DUMPED_STAGE && isDumped(nextScore)) {
+    if (!dryRun && currentStage !== DUMPED_STAGE && isDumped(nextScore)) {
       stage = DUMPED_STAGE;
       stageChanged = {
         from: currentStage,
@@ -1005,6 +1066,7 @@ export class EveTurnService {
       resetStageCounters(counters);
       agendaCancelled = true;
     } else if (
+      !dryRun &&
       currentStage !== DUMPED_STAGE &&
       counted > 0 &&
       counters.msgsSinceStageCheck > 0 &&
@@ -1033,17 +1095,20 @@ export class EveTurnService {
       }
     }
 
-    // 5. Outcome counters.
-    if (IGNORE_INTENTS.has(input.decision.intent)) {
-      counters.ignoresInStage += 1;
-    } else if (input.decision.shouldReply) {
-      counters.herMsgs += 1;
+    // 5. Outcome counters. A dry run writes none of them.
+    if (!dryRun) {
+      if (IGNORE_INTENTS.has(input.decision.intent)) {
+        counters.ignoresInStage += 1;
+      } else if (input.decision.shouldReply) {
+        counters.herMsgs += 1;
+      }
     }
     counters.stage = stage;
     // The outcome of this turn is written below; a retry with the same key
     // stops at the replay guard above, a late reply under a new key no longer
-    // looks like a replay of the ignore that consumed its series.
-    if (turnKey) counters.lastAppliedTurnKey = turnKey;
+    // looks like a replay of the ignore that consumed its series. A dry run is
+    // not applied, so it leaves the marker alone as well.
+    if (turnKey && !dryRun) counters.lastAppliedTurnKey = turnKey;
 
     // 6. Persist relationship (scores + stage) only when something moved.
     const scoreMoved = SCORE_KEYS.some((key) => nextScore[key] !== score[key]);
@@ -1114,6 +1179,56 @@ export class EveTurnService {
         },
       });
     }
+
+    // 8b. Applied relationship change: exact post-clamp deltas plus the stage
+    // and conflict move, for the chat timeline. Memory retrieval keeps reading
+    // `EveRelationshipEvent`, so this table never pollutes a recall.
+    const appliedDelta: EveTurnMoodDelta = {};
+    for (const key of SCORE_KEYS) {
+      const diff = nextScore[key] - score[key];
+      if (diff !== 0) appliedDelta[key] = diff;
+    }
+    const relationshipChanged =
+      Object.keys(appliedDelta).length > 0 ||
+      stageChanged !== undefined ||
+      conflictMoved;
+    if (relationshipChanged) {
+      // A replayed turn is caught above; this guard also covers a racing
+      // duplicate whose counters were not visible to the first guard yet.
+      const duplicate = turnKey
+        ? await this.prisma.eveRelationshipChange.findFirst({
+            where: { relationshipId: relationshipRow.id, turnKey },
+            select: { id: true },
+          })
+        : null;
+      if (!duplicate) {
+        try {
+          await this.prisma.eveRelationshipChange.create({
+            data: {
+              relationshipId: relationshipRow.id,
+              personaId: scope.personaId,
+              accountId: scope.accountId,
+              chatId: scope.chatId,
+              threadId: scope.threadId,
+              source: turnSource(input),
+              delta: JSON.stringify(appliedDelta),
+              before: JSON.stringify(score),
+              after: JSON.stringify(nextScore),
+              stageFrom: stageChanged?.from ?? null,
+              stageTo: stageChanged?.to ?? null,
+              conflictBefore: conflictMoved ? normalizeLevel(before.level) : null,
+              conflictAfter: conflictMoved ? normalizeLevel(after.level) : null,
+              turnKey: turnKey || null,
+              createdAt: new Date(now),
+            },
+          });
+        } catch (error) {
+          // Two simultaneous writebacks of one turn: the unique constraint
+          // keeps a single row and the loser is a no-op.
+          if ((error as { code?: unknown }).code !== 'P2002') throw error;
+        }
+      }
+    }
     if (agendaCancelled) {
       await this.prisma.eveAgendaItem.updateMany({
         where: {
@@ -1126,24 +1241,27 @@ export class EveTurnService {
       });
     }
 
-    // 9. Stage counters JSON (one row per persona+account+chat).
-    const stateJson = JSON.stringify(counters);
-    await this.prisma.eveSessionState.upsert({
-      where: {
-        personaId_accountId_chatId: {
+    // 9. Stage counters JSON (one row per persona+account+chat). A dry run has
+    // nothing to store: the counters above were left exactly as they were.
+    if (!dryRun) {
+      const stateJson = JSON.stringify(counters);
+      await this.prisma.eveSessionState.upsert({
+        where: {
+          personaId_accountId_chatId: {
+            personaId: scope.personaId,
+            accountId: scope.accountId,
+            chatId: scope.chatId,
+          },
+        },
+        create: {
           personaId: scope.personaId,
           accountId: scope.accountId,
           chatId: scope.chatId,
+          state: stateJson,
         },
-      },
-      create: {
-        personaId: scope.personaId,
-        accountId: scope.accountId,
-        chatId: scope.chatId,
-        state: stateJson,
-      },
-      update: { state: stateJson },
-    });
+        update: { state: stateJson },
+      });
+    }
 
     // 10. Session log: one incoming line per newly applied message plus the
     // outcome line.
@@ -1155,10 +1273,33 @@ export class EveTurnService {
           personaId: scope.personaId,
           accountId: scope.accountId,
           chatId: scope.chatId,
+          threadId: scope.threadId,
           day,
           line,
+          // One timestamp for the whole turn: the timeline cursor is
+          // `createdAt`, and the change row uses the same `now`.
+          createdAt: new Date(now),
         })),
       });
+    }
+
+    // 11. Remember the applied turn durably. The unique key is the last line
+    // of defence against a racing duplicate; a losing insert is a no-op.
+    if (turnKey) {
+      try {
+        await this.prisma.eveTurnApply.create({
+          data: {
+            personaId: scope.personaId,
+            accountId: scope.accountId,
+            chatId: scope.chatId,
+            threadId: scope.threadId,
+            turnKey,
+            createdAt: new Date(now),
+          },
+        });
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'P2002') throw error;
+      }
     }
 
     return {
@@ -1389,7 +1530,7 @@ export class EveTurnService {
     } else {
       const reply = oneLine(input.reply ?? '');
       if (reply) {
-        const dryRun = eveDryRunApplies(input.accountId, input.chatId);
+        const dryRun = eveDryRunRequested(input);
         lines.push(`  -> она${dryRun ? ' (dry-run)' : ''}: ${reply}`);
       }
     }

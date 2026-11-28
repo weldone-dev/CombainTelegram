@@ -293,6 +293,7 @@ model EveRelationship {
   createdAt  DateTime   @default(now())
 
   events   EveRelationshipEvent[]
+  changes  EveRelationshipChange[]
   conflict EveConflict?
 
   @@unique([personaId, scopeKey])
@@ -307,6 +308,53 @@ model EveRelationshipEvent {
   createdAt      DateTime        @default(now())
 
   @@index([relationshipId, createdAt])
+}
+
+/// One applied relationship mutation: score deltas (after clamping), a stage
+/// transition and/or a conflict move. Separate from `EveRelationshipEvent`,
+/// whose text rows feed memory retrieval; these rows feed the chat timeline.
+model EveRelationshipChange {
+  id             String          @id @default(cuid())
+  relationshipId String
+  relationship   EveRelationship @relation(fields: [relationshipId], references: [id], onDelete: Cascade)
+  personaId      String
+  accountId      String
+  chatId         BigInt
+  threadId       Int             @default(0)
+  /// inbound | proactive | reaction | ignore
+  source         String          @default("inbound")
+  /// Applied score delta as JSON: `{ "interest": 2 }`.
+  delta          String          @default("{}")
+  before         String          @default("{}")
+  after          String          @default("{}")
+  stageFrom      String?
+  stageTo        String?
+  conflictBefore Int?
+  conflictAfter  Int?
+  turnKey        String?
+  createdAt      DateTime        @default(now())
+
+  @@unique([relationshipId, turnKey])
+  @@index([personaId, accountId, chatId, threadId, createdAt])
+}
+
+/// Durable idempotency gate for one `turn/apply` writeback.
+///
+/// `EveSessionState` keeps only the last applied turn key, so a retry that
+/// arrives after another turn already moved the state would otherwise count
+/// the messages and write the log lines again. One row per real turn is cheap
+/// and survives restarts.
+model EveTurnApply {
+  id        String   @id @default(cuid())
+  personaId String
+  accountId String
+  chatId    BigInt
+  threadId  Int      @default(0)
+  turnKey   String
+  createdAt DateTime @default(now())
+
+  @@unique([personaId, accountId, chatId, threadId, turnKey])
+  @@index([createdAt])
 }
 
 model EveConflict {
@@ -453,12 +501,14 @@ model EveSessionLog {
   personaId String
   accountId String
   chatId    BigInt
+  threadId  Int      @default(0)
   day       String
   line      String
   createdAt DateTime @default(now())
 
   @@index([personaId, day])
   @@index([accountId, chatId, createdAt])
+  @@index([personaId, accountId, chatId, threadId, createdAt])
 }
 
 model EveSticker {

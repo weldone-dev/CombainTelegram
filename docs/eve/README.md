@@ -101,20 +101,22 @@ EVE_TOKEN=<same as api>
   снапшотов на чат; старые удаляются после записи, не блокируя ответ.
 - Захват best-effort: ошибка/таймаут отправки снапшота не ломает turn.
 
-## Dry-run (ответы не уходят в Telegram)
+## Dry-run (per-turn, ответы не уходят в Telegram)
 
-`apps/api/.env`:
+Флаг теперь per-request, а не per-chat:
 
 ```env
 EVE_DRY_RUN=false
-# необязательно: ограничить конкретными чатами / аккаунтами
-EVE_DRY_RUN_CHATS=1830539716,-1001234567890
-EVE_DRY_RUN_ACCOUNTS=
 ```
 
-- Включается только явным `true/1/yes/on`; опечатка оставляет реальную
-  отправку. При старте API печатает
-  `[eve][dry-run] WARNING: EVE DRY RUN enabled — outbound suppressed for …`.
+- Тестовый/ручной turn передаёт `dryRun: true` (`POST /eve/v1/nest/turn`,
+  `/proactive`, `messages/*`, `typing`, `read`, …). Реальный Telegram
+  `message.new` всегда идёт с `dryRun: false` и доставляется живьём.
+- Флаг лежит в `NestState.dryRun`, все outbound-вызовы канала передают его в
+  Nest, а `EveDelayedAction.payload` сохраняет его для отложенных действий.
+  Старая pending-строка без флага считается живой (`false`).
+- `EVE_DRY_RUN=true` — глобальный аварийный kill-switch: подавляет всё
+  независимо от per-turn флага и печатает предупреждение при старте.
 - Персона проходит весь путь: behavior, LLM, пузыри, задержки, память,
   `turn/apply`, запись в `EveSessionLog` (строка `-> она (dry-run): …`).
 - Подавляются все исходящие действия: текст, медиа, стикер, войс, реакция,
@@ -123,7 +125,7 @@ EVE_DRY_RUN_ACCOUNTS=
   строка `[eve][dry-run] <kind> chat=… account=… …` и синтетический
   отрицательный `messageId`, чтобы turn завершился без ретрая.
 - Подавленные действия попадают в `meta.suppressedOutbound` следующего
-  снапшота, а `EveContextSnapshot.dryRun` помечает сам turn для дашборда.
+  снапшота, а `EveContextSnapshot.dryRun` хранит флаг конкретного turn'а.
 
 
 ## Отложенные действия

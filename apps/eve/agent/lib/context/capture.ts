@@ -76,6 +76,8 @@ export interface SnapshotPayload {
   system: EveContextBlock[];
   messages: EveContextMessage[];
   meta: Record<string, unknown>;
+  /** This turn was a dry run: its outbound actions never reached Telegram. */
+  dryRun?: boolean;
 }
 
 /** A turn that never settles must not leak memory in a long-lived process. */
@@ -495,6 +497,7 @@ export function buildSnapshotPayload(
   capture: TurnCapture,
   address: SnapshotAddress,
   kind: EveContextKind,
+  dryRun = false,
 ): SnapshotPayload {
   const system = systemBlocksOf(capture.instructions);
   const messages = messageEntriesOf(capture.messages, kind);
@@ -540,6 +543,7 @@ export function buildSnapshotPayload(
       messageCount: messages.length,
       systemBlockCount: system.length,
     },
+    ...(dryRun ? { dryRun: true } : {}),
   };
 }
 

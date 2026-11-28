@@ -124,8 +124,7 @@ describe('EveContextService.ingest', () => {
     expect(prisma.eveContextSnapshot.create).not.toHaveBeenCalled();
   });
 
-  it('marks a dry-run turn and attaches suppressed outbound actions', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
+  it('marks a snapshot with the dryRun flag of its turn', async () => {
     const { service } = harness();
 
     const result = await service.ingest({
@@ -133,6 +132,35 @@ describe('EveContextService.ingest', () => {
       accountId: ACCOUNT,
       chatId: String(CHAT),
       turnId: 'session-1:turn_1',
+      dryRun: true,
+    });
+
+    expect(result.snapshot.dryRun).toBe(true);
+    expect(result.snapshot.meta?.dryRun).toBe(true);
+  });
+
+  it('does not mark a live turn as dry-run', async () => {
+    const { service } = harness();
+
+    const result = await service.ingest({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: String(CHAT),
+      turnId: 'session-1:turn_2',
+    });
+
+    expect(result.snapshot.dryRun).toBe(false);
+  });
+
+  it('a global kill-switch marks every snapshot as dry-run', async () => {
+    vi.stubEnv('EVE_DRY_RUN', 'true');
+    const { service } = harness();
+
+    const result = await service.ingest({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: String(CHAT),
+      turnId: 'session-1:turn_3',
     });
 
     expect(result.snapshot.dryRun).toBe(true);

@@ -156,6 +156,53 @@ export interface EveConflictView {
   updatedAt: string;
 }
 
+export type EveTimelineScoreKey =
+  | "interest"
+  | "trust"
+  | "attraction"
+  | "annoyance"
+  | "cringe";
+
+export type EveTimelineScores = Record<EveTimelineScoreKey, number>;
+
+/** One row of the chat «Хроника»: a message, an ignore or a mood change. */
+export type EveTimelineEntryView =
+  | {
+      id: string;
+      at: string;
+      kind: "incoming";
+      text: string;
+      messageId?: number;
+    }
+  | {
+      id: string;
+      at: string;
+      kind: "reply";
+      text: string;
+      dryRun?: boolean;
+    }
+  | { id: string; at: string; kind: "ignored"; reason?: string }
+  | {
+      id: string;
+      at: string;
+      kind: "relationship";
+      source: "inbound" | "proactive" | "reaction" | "ignore" | string;
+      delta: Partial<EveTimelineScores>;
+      before: EveTimelineScores;
+      after: EveTimelineScores;
+      stageFrom?: string;
+      stageTo?: string;
+      conflictFrom?: number;
+      conflictTo?: number;
+    };
+
+export interface EveTimelineView {
+  /** Newest first. */
+  entries: EveTimelineEntryView[];
+  /** Cursor for the next (older) page; `null` ends the feed. */
+  nextBefore: string | null;
+}
+
 /** Read-only memory rows rendered on the persona page. */
 export interface EveMemoryDailyView {
   id: string;
@@ -218,6 +265,7 @@ export interface EveSessionLogView {
   personaId: string;
   accountId: string;
   chatId: number | string;
+  threadId: number;
   day: string;
   line: string;
   createdAt: string;
@@ -401,6 +449,27 @@ export function getConflict(
 ): Promise<EveConflictView> {
   const params = new URLSearchParams({ personaId, accountId, chatId });
   return eveFetch(`state/conflict?${params.toString()}`);
+}
+
+/**
+ * Chat «Хроника»: his messages, her replies/ignores and relationship deltas.
+ * `before` is the `nextBefore` cursor of the previous page.
+ */
+export function getChatTimeline(
+  personaId: string,
+  accountId: string,
+  chatId: string,
+  options: {
+    threadId?: number;
+    limit?: number;
+    before?: string | null;
+  } = {},
+): Promise<EveTimelineView> {
+  const params = new URLSearchParams({ personaId, accountId, chatId });
+  params.set("threadId", String(options.threadId ?? 0));
+  params.set("limit", String(options.limit ?? 100));
+  if (options.before) params.set("before", options.before);
+  return eveFetch(`timeline?${params.toString()}`);
 }
 
 // ---------------------------------------------------------------------------

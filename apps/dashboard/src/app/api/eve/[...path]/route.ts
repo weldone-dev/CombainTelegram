@@ -53,6 +53,8 @@ const ROUTES: Array<{ method: string; pattern: RegExp }> = [
   { method: "GET", pattern: /^schedules$/ },
   { method: "GET", pattern: /^state\/relationship$/ },
   { method: "GET", pattern: /^state\/conflict$/ },
+  // Chat timeline («Хроника»): messages, ignores and relationship deltas.
+  { method: "GET", pattern: /^timeline$/ },
 ];
 
 function json(status: number, code: string, message: string): Response {

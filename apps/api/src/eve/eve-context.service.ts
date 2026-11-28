@@ -3,7 +3,7 @@ import type { EveContextSnapshotModel } from '@repo/database';
 import { apiError, notFound } from '../common/api-error.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { parseChatId, parseThreadId } from './eve-access.js';
-import { eveDryRunApplies, takeEveDryRunOutbound } from './eve-dry-run.js';
+import { eveDryRunRequested, takeEveDryRunOutbound } from './eve-dry-run.js';
 
 /**
  * Real model context, captured by the Eve process and stored per turn.
@@ -315,9 +315,11 @@ export class EveContextService {
       }
     }
 
-    // The dry-run marker and the suppressed actions live in the API process:
-    // the Eve turn itself does not know whether its send reached Telegram.
-    const dryRun = eveDryRunApplies(accountId, chatId);
+    // The flag travels with the turn: Eve captured `dryRun` from the channel
+    // state and posts it back with this snapshot. The suppressed actions are
+    // buffered in the API process because that is where sending happens; the
+    // global `EVE_DRY_RUN` kill-switch also marks the turn as a dry run.
+    const dryRun = eveDryRunRequested(body);
     const suppressed = takeEveDryRunOutbound(accountId, chatId, personaId);
     const metaJson = {
       ...meta,

@@ -65,6 +65,7 @@ function harness(options: HarnessOptions = {}) {
   // Mutable on purpose: `upsert` stores the new counters, so a second
   // `applyTurn` in the same test reads the state the first one wrote.
   let stateJson: string | null = options.state ?? null;
+  const appliedTurns = new Set<string>();
 
   const prisma = {
     evePersona: {
@@ -85,6 +86,20 @@ function harness(options: HarnessOptions = {}) {
     },
     eveRelationshipEvent: {
       create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data),
+    },
+    eveRelationshipChange: {
+      findFirst: vi.fn(async () => null),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => data),
+    },
+    eveTurnApply: {
+      findFirst: vi.fn(
+        async ({ where }: { where: { turnKey: string } }) =>
+          appliedTurns.has(where.turnKey) ? { id: 'turn-1' } : null,
+      ),
+      create: vi.fn(async ({ data }: { data: { turnKey: string } }) => {
+        appliedTurns.add(data.turnKey);
+        return data;
+      }),
     },
     eveConflict: {
       upsert: vi.fn(async () => conflictRow),
@@ -1040,16 +1055,148 @@ describe('parseTurnInput', () => {
 });
 
 
+describe('EveTurnService relationship changes', () => {
+  it('stores the applied delta, before and after counters once', async () => {
+    const { service, prisma } = harness({
+      score: { interest: 10, trust: 3 },
+    });
+
+    await service.applyTurn(
+      turn({
+        turnKey: 'inbound:event-a',
+        origin: 'inbound',
+        decision: {
+          intent: 'reply',
+          shouldReply: true,
+          shouldRead: true,
+          moodDelta: { interest: 2, trust: -5 },
+          bubbles: 1,
+        },
+      }),
+    );
+
+    expect(prisma.eveRelationshipChange.create).toHaveBeenCalledTimes(1);
+    const data = prisma.eveRelationshipChange.create.mock.calls[0]![0]
+      .data as Record<string, unknown>;
+    expect(data).toMatchObject({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: BigInt(CHAT),
+      threadId: 0,
+      source: 'inbound',
+      turnKey: 'inbound:event-a',
+    });
+    expect(JSON.parse(String(data.delta))).toEqual({
+      interest: 2,
+      trust: -5,
+    });
+    expect(JSON.parse(String(data.before))).toMatchObject({
+      interest: 10,
+      trust: 3,
+    });
+    expect(JSON.parse(String(data.after))).toMatchObject({
+      interest: 12,
+      trust: -2,
+    });
+
+    const retry = await service.applyTurn(
+      turn({
+        turnKey: 'inbound:event-a',
+        origin: 'inbound',
+        decision: {
+          intent: 'reply',
+          shouldReply: true,
+          shouldRead: true,
+          moodDelta: { interest: 2, trust: -5 },
+          bubbles: 1,
+        },
+      }),
+    );
+    expect(retry.replayed).toBe(true);
+    expect(prisma.eveRelationshipChange.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks an ignored turn as its own source but still stores its delta', async () => {
+    const { service, prisma } = harness();
+
+    await service.applyTurn(
+      turn({
+        turnKey: 'inbound:event-ignore',
+        origin: 'inbound',
+        reply: null,
+        decision: {
+          intent: 'ignore',
+          shouldReply: false,
+          shouldRead: true,
+          moodDelta: { annoyance: 1 },
+          bubbles: 1,
+          ignoreReason: 'busy',
+        },
+      }),
+    );
+
+    const data = prisma.eveRelationshipChange.create.mock.calls[0]![0]
+      .data as Record<string, unknown>;
+    expect(data.source).toBe('ignore');
+    expect(data.turnKey).toBe('inbound:event-ignore');
+  });
+
+  it('does not write a change when nothing moved', async () => {
+    const { service, prisma } = harness();
+
+    await service.applyTurn(
+      turn({
+        turnKey: 'inbound:event-empty',
+        decision: {
+          intent: 'reply',
+          shouldReply: true,
+          shouldRead: true,
+          moodDelta: {},
+          bubbles: 1,
+        },
+      }),
+    );
+
+    expect(prisma.eveRelationshipChange.create).not.toHaveBeenCalled();
+  });
+
+  it('dedupes a retry that lands after another turn moved the state', async () => {
+    const { service, prisma } = harness();
+
+    await service.applyTurn(
+      turn({ turnKey: 'inbound:event-a', origin: 'inbound' }),
+    );
+    await service.applyTurn(
+      turn({
+        messageId: 102,
+        messageIds: [102],
+        messages: [{ id: 102, text: 'ещё одно' }],
+        text: 'ещё одно',
+        turnKey: 'inbound:event-b',
+        origin: 'inbound',
+      }),
+    );
+    expect(prisma.eveSessionLog.createMany).toHaveBeenCalledTimes(2);
+
+    const retry = await service.applyTurn(
+      turn({ turnKey: 'inbound:event-a', origin: 'inbound' }),
+    );
+
+    expect(retry.replayed).toBe(true);
+    expect(prisma.eveSessionLog.createMany).toHaveBeenCalledTimes(2);
+    expect(prisma.eveRelationshipChange.create).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('EveTurnService dry-run log', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it('marks the outgoing session log line', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
+  it('marks the outgoing session log line of a dry turn', async () => {
     const { service, prisma } = harness();
 
-    await service.applyTurn(turn());
+    await service.applyTurn({ ...turn(), dryRun: true });
 
     const lines = prisma.eveSessionLog.createMany.mock.calls[0]![0].data.map(
       (row) => (row as { line: string }).line,
@@ -1058,5 +1205,145 @@ describe('EveTurnService dry-run log', () => {
       '[2026-11-27T10:00:00.000Z] он(101): привет, как ты?',
       '  -> она (dry-run): нормально, ты?)',
     ]);
+  });
+
+  it('does not mark a live turn', async () => {
+    const { service, prisma } = harness();
+
+    await service.applyTurn(turn());
+
+    const lines = prisma.eveSessionLog.createMany.mock.calls[0]![0].data.map(
+      (row) => (row as { line: string }).line,
+    );
+    expect(lines[1]).toBe('  -> она: нормально, ты?)');
+  });
+
+  it('a global kill-switch still marks the log line', async () => {
+    vi.stubEnv('EVE_DRY_RUN', 'true');
+    const { service, prisma } = harness();
+
+    await service.applyTurn(turn());
+
+    const lines = prisma.eveSessionLog.createMany.mock.calls[0]![0].data.map(
+      (row) => (row as { line: string }).line,
+    );
+    expect(lines[1]).toBe('  -> она (dry-run): нормально, ты?)');
+  });
+});
+
+describe('EveTurnService dry-run counters', () => {
+  /** Real Telegram ids of this chat were around 938M when the incident hit. */
+  const REAL_ID = 938475520;
+  const SYNTHETIC_ID = 990001010;
+
+  it('does not advance lastHisMessageId on a synthetic test id', async () => {
+    const { service, prisma } = harness({
+      state: stateWith({
+        hisMsgs: 3,
+        herMsgs: 4,
+        ignoresInStage: 1,
+        msgsSinceStageCheck: 3,
+        lastHisMessageId: REAL_ID,
+      }),
+    });
+
+    const result = await service.applyTurn(
+      turn({
+        messageId: SYNTHETIC_ID,
+        messageIds: [SYNTHETIC_ID],
+        messages: [{ id: SYNTHETIC_ID, text: 'тестовое сообщение' }],
+        reply: 'тестовый ответ',
+        turnKey: 'inbound:test-turn',
+        dryRun: true,
+      }),
+    );
+
+    // Not one live counter moved.
+    expect(result.counters).toMatchObject({
+      hisMsgs: 3,
+      herMsgs: 4,
+      ignoresInStage: 1,
+      msgsSinceStageCheck: 3,
+      lastHisMessageId: REAL_ID,
+    });
+    // A dry run stores no counters at all, and never claims the turn key: the
+    // same turn replayed for real must still be applied.
+    expect(prisma.eveSessionState.upsert).not.toHaveBeenCalled();
+    // Mood/conflict/log are still written: a dry run previews the effect.
+    expect(prisma.eveRelationship.update).toHaveBeenCalledTimes(1);
+    expect(prisma.eveSessionLog.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('still applies a real message whose id is lower than a test id', async () => {
+    const { service, prisma } = harness({
+      state: stateWith({
+        hisMsgs: 3,
+        herMsgs: 4,
+        ignoresInStage: 0,
+        msgsSinceStageCheck: 3,
+        lastHisMessageId: REAL_ID,
+      }),
+    });
+
+    // The test turn that used to poison the chat: a synthetic id far above the
+    // real Telegram range.
+    await service.applyTurn(
+      turn({
+        messageId: SYNTHETIC_ID,
+        messageIds: [SYNTHETIC_ID],
+        messages: [{ id: SYNTHETIC_ID, text: 'тест' }],
+        turnKey: 'inbound:test-turn',
+        dryRun: true,
+      }),
+    );
+
+    const real = await service.applyTurn(
+      turn({
+        messageId: REAL_ID + 1,
+        messageIds: [REAL_ID + 1],
+        messages: [{ id: REAL_ID + 1, text: 'живое сообщение' }],
+        reply: 'живой ответ',
+        turnKey: 'inbound:real-turn',
+      }),
+    );
+
+    expect(real.replayed).toBeUndefined();
+    expect(real.counters).toMatchObject({
+      hisMsgs: 4,
+      herMsgs: 5,
+      msgsSinceStageCheck: 4,
+      lastHisMessageId: REAL_ID + 1,
+    });
+    expect(prisma.eveSessionState.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies a real turn with a new id and ignores its retry', async () => {
+    const { service, prisma } = harness({
+      state: stateWith({ hisMsgs: 1, herMsgs: 1, lastHisMessageId: 100 }),
+    });
+    const real = turn({
+      messageId: 101,
+      messageIds: [101],
+      messages: [{ id: 101, text: 'новое' }],
+      turnKey: 'inbound:event-101',
+    });
+
+    const first = await service.applyTurn(real);
+    expect(first.replayed).toBeUndefined();
+    expect(first.counters).toMatchObject({
+      hisMsgs: 2,
+      herMsgs: 2,
+      msgsSinceStageCheck: 1,
+      lastHisMessageId: 101,
+      lastAppliedTurnKey: 'inbound:event-101',
+    });
+
+    const retry = await service.applyTurn(real);
+    expect(retry.replayed).toBe(true);
+    expect(retry.counters).toEqual(first.counters);
+    // One write for the turn, none for the retry.
+    expect(prisma.eveSessionState.upsert).toHaveBeenCalledTimes(1);
+    expect(prisma.eveRelationship.update).toHaveBeenCalledTimes(1);
+    expect(prisma.eveSessionLog.createMany).toHaveBeenCalledTimes(1);
   });
 });

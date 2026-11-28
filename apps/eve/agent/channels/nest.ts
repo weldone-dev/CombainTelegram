@@ -67,6 +67,12 @@ export interface NestState {
   accountId: string;
   chatId: string;
   threadId: number;
+  /**
+   * This turn is a test/dry run: every outbound call carries the flag back to
+   * Nest, which suppresses the Telegram side and logs `[eve][dry-run]`. A real
+   * Telegram event never sets it.
+   */
+  dryRun?: boolean;
   incoming?: string;
   messageId?: number;
   /** Ids of every message this turn answers, oldest first. */
@@ -827,7 +833,9 @@ async function applyTurn(
     incoming: state.incoming,
     reply: outgoing,
     turnKey: state.turnKey,
+    origin: state.origin,
     decision,
+    dryRun: state.dryRun === true,
   });
 }
 
@@ -872,6 +880,7 @@ async function sendRandomSticker(state: NestState): Promise<void> {
     chatId: state.chatId,
     threadId: state.threadId,
     fileId: pick.fileId,
+    dryRun: state.dryRun === true,
   });
 }
 
@@ -913,6 +922,7 @@ async function scheduleReaction(
     threadId: state.threadId,
     messageId: plan.targetMessageId,
     emoji: plan.emoji,
+    dryRun: state.dryRun === true,
   };
   if (delay > 0) {
     // Nest owns the clock: an Eve restart must not lose the reaction.
@@ -938,6 +948,7 @@ async function runToolActions(state: NestState, actions: string[]): Promise<void
         accountId: state.accountId,
         chatId: state.chatId,
         threadId: state.threadId,
+        dryRun: state.dryRun === true,
       });
     } else if (action === 'BLOCK' || action === 'UNBLOCK') {
       await nest(action === 'BLOCK' ? '/messages/block' : '/messages/unblock', {
@@ -945,6 +956,7 @@ async function runToolActions(state: NestState, actions: string[]): Promise<void
         accountId: state.accountId,
         chatId: state.chatId,
         threadId: state.threadId,
+        dryRun: state.dryRun === true,
       });
     } else if (action === 'STICKER') {
       await sendRandomSticker(state);
@@ -973,6 +985,9 @@ function parseState(body: Record<string, unknown>): NestState | null {
     accountId,
     chatId,
     threadId: Number(body.threadId ?? 0) || 0,
+    // Always false here: only `/turn` and `/proactive` opt in explicitly, so a
+    // real Telegram event can never become a dry run by accident.
+    dryRun: false,
   };
 }
 
@@ -1047,6 +1062,9 @@ function authFor(state: NestState, origin: NestState['origin'] = 'inbound') {
       // Why this turn exists. The context snapshot uses it to label the turn
       // without guessing from the text; `deferred` maps to `inbound`.
       kind: origin,
+      // Travels to the `turn.settled` snapshot hook, so the stored context is
+      // marked as a test turn exactly when its outbound was suppressed.
+      dryRun: state.dryRun === true ? 'true' : 'false',
     },
   };
 }
@@ -1068,6 +1086,8 @@ async function handleReaction(
   if (!state) {
     return Response.json({ ok: false, error: 'bad-address' }, { status: 400 });
   }
+  // Real reactions are live by default; a test may drive a dry reaction.
+  state.dryRun = body.dryRun === true;
 
   const emoji = textOf(body.emoji).trim();
   const targetIsMine =
@@ -1141,6 +1161,7 @@ async function handleReaction(
         threadId: state.threadId,
         messageId: target,
         emoji: decision.emoji ?? emoji,
+        dryRun: state.dryRun === true,
       }),
     );
     return Response.json({
@@ -1245,6 +1266,8 @@ async function handleDeletion(
   if (!state) {
     return Response.json({ ok: false, error: 'bad-address' }, { status: 400 });
   }
+  // Real deletions are live by default; a test may drive a dry deletion turn.
+  state.dryRun = body.dryRun === true;
   if (body.outgoing === true) {
     return Response.json({ ok: true, ignored: 'deletion:own' });
   }
@@ -1470,6 +1493,8 @@ export default defineChannel<NestState, { state: NestState }>({
       typeof next.turnKey === 'string' && next.turnKey
         ? next.turnKey.slice(0, 256)
         : undefined;
+    // Per-turn, never sticky: a real inbound clears a test turn's flag.
+    ctx.state.dryRun = next.dryRun === true;
     // Per-turn, never sticky: a normal inbound carries `applied: false`, so a
     // later `content.completed` applies counters exactly once for this message.
     ctx.state.applied = next.applied === true;
@@ -1604,6 +1629,7 @@ export default defineChannel<NestState, { state: NestState }>({
               accountId: state.accountId,
               chatId: state.chatId,
               threadId: state.threadId,
+              dryRun: state.dryRun === true,
             }),
           );
         }
@@ -1617,6 +1643,8 @@ export default defineChannel<NestState, { state: NestState }>({
           origin: 'inbound',
           lastInboundAt: Date.now(),
           turnKey: turnKeyOf('inbound', key),
+          // A real Telegram event is never a dry run.
+          dryRun: false,
         };
         await bestEffort(applyTurn(ignoredState, policy.decision, null));
         return Response.json({
@@ -1648,6 +1676,8 @@ export default defineChannel<NestState, { state: NestState }>({
         origin: 'inbound',
         lastInboundAt: Date.now(),
         turnKey: turnKeyOf('inbound', key),
+        // A real Telegram event is never a dry run.
+        dryRun: false,
         // Explicit: this inbound still has to be applied by `content.completed`.
         applied: false,
       };
@@ -1692,6 +1722,7 @@ export default defineChannel<NestState, { state: NestState }>({
             delaySec: policy.decision.delaySec,
             reason: delayReason(policy.decision),
             key: key ? `turn:${key}` : undefined,
+            dryRun: state.dryRun === true,
             payload: {
               incoming: text,
               messageId: Number(message.id) || undefined,
@@ -1701,6 +1732,7 @@ export default defineChannel<NestState, { state: NestState }>({
               hints,
               idempotencyKey: key,
               media: attachedMedia ?? undefined,
+              dryRun: state.dryRun === true,
             },
           }),
         );
@@ -1733,6 +1765,9 @@ export default defineChannel<NestState, { state: NestState }>({
           { status: 400 },
         );
       }
+      // Only this route (and `/proactive`) opts into a dry run. Nest forwards
+      // the flag frozen in the delayed row.
+      state.dryRun = body.dryRun === true;
       const incoming = textOf(body.incoming).trim();
       if (!incoming) return Response.json({ ok: true, ignored: 'empty' });
 
@@ -1811,6 +1846,7 @@ export default defineChannel<NestState, { state: NestState }>({
               'deferred',
               textOf(body.actionId) || key || String(messageId ?? ''),
             ),
+            dryRun: state.dryRun === true,
             applied: false,
           },
           ...(key ? { idempotencyKey: key } : {}),
@@ -1827,6 +1863,8 @@ export default defineChannel<NestState, { state: NestState }>({
       if (!state) {
         return Response.json({ ok: false, error: 'bad-address' }, { status: 400 });
       }
+      // Real agenda ticks are live; a test may drive a dry proactive turn.
+      state.dryRun = body.dryRun === true;
       const item = recordOf(body.item);
       const about =
         textOf(item.about).trim() ||
@@ -1864,6 +1902,7 @@ export default defineChannel<NestState, { state: NestState }>({
             behavior: undefined,
             internal: prompt,
             origin: 'proactive',
+            dryRun: state.dryRun === true,
             applied: true,
           },
           ...(itemId ? { idempotencyKey: itemId } : {}),
@@ -1923,6 +1962,7 @@ export default defineChannel<NestState, { state: NestState }>({
             accountId: state.accountId,
             chatId: state.chatId,
             threadId: state.threadId,
+            dryRun: state.dryRun === true,
           }),
         ),
       );
@@ -1934,6 +1974,7 @@ export default defineChannel<NestState, { state: NestState }>({
             chatId: state.chatId,
             threadId: state.threadId,
             status: 'typing',
+            dryRun: state.dryRun === true,
           }),
         ),
       );
@@ -2033,6 +2074,7 @@ export async function deliverCompletedReply(
           parts: styled,
           bubbles: state.behavior?.bubbles ?? 0,
           typing: 'auto',
+          dryRun: state.dryRun === true,
         }),
       );
       messageIds = Array.isArray(sent.messageIds)
@@ -2061,7 +2103,12 @@ export async function deliverCompletedReply(
             delaySec: 2 + Math.floor(Math.random() * 7),
             reason: 'self-edit',
             key: `edit:${state.personaId}:${state.accountId}:${state.chatId}:${targetId}`,
-            payload: { messageId: targetId, text: correction.text },
+            dryRun: state.dryRun === true,
+            payload: {
+              messageId: targetId,
+              text: correction.text,
+              dryRun: state.dryRun === true,
+            },
           }),
         );
       }

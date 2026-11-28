@@ -4,14 +4,15 @@ import type { MessageView } from '../messaging/message-view.js';
  * Dry-run: the persona goes through the whole turn (behavior, LLM, bubbles,
  * delays, memory, turn/apply) but no outbound action reaches Telegram.
  *
- * The switch lives in the API process because that is the only process that
- * owns Telegram. Eve does not need to know about it: the replies it sends to
- * `/internal/eve/messages/*` get a synthetic success and a structured log
- * line, so the turn completes and the next context is realistic.
+ * The switch is **per request**, not per chat: a test/manual turn carries
+ * `dryRun: true` and every outbound call of that turn forwards the flag to the
+ * API process, which is the only process that owns Telegram. A real Telegram
+ * `message.new` never sets it, so live traffic is delivered normally.
  *
- * The flag is deliberately opt-in only: `EVE_DRY_RUN` must be one of
- * `true/1/yes/on`. A misspelled value keeps real sending enabled instead of
- * silently suppressing (or, worse, delivering) messages.
+ * `EVE_DRY_RUN` remains as a global kill-switch: when it is one of
+ * `true/1/yes/on`, every outbound action is suppressed regardless of the
+ * per-request flag. The flag travels with the turn; there is no chat/account
+ * scope.
  */
 
 const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
@@ -21,23 +22,12 @@ function enabledByEnv(): boolean {
   return TRUE_VALUES.has(raw);
 }
 
-function idSet(raw: string | undefined): Set<string> {
-  return new Set(
-    (raw ?? '')
-      .split(',')
-      .map((value) => value.trim())
-      .filter(Boolean),
-  );
-}
-
-/** Chat ids (`EVE_DRY_RUN_CHATS`) this process suppresses; empty = all. */
-export function eveDryRunChats(): Set<string> {
-  return idSet(process.env.EVE_DRY_RUN_CHATS);
-}
-
-/** Account ids (`EVE_DRY_RUN_ACCOUNTS`) this process suppresses; empty = all. */
-export function eveDryRunAccounts(): Set<string> {
-  return idSet(process.env.EVE_DRY_RUN_ACCOUNTS);
+function truthy(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') {
+    return TRUE_VALUES.has(value.trim().toLowerCase());
+  }
+  return false;
 }
 
 export function eveDryRunEnabled(): boolean {
@@ -45,38 +35,26 @@ export function eveDryRunEnabled(): boolean {
 }
 
 /**
- * Whether an outbound action for this exact chat is suppressed.
+ * Whether an outbound action is suppressed: the global kill-switch or the
+ * `dryRun` field of this request/payload. Accepts a body (`{ dryRun: true }`)
+ * or the raw flag, so callers do not repeat the shape check.
  *
- * Read on every call instead of caching the env: the flag is cheap to parse
+ * The env is read on every call instead of being cached: it is cheap to parse
  * and a test (or an operator restarting with a new `.env`) sees the change.
  */
-export function eveDryRunApplies(
-  accountId: string,
-  chatId: string | number | bigint,
-): boolean {
-  if (!enabledByEnv()) return false;
-  const accounts = eveDryRunAccounts();
-  if (accounts.size > 0 && !accounts.has(accountId)) return false;
-  const chats = eveDryRunChats();
-  if (chats.size > 0 && !chats.has(String(chatId))) return false;
-  return true;
-}
-
-/** Human-readable target of the switch, for the startup warning. */
-export function eveDryRunTarget(): string {
-  const chats = [...eveDryRunChats()];
-  const accounts = [...eveDryRunAccounts()];
-  const parts: string[] = [];
-  if (accounts.length > 0) parts.push(`accounts=${accounts.join(',')}`);
-  if (chats.length > 0) parts.push(`chats=${chats.join(',')}`);
-  return parts.length > 0 ? parts.join(' ') : 'all Eve chats';
+export function eveDryRunRequested(raw: unknown): boolean {
+  if (enabledByEnv()) return true;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return truthy((raw as Record<string, unknown>).dryRun);
+  }
+  return truthy(raw);
 }
 
 /** Logged once when the API boots. */
 export function logEveDryRunStartup(): void {
   if (!enabledByEnv()) return;
   console.warn(
-    `[eve][dry-run] WARNING: EVE DRY RUN enabled — outbound suppressed for ${eveDryRunTarget()}; no Telegram message, reaction, typing, read or presence leaves the API`,
+    '[eve][dry-run] WARNING: global EVE_DRY_RUN is enabled — every outbound action is suppressed regardless of the per-turn flag; no Telegram message, reaction, typing, read or presence leaves the API',
   );
 }
 

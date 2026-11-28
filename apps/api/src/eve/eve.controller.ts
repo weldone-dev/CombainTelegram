@@ -18,6 +18,7 @@ import { EveMemoryLifecycleService } from './eve-memory-lifecycle.service.js';
 import { EvePersonaGenService } from './eve-persona-gen.service.js';
 import { EveProactiveService } from './eve-proactive.service.js';
 import { EveSchedulesService } from './eve-schedules.service.js';
+import { EveTimelineService } from './eve-timeline.service.js';
 import { EveTokenGuard } from './eve-token.guard.js';
 import { EveTurnService, parseTurnInput } from './eve-turn.service.js';
 import { EveService } from './eve.service.js';
@@ -60,6 +61,7 @@ export class EveController {
     private readonly delayed: EveDelayedService,
     private readonly contexts: EveContextService,
     private readonly schedules: EveSchedulesService,
+    private readonly timeline: EveTimelineService,
   ) {}
 
   @Get('personas')
@@ -317,6 +319,29 @@ export class EveController {
   @Post('stickers')
   addSticker(@Body() body: Record<string, unknown>) {
     return this.eve.addSticker(field(body, 'personaId'), body);
+  }
+
+  /**
+   * Chat timeline: his messages, her replies/ignores and the relationship
+   * changes applied for those turns. Newest first; `before` pages older.
+   */
+  @Get('timeline')
+  chatTimeline(
+    @Query('personaId') personaId?: string,
+    @Query('accountId') accountId?: string,
+    @Query('chatId') chatId?: string,
+    @Query('threadId') threadId?: string,
+    @Query('limit') limit?: string,
+    @Query('before') before?: string,
+  ) {
+    return this.timeline.timeline({
+      personaId,
+      accountId,
+      chatId,
+      threadId,
+      limit,
+      before,
+    });
   }
 
   @Get('history')

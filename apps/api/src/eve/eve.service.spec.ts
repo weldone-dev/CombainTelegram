@@ -736,8 +736,7 @@ describe('EveService dry-run', () => {
     resetEveDryRunState();
   });
 
-  it('suppresses Telegram text and reports a synthetic message id', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
+  it('suppresses Telegram text when the request carries dryRun', async () => {
     const { service, messaging, bindings, keyOf } = harness();
     allow(bindings, keyOf);
 
@@ -746,6 +745,7 @@ describe('EveService dry-run', () => {
       accountId: ACCOUNT,
       chatId: CHAT,
       text: 'привет',
+      dryRun: true,
     });
 
     expect(messaging.sendMessage).not.toHaveBeenCalled();
@@ -756,8 +756,7 @@ describe('EveService dry-run', () => {
     ]);
   });
 
-  it('sends normally when the flag is off', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'false');
+  it('sends normally when the request has no dryRun', async () => {
     const { service, messaging, bindings, keyOf } = harness();
     allow(bindings, keyOf);
 
@@ -771,23 +770,21 @@ describe('EveService dry-run', () => {
     expect(messaging.sendMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('respects the chat allow-list of the dry run', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
-    vi.stubEnv('EVE_DRY_RUN_CHATS', String(CHAT));
+  it('keeps the flag per request, never per chat', async () => {
     const { service, messaging, bindings, keyOf } = harness();
     allow(bindings, keyOf);
-    bindings.set(keyOf(PERSONA, ACCOUNT, 222n, 0), { allowed: true });
 
     await service.sendText({
       personaId: PERSONA,
       accountId: ACCOUNT,
       chatId: CHAT,
       text: 'suppressed',
+      dryRun: true,
     });
     await service.sendText({
       personaId: PERSONA,
       accountId: ACCOUNT,
-      chatId: 222,
+      chatId: CHAT,
       text: 'delivered',
     });
 
@@ -795,13 +792,12 @@ describe('EveService dry-run', () => {
     expect(messaging.sendMessage).toHaveBeenCalledWith(
       'local',
       ACCOUNT,
-      '222',
+      String(CHAT),
       expect.objectContaining({ text: 'delivered' }),
     );
   });
 
-  it('suppresses reaction, typing, read and presence', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
+  it('suppresses reaction, typing, read and presence for a dry request', async () => {
     const { service, messaging, bindings, keyOf } = harness();
     allow(bindings, keyOf);
     const payload = {
@@ -809,12 +805,18 @@ describe('EveService dry-run', () => {
       accountId: ACCOUNT,
       chatId: CHAT,
       messageId: 10,
+      dryRun: true,
     };
 
     await service.sendReaction({ ...payload, emoji: '❤' });
     await service.typing(payload);
     await service.read(payload);
-    await service.presence({ accountId: ACCOUNT, chatId: CHAT, online: true });
+    await service.presence({
+      accountId: ACCOUNT,
+      chatId: CHAT,
+      online: true,
+      dryRun: true,
+    });
 
     expect(messaging.sendReaction).not.toHaveBeenCalled();
     expect(messaging.sendTyping).not.toHaveBeenCalled();
@@ -829,10 +831,14 @@ describe('EveService dry-run', () => {
   });
 
   it('suppresses sticker, voice and media without touching the transport', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
     const { service, messaging, media, bindings, keyOf } = harness();
     allow(bindings, keyOf);
-    const base = { personaId: PERSONA, accountId: ACCOUNT, chatId: CHAT };
+    const base = {
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: CHAT,
+      dryRun: true,
+    };
 
     const sticker = await service.sendSticker({ ...base, fileId: 'AgADAAAA' });
     const voice = await service.sendVoice({
@@ -852,5 +858,20 @@ describe('EveService dry-run', () => {
     expect(messaging.sendMedia).not.toHaveBeenCalled();
     expect(media.sendSticker).not.toHaveBeenCalled();
     expect(media.sendVoice).not.toHaveBeenCalled();
+  });
+
+  it('global EVE_DRY_RUN suppresses even without a request flag', async () => {
+    vi.stubEnv('EVE_DRY_RUN', 'true');
+    const { service, messaging, bindings, keyOf } = harness();
+    allow(bindings, keyOf);
+
+    await service.sendText({
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: CHAT,
+      text: 'kill switch',
+    });
+
+    expect(messaging.sendMessage).not.toHaveBeenCalled();
   });
 });

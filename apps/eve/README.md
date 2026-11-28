@@ -38,12 +38,14 @@ EVE_WEBHOOK_URL=http://127.0.0.1:4020/eve/v1/nest/events
 
 ### Dry run (no Telegram delivery)
 
-`EVE_DRY_RUN` lives in `apps/api/.env`, not here: Nest is the process that
-owns Telegram, so it suppresses outbound actions (`messages/*`, `typing`,
-`read`, `presence`, delayed `send`/`react`/…) and logs
-`[eve][dry-run] <kind> chat=… account=… …`. Eve runs the complete turn
-(behavior, model, bubbles, delays, memory, `turn/apply`), so the next context
-is realistic. Use `EVE_DRY_RUN_CHATS` / `EVE_DRY_RUN_ACCOUNTS` to limit it.
+Dry-run is per turn: a test/manual turn carries `dryRun: true` and every
+outbound call of that turn forwards the flag to Nest (`apps/api`), which owns
+Telegram and suppresses `messages/*`, `typing`, `read`, `presence` and delayed
+`send`/`react`/…, logging `[eve][dry-run] <kind> chat=… account=… …`. A real
+Telegram `message.new` never sets it, so live traffic is delivered. Eve runs
+the complete turn (behavior, model, bubbles, delays, memory, `turn/apply`), so
+the next context is realistic. `EVE_DRY_RUN=true` in `apps/api/.env` remains a
+global kill-switch.
 See `docs/eve/README.md` for the full behaviour and the API endpoints that
 return real model-context snapshots (`/internal/eve/context/*`).
 

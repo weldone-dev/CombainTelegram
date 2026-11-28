@@ -14,8 +14,13 @@ import {
   type ChatPersonaMatch,
   resolveChatPersonas,
 } from "../../lib/eve-chat-personas";
+import {
+  hasReflectNotes,
+  parseRelationshipNotes,
+} from "../../lib/eve-relationship-notes";
 import { eveStageLabel } from "../../lib/eve-stages";
 import { Pill } from "../dashboard/ai-ui";
+import { BipolarMetric } from "../dashboard/bipolar-metric";
 import {
   EmptyNote,
   formatStamp,
@@ -90,25 +95,6 @@ async function loadChatState(
   };
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
-  const clamped = Math.max(-100, Math.min(100, value));
-  const percent = (clamped + 100) / 2;
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-2 text-[11px] text-zinc-400">
-        <span>{label}</span>
-        <span className="font-mono text-zinc-200">{value}</span>
-      </div>
-      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-        <div
-          className={`h-full rounded-full ${clamped < 0 ? "bg-red-500" : "bg-sky-500"}`}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 function conflictTone(level: number): "green" | "amber" | "red" {
   if (level <= 0) return "green";
   if (level === 1) return "amber";
@@ -121,6 +107,100 @@ function coldActive(coldUntil: string | null): boolean {
   return Number.isFinite(time) && time > Date.now();
 }
 
+const NOTES_PREVIEW = 3;
+
+/**
+ * `notes` block of the relationship card. Reflect lines (`[reflect YYYY-MM-DD]`)
+ * become buttons that jump to the persona memory of that day; legacy free-form
+ * lines stay plain text. Long lists collapse to {@link NOTES_PREVIEW} rows.
+ */
+function RelationshipNotes({
+  notes,
+  onOpenMemory,
+}: {
+  notes: string;
+  onOpenMemory?: (date: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = useMemo(() => parseRelationshipNotes(notes), [notes]);
+
+  if (!hasReflectNotes(lines)) {
+    return (
+      <p
+        title={notes}
+        className="mt-3 line-clamp-4 whitespace-pre-wrap break-words text-[11px] text-zinc-400"
+      >
+        {notes}
+      </p>
+    );
+  }
+
+  const collapsible = lines.length > NOTES_PREVIEW;
+  const visible =
+    collapsible && !expanded ? lines.slice(0, NOTES_PREVIEW) : lines;
+
+  return (
+    <div className="mt-3">
+      <ul
+        className={`space-y-1 ${
+          collapsible && expanded ? "max-h-48 overflow-y-auto pr-1" : ""
+        }`}
+      >
+        {visible.map((line, index) => {
+          const date = line.date;
+          return (
+            <li key={`${date ?? "note"}:${index}`}>
+              {date && onOpenMemory ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenMemory(date)}
+                  title={`Открыть память за ${date}`}
+                  className="group flex w-full items-start gap-1.5 rounded-md border border-zinc-800/80 bg-zinc-900/60 px-1.5 py-1 text-left transition-colors hover:border-sky-700 hover:bg-sky-500/10 focus-visible:border-sky-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sky-500/50"
+                >
+                  <span className="shrink-0 rounded bg-sky-500/10 px-1 py-0.5 font-mono text-[10px] leading-4 text-sky-300">
+                    {date}
+                  </span>
+                  <span className="line-clamp-2 min-w-0 flex-1 break-words text-[11px] leading-4 text-zinc-300 group-hover:text-zinc-100">
+                    {line.text || "без текста"}
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className="shrink-0 text-[10px] leading-4 text-zinc-600 transition-colors group-hover:text-sky-300"
+                  >
+                    →
+                  </span>
+                </button>
+              ) : (
+                <div className="flex w-full items-start gap-1.5 px-1.5 py-1">
+                  {date && (
+                    <span className="shrink-0 rounded bg-zinc-800 px-1 py-0.5 font-mono text-[10px] leading-4 text-zinc-400">
+                      {date}
+                    </span>
+                  )}
+                  <span className="line-clamp-2 min-w-0 flex-1 break-words text-[11px] leading-4 text-zinc-400">
+                    {line.text || "без текста"}
+                  </span>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {collapsible && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          title={expanded ? "Свернуть заметки" : "Показать все заметки"}
+          className="mt-1 text-[10px] text-sky-400 transition-colors hover:text-sky-300"
+        >
+          {expanded ? "Свернуть" : `Показать все (${lines.length})`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * «Отношения» card of the chat info drawer: the Eve persona that owns this chat,
  * its current stage and the five relationship metrics. Read-only: the values are
@@ -131,12 +211,15 @@ export function ChatRelationshipCard({
   chatId,
   threadId = 0,
   onOpenPersona,
+  onOpenMemory,
 }: {
   accountId: string;
   /** Prisma `BigInt` may arrive as a number or a string. */
   chatId: number | string | bigint;
   threadId?: number;
   onOpenPersona?: (personaId: string) => void;
+  /** Reflect note clicked: open the «Память» tab focused on this day. */
+  onOpenMemory?: (date: string) => void;
 }) {
   const chatIdText = String(chatId);
   const [preferredPersonaId, setPreferredPersonaId] = useState<string | null>(
@@ -280,7 +363,7 @@ export function ChatRelationshipCard({
 
           <div className="mt-3 space-y-2">
             {METRICS.map((metric) => (
-              <Metric
+              <BipolarMetric
                 key={metric.key}
                 label={metric.label}
                 value={relationship[metric.key]}
@@ -289,12 +372,10 @@ export function ChatRelationshipCard({
           </div>
 
           {relationship.notes.trim() && (
-            <p
-              title={relationship.notes}
-              className="mt-3 line-clamp-4 whitespace-pre-wrap break-words text-[11px] text-zinc-400"
-            >
-              {relationship.notes}
-            </p>
+            <RelationshipNotes
+              notes={relationship.notes}
+              onOpenMemory={onOpenMemory}
+            />
           )}
         </>
       )}

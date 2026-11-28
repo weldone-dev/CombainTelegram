@@ -594,12 +594,11 @@ describe('list', () => {
 
 
 describe('tick: dry-run', () => {
-  it('suppresses a delayed send and marks the row sent', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
+  it('suppresses a delayed send when its payload carries dryRun', async () => {
     resetEveDryRunState();
     const row = actionRow({
       kind: 'send',
-      payload: JSON.stringify({ text: 'отложенное' }),
+      payload: JSON.stringify({ text: 'отложенное', dryRun: true }),
     });
     const { service, messaging, calls } = harness({ due: [row] });
     const result = await service.tick(NOW);
@@ -612,11 +611,10 @@ describe('tick: dry-run', () => {
     ]);
   });
 
-  it('suppresses a delayed reaction', async () => {
-    vi.stubEnv('EVE_DRY_RUN', 'true');
+  it('suppresses a delayed reaction when its payload carries dryRun', async () => {
     resetEveDryRunState();
     const row = actionRow({
-      payload: JSON.stringify({ messageId: 5, emoji: '❤' }),
+      payload: JSON.stringify({ messageId: 5, emoji: '❤', dryRun: true }),
     });
     const { service, messaging } = harness({ due: [row] });
     await service.tick(NOW);
@@ -625,5 +623,83 @@ describe('tick: dry-run', () => {
     expect(takeEveDryRunOutbound(ACCOUNT, CHAT, PERSONA)).toEqual([
       expect.objectContaining({ kind: 'react' }),
     ]);
+  });
+
+  it('sends an old pending row without a flag live', async () => {
+    resetEveDryRunState();
+    const row = actionRow({
+      kind: 'send',
+      payload: JSON.stringify({ text: 'старое отложенное' }),
+    });
+    const { service, messaging } = harness({ due: [row] });
+    await service.tick(NOW);
+
+    expect(messaging.sendMessage).toHaveBeenCalledTimes(1);
+    expect(takeEveDryRunOutbound(ACCOUNT, CHAT, PERSONA)).toEqual([]);
+  });
+
+  it('forwards dryRun from a delayed turn payload to /eve/v1/nest/turn', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const row = actionRow({
+      kind: 'turn',
+      payload: JSON.stringify({ incoming: 'привет', dryRun: true }),
+    });
+    const { service } = harness({ due: [row] });
+    await service.tick(NOW);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      { body: string },
+    ];
+    expect(JSON.parse(init.body)).toMatchObject({ dryRun: true });
+  });
+
+  it('dispatches an old pending turn left live (no flag)', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const row = actionRow({
+      kind: 'turn',
+      payload: JSON.stringify({ incoming: 'привет' }),
+    });
+    const { service } = harness({ due: [row] });
+    await service.tick(NOW);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      { body: string },
+    ];
+    expect(JSON.parse(init.body)).toMatchObject({ dryRun: false });
+  });
+
+  it('global EVE_DRY_RUN still suppresses a delayed action', async () => {
+    vi.stubEnv('EVE_DRY_RUN', 'true');
+    resetEveDryRunState();
+    const row = actionRow({
+      kind: 'send',
+      payload: JSON.stringify({ text: 'kill switch' }),
+    });
+    const { service, messaging } = harness({ due: [row] });
+    await service.tick(NOW);
+
+    expect(messaging.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('persists an explicit dryRun into the queued payload', async () => {
+    const { service, calls } = harness();
+    await service.enqueue({
+      kind: 'send',
+      personaId: PERSONA,
+      accountId: ACCOUNT,
+      chatId: CHAT,
+      dryRun: true,
+      payload: { text: 'позже' },
+    });
+
+    const payload = JSON.parse(String(calls.create[0]?.payload)) as Record<
+      string,
+      unknown
+    >;
+    expect(payload).toMatchObject({ text: 'позже', dryRun: true });
   });
 });

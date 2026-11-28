@@ -9,6 +9,7 @@ import {
   Pill,
   PrimaryButton,
 } from "../../components/dashboard/ai-ui";
+import { BipolarMetric } from "../../components/dashboard/bipolar-metric";
 import {
   type EveChatBindingView,
   type EveConflictView,
@@ -35,25 +36,6 @@ function formatDate(iso: string | null): string {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function Metric({ label, value }: { label: string; value: number }) {
-  const clamped = Math.max(-100, Math.min(100, value));
-  const percent = (clamped + 100) / 2;
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-2 text-[11px] text-zinc-400">
-        <span>{label}</span>
-        <span className="font-mono text-zinc-200">{value}</span>
-      </div>
-      <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-        <div
-          className={`h-full rounded-full ${clamped < 0 ? "bg-red-500" : "bg-sky-500"}`}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-    </div>
-  );
 }
 
 function conflictTone(level: number): "green" | "amber" | "red" {
@@ -248,11 +230,14 @@ export function PersonaStateCard({
           <ErrorBanner message={relationshipError} />
           {relationship ? (
             <div className="space-y-2">
-              <Metric label="Interest" value={relationship.interest} />
-              <Metric label="Trust" value={relationship.trust} />
-              <Metric label="Attraction" value={relationship.attraction} />
-              <Metric label="Annoyance" value={relationship.annoyance} />
-              <Metric label="Cringe" value={relationship.cringe} />
+              <BipolarMetric label="Interest" value={relationship.interest} />
+              <BipolarMetric label="Trust" value={relationship.trust} />
+              <BipolarMetric
+                label="Attraction"
+                value={relationship.attraction}
+              />
+              <BipolarMetric label="Annoyance" value={relationship.annoyance} />
+              <BipolarMetric label="Cringe" value={relationship.cringe} />
               <p className="break-words text-xs text-zinc-400">
                 {relationship.notes || "Заметок нет"}
               </p>

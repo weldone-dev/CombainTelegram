@@ -21,6 +21,8 @@ describe('EveController.memory/retrieve', () => {
       { retrieve } as never,
       {} as never,
       {} as never,
+      {} as never,
+      {} as never,
     );
     return { controller, scope, retrieve };
   }

@@ -1425,3 +1425,83 @@ describe('live channel: a coalesced queue delivery keeps the inbound apply', () 
     expect(applies.length).toBe(1);
   });
 });
+
+describe('live channel: per-turn dryRun', () => {
+  test('/turn with dryRun:true carries the flag into send and apply', async () => {
+    Math.random = () => 0.9;
+    nest = installFetch(contextBody());
+
+    const turn = await deliverTurn({
+      incoming: 'привет',
+      messageId: 5,
+      behavior: { intent: 'reply', shouldReply: true, bubbles: 1 },
+      dryRun: true,
+    });
+    expect(turn.response.status).toBe(202);
+    expect(turn.from.sends).toHaveLength(1);
+    expect(turn.from.sends[0]!.options.state?.dryRun).toBe(true);
+
+    await completeReply(turn.from.sends[0]!.options.state ?? {}, 'ответ');
+
+    expect(nest.callsTo('/messages/send')[0]!.body.dryRun).toBe(true);
+    expect(nest.callsTo('/turn/apply')[0]!.body.dryRun).toBe(true);
+  });
+
+  test('/events ignores a dryRun field: a real message stays live', async () => {
+    Math.random = () => 0.9;
+    const now = Date.now();
+    nest = installFetch(
+      contextBody({
+        history: [
+          {
+            id: 30,
+            outgoing: true,
+            text: 'ага',
+            date: new Date(now - 2 * 60_000).toISOString(),
+          },
+          {
+            id: 29,
+            outgoing: false,
+            text: 'ты тут?',
+            date: new Date(now - 3 * 60_000).toISOString(),
+          },
+        ],
+      }),
+    );
+
+    const result = await inbound({
+      ...ADDRESS,
+      allowed: true,
+      kind: 'message.new',
+      id: 'event-live-dry',
+      dryRun: true,
+      message: {
+        id: 92,
+        text: 'ну что',
+        date: new Date(now).toISOString(),
+        outgoing: false,
+      },
+    });
+    expect(result.response.status).toBe(202);
+
+    const action = nest
+      .callsTo('/actions')
+      .map((call) => call.body)
+      .find((body) => body.kind === 'turn');
+    expect(action).toBeTruthy();
+    expect(action!.dryRun).toBe(false);
+    expect((action!.payload as Record<string, unknown>).dryRun).toBe(false);
+  });
+
+  test('/proactive with dryRun:true carries the flag', async () => {
+    nest = installFetch(contextBody());
+
+    const pro = await proactive({
+      dryRun: true,
+      item: { id: 'agenda-dry', about: 'мем' },
+    });
+    expect(pro.response.status).toBe(202);
+    expect(pro.from.sends[0]!.options.state?.dryRun).toBe(true);
+  });
+
+});

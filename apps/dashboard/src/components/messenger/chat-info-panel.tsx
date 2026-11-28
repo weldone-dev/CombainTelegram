@@ -36,6 +36,7 @@ import { ChatAdminPanel } from "./chat-admin-panel";
 import { ChatEveMemoryTab } from "./chat-eve-memory-tab";
 import { ChatLogsTab } from "./chat-logs-tab";
 import { ChatRelationshipCard } from "./chat-relationship-card";
+import { ChatTimelineTab } from "./chat-timeline-tab";
 
 /** Same storage key on purpose: one panel width per browser/device. */
 const INFO_PANEL_WIDTH_KEY = "tg-info-panel-width";
@@ -77,6 +78,7 @@ type InfoTab =
   | "memory"
   | ChatInfoMediaKind
   | "logs"
+  | "timeline"
   | "similar"
   | "admin";
 
@@ -163,6 +165,8 @@ export function ChatInfoPanel({
     null,
   );
   const [tab, setTab] = useState<InfoTab>("overview");
+  /** Reflect-note day the «Память» tab should focus on. */
+  const [memoryFocusDate, setMemoryFocusDate] = useState<string | null>(null);
   const [sections, setSections] = useState<Sections>(emptySections);
   const [copied, setCopied] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -430,6 +434,7 @@ export function ChatInfoPanel({
     { id: "links", label: "Ссылки" },
     { id: "polls", label: "Опросы" },
     { id: "logs", label: "Логи" },
+    { id: "timeline", label: "Хроника" },
   ];
   if (similar && similar.length > 0) {
     tabs.push({ id: "similar", label: "Похожие" });
@@ -545,7 +550,10 @@ export function ChatInfoPanel({
               type="button"
               role="tab"
               aria-selected={tab === item.id}
-              onClick={() => setTab(item.id)}
+              onClick={() => {
+                if (item.id !== "memory") setMemoryFocusDate(null);
+                setTab(item.id);
+              }}
               className={`shrink-0 rounded-md px-2.5 py-1 text-xs transition-colors ${
                 tab === item.id
                   ? "bg-sky-500/15 font-medium text-sky-300"
@@ -570,6 +578,10 @@ export function ChatInfoPanel({
                 accountId={accountId}
                 chatId={chatId}
                 threadId={threadId}
+                onOpenMemory={(date) => {
+                  setMemoryFocusDate(date);
+                  setTab("memory");
+                }}
               />
               <OverviewTab
                 info={info}
@@ -599,6 +611,7 @@ export function ChatInfoPanel({
               accountId={accountId}
               chatId={chatId}
               threadId={threadId}
+              focusDate={memoryFocusDate}
             />
           )}
 
@@ -633,6 +646,14 @@ export function ChatInfoPanel({
 
           {tab === "logs" && (
             <ChatLogsTab
+              accountId={accountId}
+              chatId={chatId}
+              threadId={threadId}
+            />
+          )}
+
+          {tab === "timeline" && (
+            <ChatTimelineTab
               accountId={accountId}
               chatId={chatId}
               threadId={threadId}

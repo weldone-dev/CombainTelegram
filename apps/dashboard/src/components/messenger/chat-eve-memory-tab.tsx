@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PersonaMemoryCard } from "../../app/eve/persona-memory-card";
 import {
   type ChatPersonaMatch,
@@ -24,15 +24,24 @@ export function ChatEveMemoryTab({
   accountId,
   chatId,
   threadId = 0,
+  focusDate = null,
 }: {
   accountId: string;
   chatId: number;
   threadId?: number;
+  /** `YYYY-MM-DD` clicked in a relationship note; filters memory previews. */
+  focusDate?: string | null;
 }) {
   const chatIdText = String(chatId);
   const [preferredPersonaId, setPreferredPersonaId] = useState<string | null>(
     null,
   );
+  // The card can drop the filter without telling the drawer; keep it local so
+  // «Сбросить» works while the panel still remembers the clicked day.
+  const [focus, setFocus] = useState<string | null>(focusDate ?? null);
+  useEffect(() => {
+    setFocus(focusDate ?? null);
+  }, [focusDate]);
 
   const matches = useCachedResource<ChatPersonaMatch[]>(
     `eve-chat-matches:${accountId}:${chatIdText}:${threadId}`,
@@ -98,7 +107,11 @@ export function ChatEveMemoryTab({
           </select>
         </label>
       )}
-      <PersonaMemoryCard personaId={active.persona.id} />
+      <PersonaMemoryCard
+        personaId={active.persona.id}
+        focusDate={focus}
+        onClearFocus={() => setFocus(null)}
+      />
     </div>
   );
 }

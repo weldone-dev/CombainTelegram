@@ -108,7 +108,7 @@ Soul/autopilot/provider/MCP/bot/automation layer and its tables are removed.
 - [x] Turn loop in `apps/eve` (Eve 1.5.0) over an OpenAI-compatible endpoint
       (`AI_BASE_URL`/`AI_MODEL`/`AI_FAST_MODEL`/`AI_API_KEY`); outward actions
       go through Nest (`/internal/eve/*`, `EVE_TOKEN`).
-- [x] Dry run (`EVE_DRY_RUN*`): a full turn with no Telegram delivery.
+- [x] Dry run (per-turn `dryRun`, global `EVE_DRY_RUN` kill-switch): a full turn with no Telegram delivery.
 - [x] Durable events (`EveEvent`), delayed turns (`EveDelayedAction`), dedupe.
 - [x] Dashboard `/eve`: personas, bindings, allowlists, memory tab.
 - [x] Speech-to-text: `SpeechService` (messaging layer), env-only `STT_*` —

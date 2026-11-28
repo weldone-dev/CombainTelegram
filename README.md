@@ -92,7 +92,8 @@ EVE_TOKEN=
 ```
 
 Open <http://localhost:4000/eve> to create a persona, bind Telegram accounts and
-allow chats. `EVE_DRY_RUN=true` runs a full turn without any Telegram delivery.
+allow chats. Test turns run with `dryRun: true` and never reach Telegram; real
+messages stay live. `EVE_DRY_RUN=true` is only a global kill-switch.
 Details: [`docs/eve/README.md`](docs/eve/README.md).
 
 Speech-to-text for voice notes is env-only (`STT_BASE_URL`, `STT_MODEL`,
